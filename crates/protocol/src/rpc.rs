@@ -3,7 +3,7 @@
 //! See <https://www.jsonrpc.org/specification>.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 /// Always `"2.0"` per the JSON-RPC 2.0 spec.
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -87,6 +87,7 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn request_with_number_id_roundtrips() {
@@ -119,8 +120,7 @@ mod tests {
         // contain its own `"id"` key, so parse the reserialized object and
         // assert the key is missing rather than grepping the raw string.
         let reserialized = serde_json::to_string(&req).unwrap();
-        let as_obj: serde_json::Map<String, Value> =
-            serde_json::from_str(&reserialized).unwrap();
+        let as_obj: serde_json::Map<String, Value> = serde_json::from_str(&reserialized).unwrap();
         assert!(!as_obj.contains_key("id"));
     }
 
