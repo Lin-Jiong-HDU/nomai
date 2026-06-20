@@ -31,10 +31,7 @@ impl OpenAiCompatibleLlm {
 
 #[async_trait]
 impl LlmProvider for OpenAiCompatibleLlm {
-    async fn complete(
-        &self,
-        req: CompletionRequest,
-    ) -> Result<CompletionResponse, ProviderError> {
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         let mut messages: Vec<serde_json::Value> = Vec::with_capacity(req.messages.len() + 1);
         if let Some(system) = req.system {
             messages.push(serde_json::json!({"role": "system", "content": system}));
@@ -316,11 +313,7 @@ mod tests {
     #[tokio::test]
     async fn complete_maps_connection_failure_to_network() {
         // Point at a port that's not listening — reqwest returns a connection error.
-        let llm = OpenAiCompatibleLlm::new(
-            "http://127.0.0.1:1",
-            "test-key",
-            "gpt-4o-mini",
-        );
+        let llm = OpenAiCompatibleLlm::new("http://127.0.0.1:1", "test-key", "gpt-4o-mini");
         let err = llm
             .complete(CompletionRequest {
                 system: None,
@@ -384,10 +377,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = embed(server.uri())
-            .embed(&["x"])
-            .await
-            .unwrap_err();
+        let err = embed(server.uri()).embed(&["x"]).await.unwrap_err();
         assert_eq!(err.kind, ProviderErrorKind::Auth);
     }
 

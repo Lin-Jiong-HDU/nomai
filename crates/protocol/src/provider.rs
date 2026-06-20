@@ -40,11 +40,7 @@ pub struct ProviderError {
 }
 
 impl ProviderError {
-    pub fn new(
-        kind: ProviderErrorKind,
-        message: impl Into<String>,
-        status: Option<u16>,
-    ) -> Self {
+    pub fn new(kind: ProviderErrorKind, message: impl Into<String>, status: Option<u16>) -> Self {
         Self {
             kind,
             message: message.into(),
@@ -67,20 +63,12 @@ mod tests {
 
     #[test]
     fn error_serializes_with_optional_status() {
-        let with_status = ProviderError::new(
-            ProviderErrorKind::Auth,
-            "bad key",
-            Some(401),
-        );
+        let with_status = ProviderError::new(ProviderErrorKind::Auth, "bad key", Some(401));
         let s = serde_json::to_string(&with_status).unwrap();
         assert!(s.contains(r#""kind":"auth""#));
         assert!(s.contains(r#""status":401"#));
 
-        let no_status = ProviderError::new(
-            ProviderErrorKind::Network,
-            "timeout",
-            None,
-        );
+        let no_status = ProviderError::new(ProviderErrorKind::Network, "timeout", None);
         let s = serde_json::to_string(&no_status).unwrap();
         assert!(!s.contains(r#""status""#));
     }

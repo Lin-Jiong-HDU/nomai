@@ -33,7 +33,10 @@ mod tests {
     fn not_found_displays_ulid() {
         let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
         let err = CoreError::NotFound(id);
-        assert_eq!(err.to_string(), "entry not found: 01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(
+            err.to_string(),
+            "entry not found: 01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        );
     }
 
     #[test]

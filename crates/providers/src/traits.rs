@@ -19,6 +19,9 @@ pub trait EmbeddingProvider: Send + Sync {
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    async fn complete(&self, req: CompletionRequest) -> Result<crate::types::CompletionResponse, ProviderError>;
+    async fn complete(
+        &self,
+        req: CompletionRequest,
+    ) -> Result<crate::types::CompletionResponse, ProviderError>;
     fn name(&self) -> &str;
 }
