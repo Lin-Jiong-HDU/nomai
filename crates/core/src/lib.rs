@@ -7,4 +7,4 @@ pub mod storage;
 
 pub use error::CoreError;
 pub use model::Entry;
-pub use service::EntryService;
+pub use service::{CreateEntry, EntryService};
