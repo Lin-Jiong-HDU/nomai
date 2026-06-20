@@ -5,6 +5,8 @@
 
 pub mod error;
 pub mod method;
+pub mod provider;
 pub mod rpc;
 
-pub use rpc::{Id, JSONRPC_VERSION, Request, Response, RpcError};
+pub use provider::{ProviderError, ProviderErrorKind};
+pub use rpc::{Id, Request, Response, RpcError, JSONRPC_VERSION};
