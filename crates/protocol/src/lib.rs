@@ -3,6 +3,7 @@
 //! This crate has no internal dependencies and contains no logic — only
 //! types, constants, and serde derives.
 
+pub mod error;
 pub mod rpc;
 
 pub use rpc::{Id, Request, Response, RpcError, JSONRPC_VERSION};
