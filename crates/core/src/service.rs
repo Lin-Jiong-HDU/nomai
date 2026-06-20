@@ -90,6 +90,12 @@ pub struct FulltextSearchResult {
     pub score: f32,
 }
 
+#[derive(Debug)]
+pub struct SemanticSearchResult {
+    pub entry: Entry,
+    pub score: f32,
+}
+
 impl EntryService {
     /// Take ownership of a connection and run pending migrations.
     pub fn new(conn: Connection) -> Result<Self, CoreError> {
@@ -272,6 +278,91 @@ impl EntryService {
             Ok(FulltextSearchResult {
                 entry,
                 score: rank.abs() as f32,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(CoreError::Storage)
+    }
+
+    pub fn ensure_vec_embeddings(&self, dim: usize) -> Result<(), CoreError> {
+        let conn = self.conn.lock().unwrap();
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name='vec_embeddings'
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Ok(());
+        }
+        let sql = format!(
+            "CREATE VIRTUAL TABLE vec_embeddings USING vec0(
+                entry_id TEXT PRIMARY KEY,
+                embedding float[{dim}] distance_metric=cosine
+            )"
+        );
+        conn.execute_batch(&sql)?;
+        Ok(())
+    }
+
+    pub fn write_embedding(&self, id: Ulid, embedding: &[f32]) -> Result<(), CoreError> {
+        let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let id_str = id.to_string();
+        let conn = self.conn.lock().unwrap();
+        // sqlite-vec's vec0 virtual table does not support INSERT OR REPLACE
+        // (see https://github.com/asg017/sqlite-vec/issues/259). Emulate the
+        // upsert with a DELETE-then-INSERT inside a transaction so the
+        // operation is atomic and re-inserting the same id replaces the row.
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute(
+                "DELETE FROM vec_embeddings WHERE entry_id = ?1",
+                params![&id_str],
+            )?;
+            conn.execute(
+                "INSERT INTO vec_embeddings (entry_id, embedding) VALUES (?1, ?2)",
+                params![&id_str, &bytes],
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                // Best-effort rollback; ignore rollback failure to surface the
+                // original error.
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(CoreError::Storage(e))
+            }
+        }
+    }
+
+    pub fn semantic_search(
+        &self,
+        query: &[f32],
+        limit: u32,
+    ) -> Result<Vec<SemanticSearchResult>, CoreError> {
+        let bytes: Vec<u8> = query.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.title, e.body, e.tags, e.attrs, e.source, e.created_at, e.updated_at,
+                    v.distance
+             FROM vec_embeddings v
+             JOIN entries e ON e.id = v.entry_id
+             WHERE v.embedding MATCH ?1
+               AND k = ?2
+             ORDER BY v.distance",
+        )?;
+        let rows = stmt.query_map(params![bytes, limit], |row| {
+            let entry = row_to_entry(row)?;
+            let distance: f64 = row.get(8)?;
+            Ok(SemanticSearchResult {
+                entry,
+                score: (1.0 - distance) as f32,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -636,5 +727,94 @@ mod tests {
 
         let hits = svc.fulltext_search("needle", 10).unwrap();
         assert!(hits.iter().all(|h| h.entry.id != id));
+    }
+
+    // vec0 virtual tables require sqlite-vec to be auto-registered before the
+    // in-memory connection is opened. `for_test()` does not do this itself.
+
+    #[test]
+    fn ensure_vec_embeddings_is_idempotent() {
+        storage::init_sqlite_extensions();
+        let svc = EntryService::for_test().unwrap();
+        svc.ensure_vec_embeddings(4).unwrap();
+        svc.ensure_vec_embeddings(4).unwrap();
+        // Sanity: insert should work.
+        let entry = svc
+            .create(CreateEntry {
+                title: "t".into(),
+                body: "b".into(),
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+        svc.write_embedding(entry.id, &[0.1, 0.2, 0.3, 0.4])
+            .unwrap();
+    }
+
+    #[test]
+    fn write_embedding_upserts() {
+        storage::init_sqlite_extensions();
+        let svc = EntryService::for_test().unwrap();
+        svc.ensure_vec_embeddings(2).unwrap();
+        let e = svc
+            .create(CreateEntry {
+                title: "t".into(),
+                body: "b".into(),
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+        svc.write_embedding(e.id, &[1.0, 0.0]).unwrap();
+        // Second write replaces, not duplicates.
+        svc.write_embedding(e.id, &[0.0, 1.0]).unwrap();
+
+        let hits = svc.semantic_search(&[0.0, 1.0], 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry.id, e.id);
+    }
+
+    #[test]
+    fn semantic_search_ranks_by_cosine_similarity() {
+        storage::init_sqlite_extensions();
+        let svc = EntryService::for_test().unwrap();
+        svc.ensure_vec_embeddings(3).unwrap();
+
+        let a = svc
+            .create(CreateEntry {
+                title: "a".into(),
+                body: "near".into(),
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+        let b = svc
+            .create(CreateEntry {
+                title: "b".into(),
+                body: "far".into(),
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+        svc.write_embedding(a.id, &[1.0, 0.0, 0.0]).unwrap();
+        svc.write_embedding(b.id, &[0.0, 0.0, 1.0]).unwrap();
+
+        // Query close to A.
+        let hits = svc.semantic_search(&[0.9, 0.1, 0.0], 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].entry.id, a.id, "a should rank first");
+        assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn semantic_search_returns_empty_when_no_embeddings() {
+        storage::init_sqlite_extensions();
+        let svc = EntryService::for_test().unwrap();
+        svc.ensure_vec_embeddings(2).unwrap();
+        let hits = svc.semantic_search(&[1.0, 0.0], 10).unwrap();
+        assert!(hits.is_empty());
     }
 }
