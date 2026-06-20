@@ -8,5 +8,6 @@ pub mod storage;
 pub use error::CoreError;
 pub use model::Entry;
 pub use service::{
-    CreateEntry, EntryListQuery, EntryListResult, EntryService, ListOrder, UpdateEntry,
+    CreateEntry, EntryListQuery, EntryListResult, EntryService, FulltextSearchResult, ListOrder,
+    UpdateEntry,
 };

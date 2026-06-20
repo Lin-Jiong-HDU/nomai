@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::Deserialize;
 use serde_json::Value;
 use ulid::Ulid;
@@ -84,6 +84,12 @@ pub struct EntryListResult {
     pub total: u64,
 }
 
+#[derive(Debug)]
+pub struct FulltextSearchResult {
+    pub entry: Entry,
+    pub score: f32,
+}
+
 impl EntryService {
     /// Take ownership of a connection and run pending migrations.
     pub fn new(conn: Connection) -> Result<Self, CoreError> {
@@ -95,7 +101,9 @@ impl EntryService {
     }
 
     pub fn create(&self, params: CreateEntry) -> Result<Entry, CoreError> {
-        let attrs = params.attrs.unwrap_or_else(|| Value::Object(Default::default()));
+        let attrs = params
+            .attrs
+            .unwrap_or_else(|| Value::Object(Default::default()));
         if !attrs.is_object() {
             return Err(CoreError::Validation("attrs must be a JSON object".into()));
         }
@@ -242,6 +250,34 @@ impl EntryService {
         Ok(EntryListResult { items, total })
     }
 
+    pub fn fulltext_search(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<FulltextSearchResult>, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.title, e.body, e.tags, e.attrs, e.source, e.created_at, e.updated_at,
+                    bm25(fts_entries) AS rank
+             FROM fts_entries
+             JOIN entries e ON e.id = fts_entries.entry_id
+             WHERE fts_entries MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![query, limit], |row| {
+            let entry = row_to_entry(row)?;
+            // bm25 returns negative scores (closer to 0 = better match).
+            let rank: f64 = row.get(8)?;
+            Ok(FulltextSearchResult {
+                entry,
+                score: rank.abs() as f32,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(CoreError::Storage)
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test() -> Result<Self, CoreError> {
         Self::new(Connection::open_in_memory()?)
@@ -261,10 +297,10 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
     let id = from_text(0, &id_str, Ulid::from_string)?;
     let tags: Vec<String> = from_text(3, &tags_json, |s| serde_json::from_str(s))?;
     let attrs: Value = from_text(4, &attrs_json, |s| serde_json::from_str(s))?;
-    let created_at = from_text(6, &created_at_str, chrono::DateTime::parse_from_rfc3339)?
-        .with_timezone(&Utc);
-    let updated_at = from_text(7, &updated_at_str, chrono::DateTime::parse_from_rfc3339)?
-        .with_timezone(&Utc);
+    let created_at =
+        from_text(6, &created_at_str, chrono::DateTime::parse_from_rfc3339)?.with_timezone(&Utc);
+    let updated_at =
+        from_text(7, &updated_at_str, chrono::DateTime::parse_from_rfc3339)?.with_timezone(&Utc);
 
     Ok(Entry {
         id,
@@ -490,7 +526,10 @@ mod tests {
     fn delete_returns_not_found_for_unknown_id() {
         let svc = EntryService::for_test().unwrap();
         let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
-        assert!(matches!(svc.delete(id).unwrap_err(), CoreError::NotFound(_)));
+        assert!(matches!(
+            svc.delete(id).unwrap_err(),
+            CoreError::NotFound(_)
+        ));
     }
 
     #[test]
@@ -538,5 +577,64 @@ mod tests {
             .unwrap();
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.total, 2);
+    }
+
+    // `FulltextSearchResult` is brought into scope via the `use super::*;`
+    // glob at the top of `tests`; an explicit `use crate::service::...`
+    // would trip `-D warnings` as unused.
+
+    #[test]
+    fn fulltext_returns_relevant_entries_ranked() {
+        let svc = EntryService::for_test().unwrap();
+        svc.create(CreateEntry {
+            title: "Rust guide".into(),
+            body: "Learn rust programming language".into(),
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+        svc.create(CreateEntry {
+            title: "Cooking".into(),
+            body: "How to bake bread".into(),
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+
+        let hits = svc.fulltext_search("rust", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry.title, "Rust guide");
+        assert!(hits[0].score > 0.0);
+    }
+
+    #[test]
+    fn fulltext_returns_empty_when_no_match() {
+        let svc = EntryService::for_test().unwrap();
+        seed(&svc, "t", vec![]);
+        let hits = svc.fulltext_search("nonexistentterm12345", 10).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn delete_removes_entry_and_cascades_fts() {
+        // Deferred from Task 4 — requires fulltext_search to verify FTS cleanup.
+        let svc = EntryService::for_test().unwrap();
+        let e = seed(&svc, "t", vec![]);
+        svc.create(CreateEntry {
+            title: "title".into(),
+            body: "needle in haystack".into(),
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+        let id = e.id;
+        svc.delete(id).unwrap();
+        assert!(svc.get(id).is_err());
+
+        let hits = svc.fulltext_search("needle", 10).unwrap();
+        assert!(hits.iter().all(|h| h.entry.id != id));
     }
 }
