@@ -6,10 +6,9 @@ use nomai_core::storage;
 
 mod config;
 mod daemon;
-// modules below are added in later tasks; only declare what exists.
-// mod handlers;  // Task 5+
-// mod rpc;       // Task 5+
-// mod io;        // Task 5+
+mod handlers;
+mod io;
+mod rpc;
 
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();

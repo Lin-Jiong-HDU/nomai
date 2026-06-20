@@ -9,7 +9,6 @@ use nomai_providers::{EmbeddingProvider, LlmProvider, OpenAiCompatibleEmbed, Ope
 
 use crate::config::Config;
 
-#[allow(dead_code)] // fields wired in Task 5 (run_stdio) and exercised by integration tests.
 pub struct Daemon {
     pub(crate) entries: Arc<EntryService>,
     pub(crate) embedder: Arc<dyn EmbeddingProvider>,
@@ -59,7 +58,6 @@ impl Daemon {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)] // exercised by integration tests added in later tasks.
     pub(crate) fn for_test(
         entries: Arc<EntryService>,
         embedder: Arc<dyn EmbeddingProvider>,
@@ -80,9 +78,73 @@ impl Daemon {
 
     /// Run the NDJSON-over-stdio JSON-RPC loop. Stub in Task 4; full impl in Task 5.
     pub async fn run_stdio(self) -> Result<(), CoreError> {
-        // Task 5 implements this; for now just signal clean shutdown.
-        let _ = self;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let stdin = tokio::io::stdin();
+        let mut reader = BufReader::new(stdin);
+        let daemon = Arc::new(self);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
+                .await
+                .map_err(|e| CoreError::Config(format!("stdin read: {e}")))?;
+            if n == 0 {
+                break; // EOF
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Parse JSON-RPC request.
+            let req: nomai_protocol::Request = match serde_json::from_str(trimmed) {
+                Ok(r) => r,
+                Err(e) => {
+                    // Parse error — no reliable id; respond with id=null.
+                    let resp = nomai_protocol::Response::err(
+                        None,
+                        nomai_protocol::RpcError {
+                            code: nomai_protocol::error::PARSE_ERROR,
+                            message: nomai_protocol::error::MESSAGE_PARSE_ERROR.into(),
+                            data: Some(serde_json::Value::String(e.to_string())),
+                        },
+                    );
+                    let _ = crate::io::write_response_line(&resp);
+                    continue;
+                }
+            };
+
+            let is_notification = req.id.is_none();
+            let resp = daemon.dispatch(req).await;
+            if !is_notification {
+                let _ = crate::io::write_response_line(&resp);
+            }
+        }
         Ok(())
+    }
+
+    pub async fn dispatch(&self, req: nomai_protocol::Request) -> nomai_protocol::Response {
+        use nomai_protocol::error::{MESSAGE_METHOD_NOT_FOUND, METHOD_NOT_FOUND};
+        use nomai_protocol::{Response, RpcError};
+
+        let id = req.id.clone();
+        match crate::handlers::route(self, req).await {
+            Ok(value) => Response::ok(id, value),
+            Err(crate::rpc::DispatchError::Core(err)) => {
+                Response::err(id, crate::rpc::core_error_to_rpc(err))
+            }
+            Err(crate::rpc::DispatchError::MethodNotFound(method)) => Response::err(
+                id,
+                RpcError {
+                    code: METHOD_NOT_FOUND,
+                    message: MESSAGE_METHOD_NOT_FOUND.into(),
+                    data: Some(serde_json::json!({ "method": method })),
+                },
+            ),
+        }
     }
 }
 
