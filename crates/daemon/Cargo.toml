@@ -8,7 +8,20 @@ rust-version.workspace = true
 name = "nomai-daemon"
 path = "src/main.rs"
 
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
 nomai-protocol = { path = "../protocol" }
 nomai-core = { path = "../core" }
 nomai-providers = { path = "../providers" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "1"
+tokio = { version = "1", features = ["rt", "macros", "io-util", "sync"] }
+toml = "0.8"
+directories = "5"
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
