@@ -1,0 +1,8 @@
+[package]
+name = "nomai-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nomai-protocol = { path = "../protocol" }
