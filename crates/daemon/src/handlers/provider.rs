@@ -1,7 +1,20 @@
-use crate::daemon::Daemon;
-use nomai_core::CoreError;
-use serde_json::Value;
+//! provider.* handlers.
 
-pub async fn list(_daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
-    Err(CoreError::Config("not implemented".into()))
+use serde_json::{Value, json};
+
+use nomai_core::CoreError;
+
+use crate::daemon::Daemon;
+
+pub async fn list(daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
+    Ok(json!({
+        "embedding": {
+            "name": daemon.embedder.name(),
+            "model": daemon.embedding_model,
+        },
+        "llm": {
+            "name": daemon.llm.name(),
+            "model": daemon.llm_model,
+        }
+    }))
 }

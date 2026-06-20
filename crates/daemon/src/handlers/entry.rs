@@ -1,23 +1,118 @@
-//! entry.* handlers. Populated in Task 6.
+//! entry.* handlers. Embedding orchestration on create/update lives here
+//! (not in core) so core remains sync.
 
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{Value, json};
 
-use nomai_core::CoreError;
+use nomai_core::{CoreError, CreateEntry, EntryListQuery, UpdateEntry};
 
 use crate::daemon::Daemon;
 
-pub async fn create(_daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
-    Err(CoreError::Config("not implemented".into()))
+/// Wrap a sync closure as a spawn_blocking task, mapping JoinError to CoreError.
+///
+/// Returns a nested `Result<Result<T, CoreError>, CoreError>` so callers can use
+/// `??` to flatten both the join-error layer and the inner core-error layer.
+pub(crate) async fn blocking<F, T>(f: F) -> Result<Result<T, CoreError>, CoreError>
+where
+    F: FnOnce() -> Result<T, CoreError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| CoreError::Config(format!("blocking task join error: {e}")))
 }
-pub async fn get(_daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
-    Err(CoreError::Config("not implemented".into()))
+
+pub async fn create(daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
+    let input: CreateEntry = serde_json::from_value(params)
+        .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+
+    let entries = daemon.entries.clone();
+    let entry = blocking(move || entries.create(input)).await??;
+
+    // Trigger embedding if body is non-empty.
+    if !entry.body.is_empty() {
+        let body = entry.body.clone();
+        let embeddings = daemon.embedder.embed(&[&body]).await?;
+        if let Some(emb) = embeddings.into_iter().next() {
+            let entries = daemon.entries.clone();
+            let id = entry.id;
+            blocking(move || entries.write_embedding(id, &emb)).await??;
+        }
+    }
+
+    serde_json::to_value(&entry).map_err(|e| CoreError::Config(format!("serialize: {e}")))
 }
-pub async fn update(_daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
-    Err(CoreError::Config("not implemented".into()))
+
+pub async fn get(daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
+    #[derive(Deserialize)]
+    struct Params {
+        id: ulid::Ulid,
+    }
+    let p: Params = serde_json::from_value(params)
+        .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+
+    let entries = daemon.entries.clone();
+    let entry = blocking(move || entries.get(p.id)).await??;
+
+    serde_json::to_value(&entry).map_err(|e| CoreError::Config(format!("serialize: {e}")))
 }
-pub async fn delete(_daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
-    Err(CoreError::Config("not implemented".into()))
+
+pub async fn update(daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
+    #[derive(Deserialize)]
+    struct Params {
+        id: ulid::Ulid,
+        #[serde(flatten)]
+        fields: UpdateEntry,
+    }
+    let p: Params = serde_json::from_value(params)
+        .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+
+    // Snapshot current body to detect change.
+    let entries = daemon.entries.clone();
+    let id_for_get = p.id;
+    let old_body = blocking(move || entries.get(id_for_get)).await??.body;
+
+    let entries = daemon.entries.clone();
+    let id_for_update = p.id;
+    let fields = p.fields;
+    let updated = blocking(move || entries.update(id_for_update, fields)).await??;
+
+    // Re-embed if body changed.
+    if updated.body != old_body && !updated.body.is_empty() {
+        let body = updated.body.clone();
+        let embeddings = daemon.embedder.embed(&[&body]).await?;
+        if let Some(emb) = embeddings.into_iter().next() {
+            let entries = daemon.entries.clone();
+            let id = updated.id;
+            blocking(move || entries.write_embedding(id, &emb)).await??;
+        }
+    }
+
+    serde_json::to_value(&updated).map_err(|e| CoreError::Config(format!("serialize: {e}")))
 }
-pub async fn list(_daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
-    Err(CoreError::Config("not implemented".into()))
+
+pub async fn delete(daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
+    #[derive(Deserialize)]
+    struct Params {
+        id: ulid::Ulid,
+    }
+    let p: Params = serde_json::from_value(params)
+        .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+
+    let entries = daemon.entries.clone();
+    blocking(move || entries.delete(p.id)).await??;
+    Ok(json!({ "deleted": true }))
+}
+
+pub async fn list(daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
+    let query: EntryListQuery = serde_json::from_value(params)
+        .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+
+    let entries = daemon.entries.clone();
+    let result = blocking(move || entries.list(query)).await??;
+
+    Ok(json!({
+        "items": result.items,
+        "total": result.total,
+    }))
 }

@@ -15,6 +15,8 @@ pub struct Daemon {
     pub(crate) llm: Arc<dyn LlmProvider>,
     pub(crate) embedding_model: String,
     pub(crate) llm_model: String,
+    // Used by search.semantic (Task 7); keep despite no current reader.
+    #[expect(dead_code)]
     pub(crate) embedding_dim: usize,
 }
 
@@ -58,6 +60,7 @@ impl Daemon {
     }
 
     #[cfg(test)]
+    #[expect(dead_code)]
     pub(crate) fn for_test(
         entries: Arc<EntryService>,
         embedder: Arc<dyn EmbeddingProvider>,
