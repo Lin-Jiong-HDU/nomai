@@ -27,6 +27,63 @@ pub struct CreateEntry {
     pub source: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct UpdateEntry {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub attrs: Option<Value>,
+    #[serde(default, with = "::serde_with::rust::double_option")]
+    pub source: Option<Option<String>>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListOrder {
+    #[default]
+    CreatedDesc,
+    CreatedAsc,
+    UpdatedDesc,
+    UpdatedAsc,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EntryListQuery {
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default = "default_limit")]
+    pub limit: u32,
+    #[serde(default)]
+    pub offset: u32,
+    #[serde(default)]
+    pub order: ListOrder,
+}
+
+fn default_limit() -> u32 {
+    50
+}
+
+impl Default for EntryListQuery {
+    fn default() -> Self {
+        Self {
+            tag: None,
+            limit: default_limit(),
+            offset: 0,
+            order: ListOrder::default(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct EntryListResult {
+    pub items: Vec<Entry>,
+    pub total: u64,
+}
+
 impl EntryService {
     /// Take ownership of a connection and run pending migrations.
     pub fn new(conn: Connection) -> Result<Self, CoreError> {
@@ -86,6 +143,103 @@ impl EntryService {
             Err(rusqlite::Error::QueryReturnedNoRows) => Err(CoreError::NotFound(id)),
             Err(e) => Err(CoreError::Storage(e)),
         }
+    }
+
+    pub fn update(&self, id: Ulid, params: UpdateEntry) -> Result<Entry, CoreError> {
+        let existing = self.get(id)?;
+
+        let attrs = match params.attrs {
+            Some(a) if !a.is_object() => {
+                return Err(CoreError::Validation("attrs must be a JSON object".into()));
+            }
+            Some(a) => a,
+            None => existing.attrs,
+        };
+        let title = params.title.unwrap_or(existing.title);
+        let body = params.body.unwrap_or(existing.body);
+        let tags = params.tags.unwrap_or(existing.tags);
+        let source = match params.source {
+            Some(s) => s,
+            None => existing.source,
+        };
+        let updated_at = Utc::now();
+
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE entries SET title=?1, body=?2, tags=?3, attrs=?4, source=?5, updated_at=?6
+             WHERE id=?7",
+            params![
+                &title,
+                &body,
+                serde_json::to_string(&tags).expect("tags serialize"),
+                attrs.to_string(),
+                &source,
+                updated_at.to_rfc3339(),
+                id.to_string(),
+            ],
+        )?;
+        drop(conn);
+
+        // Return the row as stored (canonical view).
+        self.get(id)
+    }
+
+    pub fn delete(&self, id: Ulid) -> Result<(), CoreError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute("DELETE FROM entries WHERE id=?1", params![id.to_string()])?;
+        if affected == 0 {
+            Err(CoreError::NotFound(id))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn list(&self, query: EntryListQuery) -> Result<EntryListResult, CoreError> {
+        let order_clause = match query.order {
+            ListOrder::CreatedDesc => "created_at DESC",
+            ListOrder::CreatedAsc => "created_at ASC",
+            ListOrder::UpdatedDesc => "updated_at DESC",
+            ListOrder::UpdatedAsc => "updated_at ASC",
+        };
+
+        let conn = self.conn.lock().unwrap();
+
+        let items: Vec<Entry> = if let Some(tag) = &query.tag {
+            let sql = format!(
+                "SELECT e.id, e.title, e.body, e.tags, e.attrs, e.source, e.created_at, e.updated_at
+                 FROM entries e, json_each(e.tags) AS t
+                 WHERE t.value = ?1
+                 ORDER BY e.{order_clause}
+                 LIMIT ?2 OFFSET ?3"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![tag, query.limit, query.offset], row_to_entry)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            let sql = format!(
+                "SELECT id, title, body, tags, attrs, source, created_at, updated_at
+                 FROM entries
+                 ORDER BY {order_clause}
+                 LIMIT ?1 OFFSET ?2"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![query.limit, query.offset], row_to_entry)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let total: u64 = if let Some(tag) = &query.tag {
+            conn.query_row(
+                "SELECT COUNT(*) FROM entries e, json_each(e.tags) AS t WHERE t.value = ?1",
+                params![tag],
+                |row| row.get::<_, i64>(0),
+            )? as u64
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM entries", [], |row| {
+                row.get::<_, i64>(0)
+            })? as u64
+        };
+
+        Ok(EntryListResult { items, total })
     }
 
     #[cfg(test)]
@@ -223,5 +377,166 @@ mod tests {
         let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
         let err = svc.get(id).unwrap_err();
         assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    use crate::service::{EntryListQuery, ListOrder, UpdateEntry};
+
+    fn seed(svc: &EntryService, title: &str, tags: Vec<&str>) -> Entry {
+        svc.create(CreateEntry {
+            title: title.into(),
+            body: format!("body of {title}"),
+            tags: Some(tags.into_iter().map(String::from).collect()),
+            attrs: None,
+            source: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn update_changes_provided_fields_and_bumps_updated_at() {
+        let svc = EntryService::for_test().unwrap();
+        let created = seed(&svc, "orig", vec![]);
+        // sleep tiny amount so updated_at strictly > created_at when serialized
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let updated = svc
+            .update(
+                created.id,
+                UpdateEntry {
+                    title: Some("new".into()),
+                    body: None,
+                    tags: Some(vec!["x".into()]),
+                    attrs: Some(json!({"k2": "v2"})),
+                    source: Some(Some("src".into())),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(updated.title, "new");
+        assert_eq!(updated.body, "body of orig"); // unchanged
+        assert_eq!(updated.tags, vec!["x".to_string()]);
+        assert_eq!(updated.attrs, json!({"k2": "v2"}));
+        assert_eq!(updated.source.as_deref(), Some("src"));
+        assert!(updated.updated_at > created.updated_at);
+        assert_eq!(updated.created_at, created.created_at);
+    }
+
+    #[test]
+    fn update_can_clear_source_to_null() {
+        let svc = EntryService::for_test().unwrap();
+        let created = svc
+            .create(CreateEntry {
+                title: "t".into(),
+                body: "b".into(),
+                tags: None,
+                attrs: None,
+                source: Some("orig".into()),
+            })
+            .unwrap();
+        let updated = svc
+            .update(
+                created.id,
+                UpdateEntry {
+                    title: None,
+                    body: None,
+                    tags: None,
+                    attrs: None,
+                    source: Some(None),
+                },
+            )
+            .unwrap();
+        assert!(updated.source.is_none());
+    }
+
+    #[test]
+    fn update_rejects_non_object_attrs() {
+        let svc = EntryService::for_test().unwrap();
+        let created = seed(&svc, "t", vec![]);
+        let err = svc
+            .update(
+                created.id,
+                UpdateEntry {
+                    title: None,
+                    body: None,
+                    tags: None,
+                    attrs: Some(json!([1, 2])),
+                    source: None,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Validation(_)));
+    }
+
+    #[test]
+    fn update_returns_not_found_for_unknown_id() {
+        let svc = EntryService::for_test().unwrap();
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let err = svc
+            .update(
+                id,
+                UpdateEntry {
+                    title: None,
+                    body: None,
+                    tags: None,
+                    attrs: None,
+                    source: None,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn delete_returns_not_found_for_unknown_id() {
+        let svc = EntryService::for_test().unwrap();
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        assert!(matches!(svc.delete(id).unwrap_err(), CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn list_returns_all_entries_paginated() {
+        let svc = EntryService::for_test().unwrap();
+        for i in 0..5 {
+            seed(&svc, &format!("e{i}"), vec![]);
+        }
+        let page1 = svc
+            .list(EntryListQuery {
+                tag: None,
+                limit: 2,
+                offset: 0,
+                order: ListOrder::CreatedAsc,
+            })
+            .unwrap();
+        assert_eq!(page1.items.len(), 2);
+        assert_eq!(page1.total, 5);
+
+        let page2 = svc
+            .list(EntryListQuery {
+                tag: None,
+                limit: 2,
+                offset: 2,
+                order: ListOrder::CreatedAsc,
+            })
+            .unwrap();
+        assert_eq!(page2.items.len(), 2);
+        assert_ne!(page1.items[0].id, page2.items[0].id);
+    }
+
+    #[test]
+    fn list_filters_by_tag() {
+        let svc = EntryService::for_test().unwrap();
+        seed(&svc, "a", vec!["red"]);
+        seed(&svc, "b", vec!["blue"]);
+        seed(&svc, "c", vec!["red", "blue"]);
+        let result = svc
+            .list(EntryListQuery {
+                tag: Some("red".into()),
+                limit: 50,
+                offset: 0,
+                order: ListOrder::CreatedAsc,
+            })
+            .unwrap();
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.total, 2);
     }
 }
