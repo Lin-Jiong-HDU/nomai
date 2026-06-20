@@ -4,6 +4,7 @@
 //! types, constants, and serde derives.
 
 pub mod error;
+pub mod method;
 pub mod rpc;
 
 pub use rpc::{Id, Request, Response, RpcError, JSONRPC_VERSION};
