@@ -14,3 +14,4 @@ refinery = { version = "0.8", features = ["rusqlite"] }
 ulid = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
+sqlite-vec = "0.1"
