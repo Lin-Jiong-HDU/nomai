@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 
 use crate::error::{ProviderError, ProviderErrorKind};
-use crate::traits::LlmProvider;
+use crate::traits::{EmbeddingProvider, LlmProvider};
 use crate::types::{CompletionRequest, CompletionResponse, MessageRole};
 
 pub struct OpenAiCompatibleLlm {
@@ -110,8 +110,93 @@ async fn map_status_error(status: reqwest::StatusCode, resp: reqwest::Response) 
     ProviderError::new(kind, format!("HTTP {code}: {body}"), Some(code))
 }
 
-/// Stub — replaced with a concrete struct in Task 4.
-pub enum OpenAiCompatibleEmbed {}
+pub struct OpenAiCompatibleEmbed {
+    client: Client,
+    base_url: String,
+    api_key: String,
+    model: String,
+    dim: usize,
+}
+
+impl OpenAiCompatibleEmbed {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        dim: usize,
+    ) -> Self {
+        Self {
+            client: Client::new(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            api_key: api_key.into(),
+            model: model.into(),
+            dim,
+        }
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for OpenAiCompatibleEmbed {
+    async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, ProviderError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let body = serde_json::json!({
+            "model": self.model,
+            "input": texts,
+        });
+
+        let url = format!("{}/embeddings", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(map_status_error(status, resp).await);
+        }
+
+        let json: serde_json::Value = resp.json().await.map_err(map_reqwest_error)?;
+        let data = json["data"].as_array().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Server,
+                "response missing data array",
+                None,
+            )
+        })?;
+
+        let mut out = Vec::with_capacity(data.len());
+        for item in data {
+            let arr = item["embedding"].as_array().ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::Server,
+                    "response item missing embedding",
+                    None,
+                )
+            })?;
+            let v: Vec<f32> = arr
+                .iter()
+                .map(|x| x.as_f64().unwrap_or(0.0) as f32)
+                .collect();
+            out.push(v);
+        }
+        Ok(out)
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    fn name(&self) -> &str {
+        "openai-compatible"
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -250,5 +335,65 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, ProviderErrorKind::Network);
         assert!(err.status.is_none());
+    }
+
+    use crate::traits::EmbeddingProvider;
+
+    fn embed(uri: String) -> OpenAiCompatibleEmbed {
+        OpenAiCompatibleEmbed::new(uri, "test-key", "text-embedding-3-small", 1536)
+    }
+
+    #[tokio::test]
+    async fn embed_returns_vectors_in_input_order() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    {"index": 0, "embedding": [0.1, 0.2, 0.3]},
+                    {"index": 1, "embedding": [0.4, 0.5, 0.6]}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let vecs = embed(server.uri())
+            .embed(&["first", "second"])
+            .await
+            .unwrap();
+        assert_eq!(vecs.len(), 2);
+        assert_eq!(vecs[0], vec![0.1_f32, 0.2, 0.3]);
+        assert_eq!(vecs[1], vec![0.4_f32, 0.5, 0.6]);
+    }
+
+    #[tokio::test]
+    async fn embed_empty_input_returns_empty_without_http() {
+        let server = MockServer::start().await;
+        // No mock mounted: if the impl hits the network, this test fails.
+        let vecs = embed(server.uri()).embed(&[]).await.unwrap();
+        assert!(vecs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn embed_maps_401_to_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let err = embed(server.uri())
+            .embed(&["x"])
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ProviderErrorKind::Auth);
+    }
+
+    #[tokio::test]
+    async fn embed_returns_dim_from_config() {
+        let e = embed("http://unused.example".into());
+        assert_eq!(e.dim(), 1536);
     }
 }
