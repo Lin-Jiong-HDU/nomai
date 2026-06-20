@@ -926,6 +926,7 @@ dependencies = [
  "nomai-core",
  "nomai-protocol",
  "nomai-providers",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
