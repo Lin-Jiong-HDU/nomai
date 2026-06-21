@@ -2,3 +2,6 @@
 *.rs.bk
 .worktrees/
 .claude/worktrees/
+
+# Local-only design docs and plans (not for the public repo)
+docs/superpowers/
