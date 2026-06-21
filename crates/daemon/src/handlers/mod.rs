@@ -307,7 +307,7 @@ mod tests {
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
 
-        // Seed two entries (embedding mock already mounted by setup_daemon).
+        // Seed two entries (embedding mock mounted by mount_embedding_mock above).
         let a_resp = daemon
             .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
             .await;
