@@ -10,7 +10,7 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 use ulid::Ulid;
 
-use crate::chunk_model::{Chunk, ChunkListResult, CreateChunk};
+use crate::chunk_model::{Chunk, ChunkListResult, ChunkSearchResult, CreateChunk};
 use crate::error::CoreError;
 use crate::storage;
 
@@ -279,6 +279,34 @@ impl ChunkService {
             params![id.to_string()],
         )?;
         Ok(())
+    }
+
+    pub fn semantic_search(
+        &self,
+        query: &[f32],
+        limit: u32,
+    ) -> Result<Vec<ChunkSearchResult>, CoreError> {
+        let bytes: Vec<u8> = query.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.entry_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
+                    v.distance
+             FROM vec_chunk_embeddings v
+             JOIN chunks c ON c.id = v.chunk_id
+             WHERE v.embedding MATCH ?1
+               AND k = ?2
+             ORDER BY v.distance",
+        )?;
+        let rows = stmt.query_map(params![bytes, limit], |row| {
+            let chunk = row_to_chunk(row)?;
+            let distance: f64 = row.get(7)?;
+            Ok(ChunkSearchResult {
+                chunk,
+                score: (1.0 - distance) as f32,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(CoreError::Storage)
     }
 }
 
@@ -733,5 +761,49 @@ mod tests {
             chunks.get(c2).unwrap_err(),
             CoreError::NotFound(_)
         ));
+    }
+
+    #[test]
+    fn semantic_search_ranks_chunks_by_cosine_similarity() {
+        crate::storage::init_sqlite_extensions();
+        let (_, chunks, entry_id) = setup_with_entry();
+        chunks.ensure_vec_chunk_embeddings(3).unwrap();
+
+        let near = seed_chunk(&chunks, entry_id, 0, "near");
+        let far = seed_chunk(&chunks, entry_id, 1, "far");
+        chunks.write_embedding(near, &[1.0, 0.0, 0.0]).unwrap();
+        chunks.write_embedding(far, &[0.0, 0.0, 1.0]).unwrap();
+
+        // Query close to near.
+        let hits = chunks.semantic_search(&[0.9, 0.1, 0.0], 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].chunk.id, near, "near should rank first");
+        assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn semantic_search_returns_empty_when_no_embeddings() {
+        crate::storage::init_sqlite_extensions();
+        let (_, chunks, entry_id) = setup_with_entry();
+        chunks.ensure_vec_chunk_embeddings(2).unwrap();
+        // Chunk exists but no embedding.
+        seed_chunk(&chunks, entry_id, 0, "x");
+
+        let hits = chunks.semantic_search(&[1.0, 0.0], 10).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn semantic_search_respects_limit() {
+        crate::storage::init_sqlite_extensions();
+        let (_, chunks, entry_id) = setup_with_entry();
+        chunks.ensure_vec_chunk_embeddings(2).unwrap();
+        for i in 0..5 {
+            let c = seed_chunk(&chunks, entry_id, i, &format!("c{i}"));
+            chunks.write_embedding(c, &[1.0, 0.0]).unwrap();
+        }
+
+        let hits = chunks.semantic_search(&[1.0, 0.0], 3).unwrap();
+        assert_eq!(hits.len(), 3);
     }
 }
