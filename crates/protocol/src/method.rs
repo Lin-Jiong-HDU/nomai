@@ -39,6 +39,12 @@ pub mod link {
     pub const TRAVERSE: &str = "link.traverse";
 }
 
+pub mod events {
+    pub const LIST: &str = "events.list";
+    pub const GET: &str = "events.get";
+    pub const PURGE: &str = "events.purge";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,5 +79,12 @@ mod tests {
         assert_eq!(link::DELETE, "link.delete");
         assert_eq!(link::LIST, "link.list");
         assert_eq!(link::NEIGHBORS, "link.neighbors");
+    }
+
+    #[test]
+    fn events_namespace_methods() {
+        assert_eq!(events::LIST, "events.list");
+        assert_eq!(events::GET, "events.get");
+        assert_eq!(events::PURGE, "events.purge");
     }
 }

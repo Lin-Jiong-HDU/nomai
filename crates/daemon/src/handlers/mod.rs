@@ -8,6 +8,7 @@ use crate::daemon::Daemon;
 use crate::rpc::DispatchError;
 
 pub mod entry;
+pub mod events;
 pub mod link;
 pub mod provider;
 pub mod qa;
@@ -26,6 +27,9 @@ pub async fn route(daemon: &Daemon, req: Request) -> Result<Value, DispatchError
         "link.delete" => link::delete(daemon, params).await,
         "link.list" => link::list(daemon, params).await,
         "link.neighbors" => link::neighbors(daemon, params).await,
+        "events.list" => events::list(daemon, params).await,
+        "events.get" => events::get(daemon, params).await,
+        "events.purge" => events::purge(daemon, params).await,
         "search.fulltext" => search::fulltext(daemon, params).await,
         "search.semantic" => search::semantic(daemon, params).await,
         "qa.ask" => qa::ask(daemon, params).await,
@@ -490,5 +494,195 @@ mod tests {
         let resp = daemon.dispatch(req("link.list", json!({}))).await;
         let err = resp.error.unwrap();
         assert_eq!(err.code, 1003);
+    }
+
+    // ----- events.* e2e tests (Plan 2 Task 3) -----
+
+    #[tokio::test]
+    async fn events_list_returns_entry_created_after_create() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"Note","body":"Hello"}),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+
+        let list_resp = daemon.dispatch(req("events.list", json!({}))).await;
+        assert!(list_resp.error.is_none(), "{:?}", list_resp.error);
+        let result = list_resp.result.unwrap();
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "entry.created");
+        assert_eq!(items[0]["target_type"], "entry");
+        assert_eq!(items[0]["payload"]["title"], "Note");
+    }
+
+    #[tokio::test]
+    async fn events_list_filters_by_type() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create + update → emits entry.created + entry.updated
+        let create_resp = daemon
+            .dispatch(req("entry.create", json!({"title":"orig","body":"x"})))
+            .await;
+        let id = create_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        daemon
+            .dispatch(req("entry.update", json!({"id": id, "title": "new"})))
+            .await;
+
+        let list_resp = daemon
+            .dispatch(req("events.list", json!({"type": "entry.updated"})))
+            .await;
+        let result = list_resp.result.unwrap();
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "entry.updated");
+        assert_eq!(items[0]["payload"]["title"], "new");
+    }
+
+    #[tokio::test]
+    async fn events_get_returns_event_by_id() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let _create_resp = daemon
+            .dispatch(req("entry.create", json!({"title":"X","body":"y"})))
+            .await;
+        // Get the event id from events.list
+        let list_resp = daemon.dispatch(req("events.list", json!({}))).await;
+        let event_id = list_resp.result.unwrap()["items"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let get_resp = daemon
+            .dispatch(req("events.get", json!({"id": event_id})))
+            .await;
+        assert!(get_resp.error.is_none());
+        assert_eq!(get_resp.result.unwrap()["type"], "entry.created");
+    }
+
+    #[tokio::test]
+    async fn events_get_returns_not_found_for_unknown_id() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req("events.get", json!({"id": phantom})))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1001);
+    }
+
+    #[tokio::test]
+    async fn events_purge_deletes_old_events() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create 3 entries → 3 events
+        daemon
+            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .await;
+        daemon
+            .dispatch(req("entry.create", json!({"title":"b","body":"x"})))
+            .await;
+        let _last_create = daemon
+            .dispatch(req("entry.create", json!({"title":"c","body":"x"})))
+            .await;
+
+        // Get all events; the last event_id is the boundary.
+        let list_resp = daemon.dispatch(req("events.list", json!({}))).await;
+        let result = list_resp.result.unwrap();
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        let last_event_id = items[2]["id"].as_str().unwrap().to_string();
+
+        // Purge events with id < last_event_id (exclusive).
+        let purge_resp = daemon
+            .dispatch(req("events.purge", json!({"before": last_event_id})))
+            .await;
+        assert_eq!(purge_resp.result.unwrap()["deleted"], 2);
+
+        // Verify only 1 event remains.
+        let list_resp2 = daemon.dispatch(req("events.list", json!({}))).await;
+        let result2 = list_resp2.result.unwrap();
+        let items2 = result2["items"].as_array().unwrap();
+        assert_eq!(items2.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn events_list_paginates_with_since_cursor() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create 3 entries
+        for i in 0..3 {
+            daemon
+                .dispatch(req(
+                    "entry.create",
+                    json!({"title": format!("e{i}"), "body": "x"}),
+                ))
+                .await;
+        }
+
+        // Page 1: limit=2
+        let p1 = daemon
+            .dispatch(req("events.list", json!({"limit": 2})))
+            .await;
+        let p1_result = p1.result.unwrap();
+        assert_eq!(p1_result["items"].as_array().unwrap().len(), 2);
+        assert_eq!(p1_result["has_more"], true);
+        let last_id = p1_result["items"][1]["id"].as_str().unwrap().to_string();
+
+        // Page 2: since = last_id from page 1
+        let p2 = daemon
+            .dispatch(req("events.list", json!({"limit": 2, "since": last_id})))
+            .await;
+        let p2_result = p2.result.unwrap();
+        assert_eq!(p2_result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(p2_result["has_more"], false);
+    }
+
+    #[tokio::test]
+    async fn link_create_emits_link_created_event() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let a = daemon
+            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .await;
+        let a_id = a.result.unwrap()["id"].as_str().unwrap().to_string();
+        let b = daemon
+            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .await;
+        let b_id = b.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        daemon
+            .dispatch(req(
+                "link.create",
+                json!({"source_id": a_id, "target_id": b_id, "relation": "r"}),
+            ))
+            .await;
+
+        let list_resp = daemon
+            .dispatch(req("events.list", json!({"type": "link.created"})))
+            .await;
+        let result = list_resp.result.unwrap();
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["target_type"], "link");
+        assert_eq!(items[0]["payload"]["relation"], "r");
     }
 }
