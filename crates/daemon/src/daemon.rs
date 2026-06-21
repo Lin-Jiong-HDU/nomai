@@ -4,13 +4,16 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
-use nomai_core::{CoreError, EntryService};
+use nomai_core::{CoreError, EntryService, LinkService};
 use nomai_providers::{EmbeddingProvider, LlmProvider, OpenAiCompatibleEmbed, OpenAiCompatibleLlm};
 
 use crate::config::Config;
 
 pub struct Daemon {
     pub(crate) entries: Arc<EntryService>,
+    // Used by link.* handlers (Task 3); keep despite no current reader.
+    #[allow(dead_code)]
+    pub(crate) links: Arc<LinkService>,
     pub(crate) embedder: Arc<dyn EmbeddingProvider>,
     pub(crate) llm: Arc<dyn LlmProvider>,
     pub(crate) embedding_model: String,
@@ -29,6 +32,7 @@ impl Daemon {
 
         // Run migrations + ensure vec_embeddings exists.
         let entries = Arc::new(EntryService::new(conn.clone())?);
+        let links = Arc::new(LinkService::new(conn.clone())?);
         entries.ensure_vec_embeddings(config.embedding.dim)?;
 
         // Read API keys (config.validate already checked env var presence).
@@ -52,6 +56,7 @@ impl Daemon {
 
         Ok(Self {
             entries,
+            links,
             embedder,
             llm,
             embedding_model: config.embedding.model,
@@ -69,8 +74,14 @@ impl Daemon {
         llm_model: String,
         embedding_dim: usize,
     ) -> Self {
+        // Reconstruct the shared connection from EntryService. Since
+        // EntryService holds Arc<Mutex<Connection>>, we expose a test-only
+        // accessor to share it with LinkService.
+        let conn = entries.conn_for_test();
+        let links = Arc::new(LinkService::new(conn).unwrap());
         Self {
             entries,
+            links,
             embedder,
             llm,
             embedding_model,
