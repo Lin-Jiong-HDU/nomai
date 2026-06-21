@@ -102,6 +102,73 @@ impl LinkService {
             }
         }
     }
+
+    /// Fetch a link by id. Returns `CoreError::NotFound` if no link has this id.
+    pub fn get(&self, id: Ulid) -> Result<Link, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        match conn.query_row(
+            "SELECT id, source_id, target_id, relation, attrs, created_at
+             FROM links WHERE id = ?1",
+            params![id.to_string()],
+            row_to_link,
+        ) {
+            Ok(link) => Ok(link),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(CoreError::NotFound(id)),
+            Err(e) => Err(CoreError::Storage(e)),
+        }
+    }
+
+    /// Delete a link by id. Returns `CoreError::NotFound` if no link has this id.
+    pub fn delete(&self, id: Ulid) -> Result<(), CoreError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "DELETE FROM links WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        if affected == 0 {
+            Err(CoreError::NotFound(id))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn row_to_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<Link> {
+    let id_str: String = row.get(0)?;
+    let source_str: String = row.get(1)?;
+    let target_str: String = row.get(2)?;
+    let relation: String = row.get(3)?;
+    let attrs_json: String = row.get(4)?;
+    let created_at_str: String = row.get(5)?;
+
+    let id = from_text(0, &id_str, Ulid::from_string)?;
+    let source_id = from_text(1, &source_str, Ulid::from_string)?;
+    let target_id = from_text(2, &target_str, Ulid::from_string)?;
+    let attrs: serde_json::Value = from_text(4, &attrs_json, |s| serde_json::from_str(s))?;
+    let created_at = from_text(5, &created_at_str, chrono::DateTime::parse_from_rfc3339)?
+        .with_timezone(&Utc);
+
+    Ok(Link {
+        id,
+        source_id,
+        target_id,
+        relation,
+        attrs,
+        created_at,
+    })
+}
+
+fn from_text<T, E>(
+    idx: usize,
+    s: &str,
+    f: impl for<'a> FnOnce(&'a str) -> Result<T, E>,
+) -> rusqlite::Result<T>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    f(s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, Box::new(e))
+    })
 }
 
 #[cfg(test)]
@@ -301,5 +368,98 @@ mod tests {
                 attrs: None,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn get_returns_link_created_by_create() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+        let created = links
+            .create(CreateLink {
+                source_id: a,
+                target_id: b,
+                relation: "references".into(),
+                attrs: None,
+            })
+            .unwrap();
+
+        let fetched = links.get(created.id).unwrap();
+        assert_eq!(created, fetched);
+    }
+
+    #[test]
+    fn get_returns_not_found_for_unknown_id() {
+        let (_entries, links) = setup();
+        let phantom: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let err = links.get(phantom).unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn delete_removes_link() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+        let created = links
+            .create(CreateLink {
+                source_id: a,
+                target_id: b,
+                relation: "references".into(),
+                attrs: None,
+            })
+            .unwrap();
+
+        links.delete(created.id).unwrap();
+        let err = links.get(created.id).unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn delete_returns_not_found_for_unknown_id() {
+        let (_entries, links) = setup();
+        let phantom: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let err = links.delete(phantom).unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn deleting_entry_cascades_to_links_as_source() {
+        // FK ON DELETE CASCADE: removing entry A should remove all links where
+        // A is source_id OR target_id.
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+        let c = seed_entry(&entries, "c");
+
+        let link_ab = links
+            .create(CreateLink {
+                source_id: a,
+                target_id: b,
+                relation: "r".into(),
+                attrs: None,
+            })
+            .unwrap();
+        let link_ca = links
+            .create(CreateLink {
+                source_id: c,
+                target_id: a,
+                relation: "r".into(),
+                attrs: None,
+            })
+            .unwrap();
+
+        // Delete entry A.
+        entries.delete(a).unwrap();
+
+        // Both links referencing A (as source or target) should be gone.
+        assert!(matches!(
+            links.get(link_ab.id).unwrap_err(),
+            CoreError::NotFound(_)
+        ));
+        assert!(matches!(
+            links.get(link_ca.id).unwrap_err(),
+            CoreError::NotFound(_)
+        ));
     }
 }
