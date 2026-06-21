@@ -7,6 +7,7 @@ use nomai_protocol::Request;
 use crate::daemon::Daemon;
 use crate::rpc::DispatchError;
 
+pub mod chunk;
 pub mod entry;
 pub mod events;
 pub mod link;
@@ -27,6 +28,10 @@ pub async fn route(daemon: &Daemon, req: Request) -> Result<Value, DispatchError
         "link.delete" => link::delete(daemon, params).await,
         "link.list" => link::list(daemon, params).await,
         "link.neighbors" => link::neighbors(daemon, params).await,
+        "chunk.create" => chunk::create(daemon, params).await,
+        "chunk.get" => chunk::get(daemon, params).await,
+        "chunk.delete" => chunk::delete(daemon, params).await,
+        "chunk.list" => chunk::list(daemon, params).await,
         "events.list" => events::list(daemon, params).await,
         "events.get" => events::get(daemon, params).await,
         "events.purge" => events::purge(daemon, params).await,

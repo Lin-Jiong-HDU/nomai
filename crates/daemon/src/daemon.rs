@@ -13,8 +13,6 @@ pub struct Daemon {
     pub(crate) entries: Arc<EntryService>,
     pub(crate) links: Arc<LinkService>,
     pub(crate) events: Arc<EventService>,
-    // Used by chunk.* handlers (Task 3); keep despite no current reader.
-    #[allow(dead_code)]
     pub(crate) chunks: Arc<ChunkService>,
     pub(crate) embedder: Arc<dyn EmbeddingProvider>,
     pub(crate) llm: Arc<dyn LlmProvider>,
