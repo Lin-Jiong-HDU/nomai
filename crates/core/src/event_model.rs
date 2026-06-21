@@ -20,7 +20,7 @@ pub struct Event {
 }
 
 /// Input for `EventService::list`. `since` is exclusive (returns id > since).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ListEventsQuery {
     #[serde(default)]
     pub since: Option<Ulid>,
@@ -34,6 +34,19 @@ pub struct ListEventsQuery {
     pub limit: u32,
     #[serde(default)]
     pub order: ListOrder,
+}
+
+impl Default for ListEventsQuery {
+    fn default() -> Self {
+        Self {
+            since: None,
+            type_: None,
+            target_type: None,
+            target_id: None,
+            limit: default_limit(),
+            order: ListOrder::default(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
