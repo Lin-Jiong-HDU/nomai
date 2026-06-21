@@ -1,0 +1,17 @@
+[package]
+name = "nomai-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nomai-protocol = { path = "../protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_with = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+refinery = { version = "0.8", features = ["rusqlite"] }
+ulid = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+sqlite-vec = "0.1"
