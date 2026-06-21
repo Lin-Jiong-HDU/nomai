@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use rusqlite::{Connection, params};
@@ -11,8 +11,7 @@ use crate::model::Entry;
 use crate::storage;
 
 pub struct EntryService {
-    // Read paths (create/get/list/search/delete) are added in Tasks 3–5.
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,12 +97,12 @@ pub struct SemanticSearchResult {
 
 impl EntryService {
     /// Take ownership of a connection and run pending migrations.
-    pub fn new(conn: Connection) -> Result<Self, CoreError> {
-        let mut conn = conn;
-        storage::run_migrations(&mut conn)?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+    pub fn new(conn: Arc<Mutex<Connection>>) -> Result<Self, CoreError> {
+        {
+            let mut guard = conn.lock().unwrap();
+            storage::run_migrations(&mut guard)?;
+        }
+        Ok(Self { conn })
     }
 
     pub fn create(&self, params: CreateEntry) -> Result<Entry, CoreError> {
@@ -393,7 +392,8 @@ impl EntryService {
     #[doc(hidden)]
     pub fn for_test() -> Result<Self, CoreError> {
         crate::storage::init_sqlite_extensions();
-        Self::new(Connection::open_in_memory()?)
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
+        Self::new(conn)
     }
 }
 
