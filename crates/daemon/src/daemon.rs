@@ -11,8 +11,6 @@ use crate::config::Config;
 
 pub struct Daemon {
     pub(crate) entries: Arc<EntryService>,
-    // Used by link.* handlers (Task 3); keep despite no current reader.
-    #[allow(dead_code)]
     pub(crate) links: Arc<LinkService>,
     pub(crate) embedder: Arc<dyn EmbeddingProvider>,
     pub(crate) llm: Arc<dyn LlmProvider>,
