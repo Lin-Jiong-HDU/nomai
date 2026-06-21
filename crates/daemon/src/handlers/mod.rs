@@ -8,6 +8,7 @@ use crate::daemon::Daemon;
 use crate::rpc::DispatchError;
 
 pub mod entry;
+pub mod link;
 pub mod provider;
 pub mod qa;
 pub mod search;
@@ -20,12 +21,17 @@ pub async fn route(daemon: &Daemon, req: Request) -> Result<Value, DispatchError
         "entry.update" => entry::update(daemon, params).await,
         "entry.delete" => entry::delete(daemon, params).await,
         "entry.list" => entry::list(daemon, params).await,
+        "link.create" => link::create(daemon, params).await,
+        "link.get" => link::get(daemon, params).await,
+        "link.delete" => link::delete(daemon, params).await,
+        "link.list" => link::list(daemon, params).await,
+        "link.neighbors" => link::neighbors(daemon, params).await,
         "search.fulltext" => search::fulltext(daemon, params).await,
         "search.semantic" => search::semantic(daemon, params).await,
         "qa.ask" => qa::ask(daemon, params).await,
         "provider.list" => provider::list(daemon, params).await,
-        // Reserved method names per spec §6: return -32601.
-        "search.hybrid" | "provider.set" => {
+        // Reserved method names per spec §6 + primitives spec §5: -32601.
+        "search.hybrid" | "provider.set" | "link.traverse" => {
             return Err(DispatchError::MethodNotFound(req.method.clone()));
         }
         _ => return Err(DispatchError::MethodNotFound(req.method.clone())),
@@ -281,5 +287,208 @@ mod tests {
         assert_eq!(result["embedding"]["name"], "openai-compatible");
         assert_eq!(result["embedding"]["model"], "test-model");
         assert_eq!(result["llm"]["model"], "test-model");
+    }
+
+    // ----- link.* e2e tests (Plan 3 Task 3) -----
+
+    async fn mount_embedding_mock(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"index": 0, "embedding": vec![0.0_f32; DIM]}]
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn link_create_round_trips_via_get() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Seed two entries (embedding mock mounted by mount_embedding_mock above).
+        let a_resp = daemon
+            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .await;
+        let a_id = a_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let b_resp = daemon
+            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .await;
+        let b_id = b_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        let create_resp = daemon
+            .dispatch(req(
+                "link.create",
+                json!({
+                    "source_id": a_id,
+                    "target_id": b_id,
+                    "relation": "references",
+                }),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+        let link = create_resp.result.unwrap();
+        let link_id = link["id"].as_str().unwrap().to_string();
+
+        let get_resp = daemon
+            .dispatch(req("link.get", json!({"id": link_id})))
+            .await;
+        assert!(get_resp.error.is_none(), "{:?}", get_resp.error);
+        assert_eq!(get_resp.result.unwrap()["relation"], "references");
+    }
+
+    #[tokio::test]
+    async fn link_create_returns_validation_for_missing_entry() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let b_resp = daemon
+            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .await;
+        let b_id = b_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+        let resp = daemon
+            .dispatch(req(
+                "link.create",
+                json!({
+                    "source_id": phantom,
+                    "target_id": b_id,
+                    "relation": "r",
+                }),
+            ))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1003); // Validation per spec §5
+    }
+
+    #[tokio::test]
+    async fn link_list_returns_outgoing_links() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let a = daemon
+            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .await;
+        let a_id = a.result.unwrap()["id"].as_str().unwrap().to_string();
+        let b = daemon
+            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .await;
+        let b_id = b.result.unwrap()["id"].as_str().unwrap().to_string();
+        let c = daemon
+            .dispatch(req("entry.create", json!({"title":"c","body":"z"})))
+            .await;
+        let c_id = c.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        daemon
+            .dispatch(req(
+                "link.create",
+                json!({"source_id": a_id.clone(), "target_id": b_id, "relation": "r"}),
+            ))
+            .await;
+        daemon
+            .dispatch(req(
+                "link.create",
+                json!({"source_id": a_id.clone(), "target_id": c_id, "relation": "r"}),
+            ))
+            .await;
+
+        let resp = daemon
+            .dispatch(req("link.list", json!({"from": a_id, "limit": 50})))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["total"], 2);
+        assert_eq!(result["items"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn link_neighbors_returns_entries_and_links() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let a = daemon
+            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .await;
+        let a_id = a.result.unwrap()["id"].as_str().unwrap().to_string();
+        let b = daemon
+            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .await;
+        let b_id = b.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        daemon
+            .dispatch(req(
+                "link.create",
+                json!({"source_id": a_id.clone(), "target_id": b_id, "relation": "r"}),
+            ))
+            .await;
+
+        let resp = daemon
+            .dispatch(req("link.neighbors", json!({"id": a_id, "direction": "out"})))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(result["entries"][0]["title"], "b");
+        assert_eq!(result["links"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn link_delete_round_trip() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let a = daemon
+            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .await;
+        let a_id = a.result.unwrap()["id"].as_str().unwrap().to_string();
+        let b = daemon
+            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .await;
+        let b_id = b.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        let create = daemon
+            .dispatch(req(
+                "link.create",
+                json!({"source_id": a_id, "target_id": b_id, "relation": "r"}),
+            ))
+            .await;
+        let link_id = create.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        let del = daemon
+            .dispatch(req("link.delete", json!({"id": link_id.clone()})))
+            .await;
+        assert!(del.error.is_none());
+        assert_eq!(del.result.unwrap()["deleted"], true);
+
+        let get = daemon.dispatch(req("link.get", json!({"id": link_id}))).await;
+        assert_eq!(get.error.unwrap().code, 1001); // NotFound
+    }
+
+    #[tokio::test]
+    async fn link_traverse_returns_method_not_found() {
+        // Phase 2 deferred per spec §5.
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+        let resp = daemon
+            .dispatch(req("link.traverse", json!({"root":"x","max_depth":2})))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32601);
+        assert_eq!(err.data.unwrap()["method"], "link.traverse");
+    }
+
+    #[tokio::test]
+    async fn link_list_returns_validation_when_neither_from_nor_to() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+        let resp = daemon.dispatch(req("link.list", json!({}))).await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1003);
     }
 }

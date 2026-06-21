@@ -404,6 +404,18 @@ impl EntryService {
         let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
         Self::new(conn)
     }
+
+    /// Test-only accessor for the shared connection.
+    ///
+    /// Not gated by `#[cfg(test)]` because that attribute does not propagate
+    /// across crate boundaries — the daemon crate's `#[cfg(test)]` modules
+    /// would not see it. `#[doc(hidden)] pub` matches the existing
+    /// `EntryService::for_test` convention so callers can build sibling
+    /// services (e.g. `LinkService`) against the same shared connection.
+    #[doc(hidden)]
+    pub fn conn_for_test(&self) -> Arc<Mutex<Connection>> {
+        self.conn.clone()
+    }
 }
 
 pub(crate) fn row_to_entry(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Entry> {
