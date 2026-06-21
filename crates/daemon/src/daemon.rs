@@ -12,7 +12,6 @@ use crate::config::Config;
 pub struct Daemon {
     pub(crate) entries: Arc<EntryService>,
     pub(crate) links: Arc<LinkService>,
-    #[allow(dead_code)]
     pub(crate) events: Arc<EventService>,
     pub(crate) embedder: Arc<dyn EmbeddingProvider>,
     pub(crate) llm: Arc<dyn LlmProvider>,

@@ -24,7 +24,7 @@ pub struct Event {
 pub struct ListEventsQuery {
     #[serde(default)]
     pub since: Option<Ulid>,
-    #[serde(default)]
+    #[serde(default, rename = "type")]
     pub type_: Option<String>,
     #[serde(default)]
     pub target_type: Option<String>,
@@ -67,7 +67,7 @@ pub struct ListEventsResult {
 #[derive(Debug, Deserialize)]
 pub struct PurgeQuery {
     pub before: Ulid,
-    #[serde(default)]
+    #[serde(default, rename = "type")]
     pub type_: Option<String>,
 }
 
