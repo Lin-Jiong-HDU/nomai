@@ -369,8 +369,16 @@ impl EntryService {
             .map_err(CoreError::Storage)
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_test() -> Result<Self, CoreError> {
+    /// Test-only constructor backed by an in-memory SQLite database.
+    ///
+    /// Not gated by `cfg(test)` so that downstream crates (e.g. `nomai-daemon`)
+    /// can use it from their own `#[cfg(test)]` modules; the `#[doc(hidden)]`
+    /// attribute keeps it out of the public API surface. Also registers the
+    /// sqlite-vec extension globally so `vec0` virtual tables work without the
+    /// caller having to remember `storage::init_sqlite_extensions()`.
+    #[doc(hidden)]
+    pub fn for_test() -> Result<Self, CoreError> {
+        crate::storage::init_sqlite_extensions();
         Self::new(Connection::open_in_memory()?)
     }
 }

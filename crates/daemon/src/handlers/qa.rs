@@ -1,7 +1,7 @@
 //! qa.ask RAG handler.
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use nomai_core::CoreError;
 use nomai_providers::{ChatMessage, CompletionRequest, MessageRole};

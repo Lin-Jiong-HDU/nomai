@@ -60,7 +60,6 @@ impl Daemon {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn for_test(
         entries: Arc<EntryService>,
         embedder: Arc<dyn EmbeddingProvider>,
