@@ -10,7 +10,7 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 use ulid::Ulid;
 
-use crate::chunk_model::{Chunk, CreateChunk};
+use crate::chunk_model::{Chunk, ChunkListResult, CreateChunk};
 use crate::error::CoreError;
 use crate::storage;
 
@@ -116,6 +116,93 @@ impl ChunkService {
             }
         }
     }
+
+    pub fn get(&self, id: Ulid) -> Result<Chunk, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        match conn.query_row(
+            "SELECT id, entry_id, ordinal, text, attrs, created_at, updated_at
+             FROM chunks WHERE id = ?1",
+            params![id.to_string()],
+            row_to_chunk,
+        ) {
+            Ok(chunk) => Ok(chunk),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(CoreError::NotFound(id)),
+            Err(e) => Err(CoreError::Storage(e)),
+        }
+    }
+
+    pub fn list(
+        &self,
+        entry_id: Ulid,
+        limit: u32,
+        offset: u32,
+    ) -> Result<ChunkListResult, CoreError> {
+        let conn = self.conn.lock().unwrap();
+
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE entry_id = ?1",
+            params![entry_id.to_string()],
+            |row| row.get(0),
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, entry_id, ordinal, text, attrs, created_at, updated_at
+             FROM chunks WHERE entry_id = ?1
+             ORDER BY ordinal ASC
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![entry_id.to_string(), limit as i64, offset as i64],
+            row_to_chunk,
+        )?;
+        let items: Vec<Chunk> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(ChunkListResult {
+            items,
+            total: total as u64,
+        })
+    }
+}
+
+fn row_to_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chunk> {
+    let id_str: String = row.get(0)?;
+    let entry_id_str: String = row.get(1)?;
+    let ordinal_i64: i64 = row.get(2)?;
+    let text: String = row.get(3)?;
+    let attrs_json: String = row.get(4)?;
+    let created_at_str: String = row.get(5)?;
+    let updated_at_str: String = row.get(6)?;
+
+    let id = from_text(0, &id_str, Ulid::from_string)?;
+    let entry_id = from_text(1, &entry_id_str, Ulid::from_string)?;
+    let attrs: serde_json::Value = from_text(4, &attrs_json, |s| serde_json::from_str(s))?;
+    let created_at = from_text(5, &created_at_str, chrono::DateTime::parse_from_rfc3339)?
+        .with_timezone(&Utc);
+    let updated_at = from_text(6, &updated_at_str, chrono::DateTime::parse_from_rfc3339)?
+        .with_timezone(&Utc);
+
+    Ok(Chunk {
+        id,
+        entry_id,
+        ordinal: ordinal_i64 as u32,
+        text,
+        attrs,
+        created_at,
+        updated_at,
+    })
+}
+
+fn from_text<T, E>(
+    idx: usize,
+    s: &str,
+    f: impl for<'a> FnOnce(&'a str) -> Result<T, E>,
+) -> rusqlite::Result<T>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    f(s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, Box::new(e))
+    })
 }
 
 #[cfg(test)]
@@ -301,5 +388,116 @@ mod tests {
         assert_eq!(event.payload["ordinal"], 0);
         assert_eq!(event.payload["text"], "snippet");
         assert_eq!(event.payload["entry_id"], entry_id.to_string());
+    }
+
+    fn seed_chunk(chunks: &ChunkService, entry_id: Ulid, ordinal: u32, text: &str) -> Ulid {
+        chunks
+            .create(CreateChunk {
+                entry_id,
+                ordinal,
+                text: text.into(),
+                attrs: None,
+            })
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn get_returns_chunk_created_by_create() {
+        let (_, chunks, entry_id) = setup_with_entry();
+        let created = chunks
+            .create(CreateChunk {
+                entry_id,
+                ordinal: 0,
+                text: "x".into(),
+                attrs: None,
+            })
+            .unwrap();
+        let fetched = chunks.get(created.id).unwrap();
+        assert_eq!(created, fetched);
+    }
+
+    #[test]
+    fn get_returns_not_found_for_unknown_id() {
+        let chunks = ChunkService::for_test().unwrap();
+        let phantom: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let err = chunks.get(phantom).unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn list_returns_chunks_for_entry_sorted_by_ordinal() {
+        let (_, chunks, entry_id) = setup_with_entry();
+        // Insert out of order — list should sort by ordinal ascending.
+        seed_chunk(&chunks, entry_id, 2, "two");
+        seed_chunk(&chunks, entry_id, 0, "zero");
+        seed_chunk(&chunks, entry_id, 1, "one");
+
+        let result = chunks.list(entry_id, 100, 0).unwrap();
+        assert_eq!(result.total, 3);
+        assert_eq!(result.items.len(), 3);
+        assert_eq!(result.items[0].ordinal, 0);
+        assert_eq!(result.items[0].text, "zero");
+        assert_eq!(result.items[1].ordinal, 1);
+        assert_eq!(result.items[2].ordinal, 2);
+    }
+
+    #[test]
+    fn list_paginates_with_limit_and_offset() {
+        let (_, chunks, entry_id) = setup_with_entry();
+        for i in 0..5 {
+            seed_chunk(&chunks, entry_id, i, &format!("c{i}"));
+        }
+        let page1 = chunks.list(entry_id, 2, 0).unwrap();
+        assert_eq!(page1.items.len(), 2);
+        assert_eq!(page1.total, 5);
+        assert_eq!(page1.items[0].ordinal, 0);
+
+        let page2 = chunks.list(entry_id, 2, 2).unwrap();
+        assert_eq!(page2.items.len(), 2);
+        assert_eq!(page2.items[0].ordinal, 2);
+    }
+
+    #[test]
+    fn list_returns_empty_for_entry_with_no_chunks() {
+        let (_, chunks, entry_id) = setup_with_entry();
+        let result = chunks.list(entry_id, 100, 0).unwrap();
+        assert_eq!(result.total, 0);
+        assert!(result.items.is_empty());
+    }
+
+    #[test]
+    fn list_only_returns_chunks_for_specified_entry() {
+        let entries = EntryService::for_test().unwrap();
+        let conn = entries.conn_for_test();
+        let chunks = ChunkService::new(conn).unwrap();
+        let a = entries
+            .create(CreateEntry {
+                title: "a".into(),
+                body: "x".into(),
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+        let b = entries
+            .create(CreateEntry {
+                title: "b".into(),
+                body: "y".into(),
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+        seed_chunk(&chunks, a.id, 0, "a0");
+        seed_chunk(&chunks, b.id, 0, "b0");
+
+        let result_a = chunks.list(a.id, 100, 0).unwrap();
+        assert_eq!(result_a.total, 1);
+        assert_eq!(result_a.items[0].text, "a0");
+
+        let result_b = chunks.list(b.id, 100, 0).unwrap();
+        assert_eq!(result_b.total, 1);
+        assert_eq!(result_b.items[0].text, "b0");
     }
 }
