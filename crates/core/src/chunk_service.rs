@@ -217,6 +217,69 @@ impl ChunkService {
             }
         }
     }
+
+    pub fn ensure_vec_chunk_embeddings(&self, dim: usize) -> Result<(), CoreError> {
+        let conn = self.conn.lock().unwrap();
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name='vec_chunk_embeddings'
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Ok(());
+        }
+        let sql = format!(
+            "CREATE VIRTUAL TABLE vec_chunk_embeddings USING vec0(
+                chunk_id TEXT PRIMARY KEY,
+                embedding float[{dim}] distance_metric=cosine
+            )"
+        );
+        conn.execute_batch(&sql)?;
+        Ok(())
+    }
+
+    pub fn write_embedding(&self, id: Ulid, embedding: &[f32]) -> Result<(), CoreError> {
+        let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let id_str = id.to_string();
+        let conn = self.conn.lock().unwrap();
+        // sqlite-vec's vec0 virtual table does not support INSERT OR REPLACE.
+        // Emulate the upsert with a DELETE-then-INSERT inside a transaction so
+        // the operation is atomic and re-inserting the same id replaces the row.
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute(
+                "DELETE FROM vec_chunk_embeddings WHERE chunk_id = ?1",
+                params![&id_str],
+            )?;
+            conn.execute(
+                "INSERT INTO vec_chunk_embeddings (chunk_id, embedding) VALUES (?1, ?2)",
+                params![&id_str, &bytes],
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(CoreError::Storage(e))
+            }
+        }
+    }
+
+    pub fn delete_embedding(&self, id: Ulid) -> Result<(), CoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM vec_chunk_embeddings WHERE chunk_id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(())
+    }
 }
 
 fn row_to_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chunk> {
@@ -600,6 +663,56 @@ mod tests {
         // Payload is BEFORE snapshot (chunk no longer in chunks table but event retains it).
         assert_eq!(event.payload["text"], "to be deleted");
         assert_eq!(event.payload["ordinal"], 0);
+    }
+
+    #[test]
+    fn ensure_vec_chunk_embeddings_is_idempotent() {
+        crate::storage::init_sqlite_extensions();
+        let chunks = ChunkService::for_test().unwrap();
+        chunks.ensure_vec_chunk_embeddings(8).unwrap();
+        chunks.ensure_vec_chunk_embeddings(8).unwrap(); // idempotent
+    }
+
+    #[test]
+    fn write_embedding_persists_row_visible_via_direct_sql() {
+        crate::storage::init_sqlite_extensions();
+        let (_, chunks, entry_id) = setup_with_entry();
+        chunks.ensure_vec_chunk_embeddings(4).unwrap();
+        let c = seed_chunk(&chunks, entry_id, 0, "x");
+
+        chunks.write_embedding(c, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // Verify via direct SQL that the row exists.
+        let conn = chunks.conn.lock().unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM vec_chunk_embeddings WHERE chunk_id = ?1",
+                rusqlite::params![c.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn delete_embedding_removes_row_visible_via_direct_sql() {
+        crate::storage::init_sqlite_extensions();
+        let (_, chunks, entry_id) = setup_with_entry();
+        chunks.ensure_vec_chunk_embeddings(2).unwrap();
+        let c = seed_chunk(&chunks, entry_id, 0, "x");
+        chunks.write_embedding(c, &[1.0, 0.0]).unwrap();
+
+        chunks.delete_embedding(c).unwrap();
+
+        let conn = chunks.conn.lock().unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM vec_chunk_embeddings WHERE chunk_id = ?1",
+                rusqlite::params![c.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     #[test]
