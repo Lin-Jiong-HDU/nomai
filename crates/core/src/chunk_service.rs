@@ -162,6 +162,61 @@ impl ChunkService {
             total: total as u64,
         })
     }
+
+    pub fn delete(&self, id: Ulid) -> Result<(), CoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<Option<()>> {
+            // SELECT before-snapshot first.
+            let row_result = conn.query_row(
+                "SELECT id, entry_id, ordinal, text, attrs, created_at, updated_at
+                 FROM chunks WHERE id = ?1",
+                params![id.to_string()],
+                row_to_chunk,
+            );
+            let before_chunk = match row_result {
+                Ok(c) => c,
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+                Err(e) => return Err(e),
+            };
+
+            conn.execute(
+                "DELETE FROM chunks WHERE id = ?1",
+                params![id.to_string()],
+            )?;
+
+            // Emit event with before-snapshot.
+            let event_id = Ulid::new();
+            let event_payload = serde_json::to_value(&before_chunk).expect("chunk serialize");
+            conn.execute(
+                "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    event_id.to_string(),
+                    "chunk.deleted",
+                    "chunk",
+                    id.to_string(),
+                    event_payload.to_string(),
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            Ok(Some(()))
+        })();
+        match result {
+            Ok(Some(())) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Ok(None) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(CoreError::NotFound(id))
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(CoreError::Storage(e))
+            }
+        }
+    }
 }
 
 fn row_to_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chunk> {
@@ -499,5 +554,71 @@ mod tests {
         let result_b = chunks.list(b.id, 100, 0).unwrap();
         assert_eq!(result_b.total, 1);
         assert_eq!(result_b.items[0].text, "b0");
+    }
+
+    #[test]
+    fn delete_removes_chunk() {
+        let (_, chunks, entry_id) = setup_with_entry();
+        let id = seed_chunk(&chunks, entry_id, 0, "x");
+        chunks.delete(id).unwrap();
+        let err = chunks.get(id).unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn delete_returns_not_found_for_unknown_id() {
+        let chunks = ChunkService::for_test().unwrap();
+        let phantom: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let err = chunks.delete(phantom).unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn delete_emits_chunk_deleted_event_with_before_snapshot() {
+        let (entries, chunks, entry_id) = setup_with_entry();
+        let events = EventService::for_test_shared_with_entries(&entries);
+        let chunk = chunks
+            .create(CreateChunk {
+                entry_id,
+                ordinal: 0,
+                text: "to be deleted".into(),
+                attrs: None,
+            })
+            .unwrap();
+
+        chunks.delete(chunk.id).unwrap();
+
+        let result = events.list(ListEventsQuery::default()).unwrap();
+        let delete_events: Vec<_> = result
+            .items
+            .iter()
+            .filter(|e| e.type_ == "chunk.deleted")
+            .collect();
+        assert_eq!(delete_events.len(), 1);
+        let event = delete_events[0];
+        assert_eq!(event.target_id, chunk.id);
+        // Payload is BEFORE snapshot (chunk no longer in chunks table but event retains it).
+        assert_eq!(event.payload["text"], "to be deleted");
+        assert_eq!(event.payload["ordinal"], 0);
+    }
+
+    #[test]
+    fn deleting_entry_cascades_to_chunks() {
+        // FK ON DELETE CASCADE: removing entry removes all its chunks.
+        let (entries, chunks, entry_id) = setup_with_entry();
+        let c1 = seed_chunk(&chunks, entry_id, 0, "first");
+        let c2 = seed_chunk(&chunks, entry_id, 1, "second");
+
+        entries.delete(entry_id).unwrap();
+
+        // Both chunks should be gone (CASCADE).
+        assert!(matches!(
+            chunks.get(c1).unwrap_err(),
+            CoreError::NotFound(_)
+        ));
+        assert!(matches!(
+            chunks.get(c2).unwrap_err(),
+            CoreError::NotFound(_)
+        ));
     }
 }
