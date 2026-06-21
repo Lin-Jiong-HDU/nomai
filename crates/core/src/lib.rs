@@ -11,7 +11,7 @@ pub mod model;
 pub mod service;
 pub mod storage;
 
-pub use chunk_model::{Chunk, ChunkListResult, ChunkSearchResult, CreateChunk};
+pub use chunk_model::{Chunk, ChunkListResult, ChunkSearchResult, CreateChunk, Granularity};
 pub use chunk_service::ChunkService;
 pub use error::CoreError;
 pub use event_model::{Event, ListEventsQuery, ListEventsResult, ListOrder, PurgeQuery};

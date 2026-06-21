@@ -73,14 +73,19 @@ mod tests {
         let llm: Arc<dyn nomai_providers::LlmProvider> = Arc::new(
             nomai_providers::OpenAiCompatibleLlm::new(server.uri(), "test-key", "test-model"),
         );
-        Daemon::for_test(
+        let daemon = Daemon::for_test(
             entries,
             embedder,
             llm,
             "test-model".into(),
             "test-model".into(),
             DIM,
-        )
+        );
+        // Ensure vec_chunk_embeddings table exists for chunk semantic search
+        // (Daemon::for_test does not auto-create it; the production constructor
+        // does this via config.embedding.dim).
+        daemon.chunks.ensure_vec_chunk_embeddings(DIM).unwrap();
+        daemon
     }
 
     fn req(method: &str, params: Value) -> Request {
@@ -301,10 +306,13 @@ mod tests {
     // ----- link.* e2e tests (Plan 3 Task 3) -----
 
     async fn mount_embedding_mock(server: &MockServer) {
+        // Non-zero embeddings: cosine similarity in sqlite-vec treats the
+        // zero vector as invalid; tests that rely on semantic search need
+        // non-zero vectors to get any hits.
         Mock::given(method("POST"))
             .and(path("/embeddings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{"index": 0, "embedding": vec![0.0_f32; DIM]}]
+                "data": [{"index": 0, "embedding": vec![1.0_f32; DIM]}]
             })))
             .mount(server)
             .await;
@@ -689,5 +697,280 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["target_type"], "link");
         assert_eq!(items[0]["payload"]["relation"], "r");
+    }
+
+    // ----- chunk.* + search.semantic granularity + entry.delete cleanup e2e (Plan 2 Task 4) -----
+
+    #[tokio::test]
+    async fn chunk_create_round_trips_via_get() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create an entry first.
+        let entry_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"doc","body":"x"}),
+            ))
+            .await;
+        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        // Create a chunk (will fire embedding HTTP call for chunk text).
+        let create_resp = daemon
+            .dispatch(req(
+                "chunk.create",
+                json!({"entry_id": entry_id, "ordinal": 0, "text":"first chunk"}),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+        let chunk = create_resp.result.unwrap();
+        let chunk_id = chunk["id"].as_str().unwrap().to_string();
+        assert_eq!(chunk["ordinal"], 0);
+
+        let get_resp = daemon
+            .dispatch(req("chunk.get", json!({"id": chunk_id})))
+            .await;
+        assert!(get_resp.error.is_none());
+        assert_eq!(get_resp.result.unwrap()["text"], "first chunk");
+    }
+
+    #[tokio::test]
+    async fn chunk_create_returns_validation_for_missing_entry() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+        let resp = daemon
+            .dispatch(req(
+                "chunk.create",
+                json!({"entry_id": phantom, "ordinal": 0, "text":"x"}),
+            ))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1003);
+    }
+
+    #[tokio::test]
+    async fn chunk_list_returns_chunks_sorted_by_ordinal() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let entry_resp = daemon
+            .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
+            .await;
+        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        // Create chunks out of order.
+        for ord in [2, 0, 1] {
+            daemon
+                .dispatch(req(
+                    "chunk.create",
+                    json!({"entry_id": entry_id, "ordinal": ord, "text": format!("c{ord}")}),
+                ))
+                .await;
+        }
+
+        let list_resp = daemon
+            .dispatch(req("chunk.list", json!({"entry_id": entry_id})))
+            .await;
+        let result = list_resp.result.unwrap();
+        assert_eq!(result["total"], 3);
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items[0]["ordinal"], 0);
+        assert_eq!(items[1]["ordinal"], 1);
+        assert_eq!(items[2]["ordinal"], 2);
+    }
+
+    #[tokio::test]
+    async fn chunk_delete_removes_chunk_and_embedding() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let entry_resp = daemon
+            .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
+            .await;
+        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let create_resp = daemon
+            .dispatch(req(
+                "chunk.create",
+                json!({"entry_id": entry_id, "ordinal": 0, "text":"x"}),
+            ))
+            .await;
+        let chunk_id = create_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        // Verify semantic search finds the chunk.
+        let search_resp = daemon
+            .dispatch(req(
+                "search.semantic",
+                json!({"query":"anything","granularity":"chunk","limit":10}),
+            ))
+            .await;
+        let result = search_resp.result.unwrap();
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+
+        // Delete the chunk.
+        let del_resp = daemon
+            .dispatch(req("chunk.delete", json!({"id": chunk_id})))
+            .await;
+        assert_eq!(del_resp.result.unwrap()["deleted"], true);
+
+        // Semantic search should now return empty.
+        let search_resp2 = daemon
+            .dispatch(req(
+                "search.semantic",
+                json!({"query":"anything","granularity":"chunk","limit":10}),
+            ))
+            .await;
+        let result2 = search_resp2.result.unwrap();
+        let items2 = result2["items"].as_array().unwrap();
+        assert!(items2.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_semantic_granularity_defaults_to_entry() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let entry_resp = daemon
+            .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
+            .await;
+        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        // Create a chunk.
+        daemon
+            .dispatch(req(
+                "chunk.create",
+                json!({"entry_id": entry_id, "ordinal": 0, "text":"chunk text"}),
+            ))
+            .await;
+
+        // Default granularity should be "entry" — items have "entry" field, not "chunk".
+        let resp = daemon
+            .dispatch(req(
+                "search.semantic",
+                json!({"query":"anything","limit":10}),
+            ))
+            .await;
+        let result = resp.result.unwrap();
+        let items = result["items"].as_array().unwrap();
+        // Should have entry-level results (entry body was embedded), not chunk-level.
+        assert!(items.iter().all(|i| i["entry"].is_object()));
+    }
+
+    #[tokio::test]
+    async fn search_semantic_granularity_chunk_returns_chunks() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let entry_resp = daemon
+            .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
+            .await;
+        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        daemon
+            .dispatch(req(
+                "chunk.create",
+                json!({"entry_id": entry_id, "ordinal": 0, "text":"chunk content"}),
+            ))
+            .await;
+
+        let resp = daemon
+            .dispatch(req(
+                "search.semantic",
+                json!({"query":"anything","granularity":"chunk","limit":10}),
+            ))
+            .await;
+        let result = resp.result.unwrap();
+        let items = result["items"].as_array().unwrap();
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|i| i["chunk"].is_object()));
+        assert_eq!(items[0]["chunk"]["entry_id"], entry_id);
+    }
+
+    #[tokio::test]
+    async fn entry_delete_cascades_to_chunks_and_cleanups_embeddings() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let entry_resp = daemon
+            .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
+            .await;
+        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        // Create 2 chunks.
+        for ord in 0..2 {
+            daemon
+                .dispatch(req(
+                    "chunk.create",
+                    json!({"entry_id": entry_id, "ordinal": ord, "text": format!("c{ord}")}),
+                ))
+                .await;
+        }
+
+        // Precondition: chunk search finds 2.
+        let pre = daemon
+            .dispatch(req(
+                "search.semantic",
+                json!({"query":"x","granularity":"chunk","limit":10}),
+            ))
+            .await;
+        assert_eq!(pre.result.unwrap()["items"].as_array().unwrap().len(), 2);
+
+        // Delete the entry.
+        daemon
+            .dispatch(req("entry.delete", json!({"id": entry_id})))
+            .await;
+
+        // After: chunk search returns 0 (CASCADE removed chunks, cleanup removed embeddings).
+        let post = daemon
+            .dispatch(req(
+                "search.semantic",
+                json!({"query":"x","granularity":"chunk","limit":10}),
+            ))
+            .await;
+        assert_eq!(post.result.unwrap()["items"].as_array().unwrap().len(), 0);
+
+        // entry.list should not return the deleted entry.
+        let list = daemon.dispatch(req("entry.list", json!({"limit":100}))).await;
+        let result = list.result.unwrap();
+        let items = result["items"].as_array().unwrap();
+        assert!(items.iter().all(|e| e["id"].as_str().unwrap() != entry_id));
+    }
+
+    #[tokio::test]
+    async fn chunk_create_emits_event_visible_via_events_list() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let entry_resp = daemon
+            .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
+            .await;
+        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        daemon
+            .dispatch(req(
+                "chunk.create",
+                json!({"entry_id": entry_id, "ordinal": 0, "text":"x"}),
+            ))
+            .await;
+
+        let list_resp = daemon
+            .dispatch(req(
+                "events.list",
+                json!({"type":"chunk.created"}),
+            ))
+            .await;
+        let result = list_resp.result.unwrap();
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["payload"]["entry_id"], entry_id);
     }
 }

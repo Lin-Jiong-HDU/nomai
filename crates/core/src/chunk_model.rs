@@ -42,6 +42,16 @@ pub struct ChunkSearchResult {
     pub score: f32,
 }
 
+/// Granularity selector for `search.semantic`. Defaults to `Entry` for
+/// backward compatibility; `Chunk` routes to chunk-level KNN.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Granularity {
+    #[default]
+    Entry,
+    Chunk,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
