@@ -1,6 +1,6 @@
 //! Daemon: owns EntryService + providers; orchestrates RPC handlers.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
@@ -25,9 +25,10 @@ impl Daemon {
         // Open SQLite (creating parent dir if needed).
         let db_path = expand_db_path(&config.data.db_path)?;
         let conn = Connection::open(&db_path)?;
+        let conn = Arc::new(Mutex::new(conn));
 
         // Run migrations + ensure vec_embeddings exists.
-        let entries = Arc::new(EntryService::new(conn)?);
+        let entries = Arc::new(EntryService::new(conn.clone())?);
         entries.ensure_vec_embeddings(config.embedding.dim)?;
 
         // Read API keys (config.validate already checked env var presence).

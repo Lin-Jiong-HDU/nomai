@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use rusqlite::{Connection, params};
@@ -11,8 +11,7 @@ use crate::model::Entry;
 use crate::storage;
 
 pub struct EntryService {
-    // Read paths (create/get/list/search/delete) are added in Tasks 3–5.
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,12 +97,15 @@ pub struct SemanticSearchResult {
 
 impl EntryService {
     /// Take ownership of a connection and run pending migrations.
-    pub fn new(conn: Connection) -> Result<Self, CoreError> {
-        let mut conn = conn;
-        storage::run_migrations(&mut conn)?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+    pub fn new(conn: Arc<Mutex<Connection>>) -> Result<Self, CoreError> {
+        {
+            let mut guard = conn.lock().unwrap();
+            guard
+                .pragma_update(None, "foreign_keys", "ON")
+                .map_err(CoreError::Storage)?;
+            storage::run_migrations(&mut guard)?;
+        }
+        Ok(Self { conn })
     }
 
     pub fn create(&self, params: CreateEntry) -> Result<Entry, CoreError> {
@@ -393,7 +395,8 @@ impl EntryService {
     #[doc(hidden)]
     pub fn for_test() -> Result<Self, CoreError> {
         crate::storage::init_sqlite_extensions();
-        Self::new(Connection::open_in_memory()?)
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
+        Self::new(conn)
     }
 }
 
@@ -467,6 +470,44 @@ mod tests {
         // Each for_test() opens a fresh in-memory DB; migrations re-run cleanly.
         let _a = EntryService::for_test().unwrap();
         let _b = EntryService::for_test().unwrap();
+    }
+
+    #[test]
+    fn new_enables_foreign_keys_pragma() {
+        let svc = EntryService::for_test().unwrap();
+        let conn = svc.conn.lock().unwrap();
+        let fk_enabled: bool = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert!(
+            fk_enabled,
+            "PRAGMA foreign_keys must be ON after EntryService::new"
+        );
+    }
+
+    #[test]
+    fn v2_migration_creates_links_table() {
+        let svc = EntryService::for_test().unwrap();
+        let conn = svc.conn.lock().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM links", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn v2_migration_links_table_has_expected_schema() {
+        let svc = EntryService::for_test().unwrap();
+        let conn = svc.conn.lock().unwrap();
+        // Verify FK and UNIQUE constraints are registered.
+        let mut stmt = conn
+            .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='links'")
+            .unwrap();
+        let sql: String = stmt.query_row([], |row| row.get(0)).unwrap();
+        assert!(sql.contains(
+            "FOREIGN KEY (source_id) REFERENCES entries(id) ON DELETE CASCADE"
+        ));
+        assert!(sql.contains("UNIQUE(source_id, target_id, relation)"));
     }
 
     use serde_json::json;
