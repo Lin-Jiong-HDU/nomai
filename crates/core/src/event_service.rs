@@ -172,6 +172,17 @@ where
 }
 
 #[cfg(test)]
+impl EventService {
+    /// Construct an EventService sharing the same in-memory connection as
+    /// the given EntryService. For tests that need to verify emission.
+    #[doc(hidden)]
+    pub fn for_test_shared_with_entries(entries: &crate::EntryService) -> Self {
+        let conn = entries.conn_for_test();
+        Self::new(conn).unwrap()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::event_model::{ListEventsQuery, ListOrder};

@@ -129,22 +129,51 @@ impl EntryService {
         };
 
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO entries
-               (id, title, body, tags, attrs, source, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                entry.id.to_string(),
-                &entry.title,
-                &entry.body,
-                serde_json::to_string(&entry.tags).expect("tags serialize"),
-                entry.attrs.to_string(),
-                &entry.source,
-                entry.created_at.to_rfc3339(),
-                entry.updated_at.to_rfc3339(),
-            ],
-        )?;
-        Ok(entry)
+        // Transaction: INSERT entry + INSERT event atomically.
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute(
+                "INSERT INTO entries
+                   (id, title, body, tags, attrs, source, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    entry.id.to_string(),
+                    &entry.title,
+                    &entry.body,
+                    serde_json::to_string(&entry.tags).expect("tags serialize"),
+                    entry.attrs.to_string(),
+                    &entry.source,
+                    entry.created_at.to_rfc3339(),
+                    entry.updated_at.to_rfc3339(),
+                ],
+            )?;
+            // Emit event.
+            let event_id = Ulid::new();
+            let event_payload = serde_json::to_value(&entry).expect("entry serialize");
+            conn.execute(
+                "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    event_id.to_string(),
+                    "entry.created",
+                    "entry",
+                    entry.id.to_string(),
+                    event_payload.to_string(),
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(entry)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(CoreError::Storage(e))
+            }
+        }
     }
 
     pub fn get(&self, id: Ulid) -> Result<Entry, CoreError> {
@@ -180,33 +209,118 @@ impl EntryService {
         };
         let updated_at = Utc::now();
 
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE entries SET title=?1, body=?2, tags=?3, attrs=?4, source=?5, updated_at=?6
-             WHERE id=?7",
-            params![
-                &title,
-                &body,
-                serde_json::to_string(&tags).expect("tags serialize"),
-                attrs.to_string(),
-                &source,
-                updated_at.to_rfc3339(),
-                id.to_string(),
-            ],
-        )?;
-        drop(conn);
+        let updated_entry = Entry {
+            id,
+            title: title.clone(),
+            body: body.clone(),
+            tags: tags.clone(),
+            attrs: attrs.clone(),
+            source: source.clone(),
+            created_at: existing.created_at,
+            updated_at,
+        };
 
-        // Return the row as stored (canonical view).
-        self.get(id)
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            conn.execute(
+                "UPDATE entries SET title=?1, body=?2, tags=?3, attrs=?4, source=?5, updated_at=?6
+                 WHERE id=?7",
+                params![
+                    &title,
+                    &body,
+                    serde_json::to_string(&tags).expect("tags serialize"),
+                    attrs.to_string(),
+                    &source,
+                    updated_at.to_rfc3339(),
+                    id.to_string(),
+                ],
+            )?;
+            // Emit event with after-snapshot.
+            let event_id = Ulid::new();
+            let event_payload = serde_json::to_value(&updated_entry).expect("entry serialize");
+            conn.execute(
+                "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    event_id.to_string(),
+                    "entry.updated",
+                    "entry",
+                    id.to_string(),
+                    event_payload.to_string(),
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                drop(conn);
+                // Return row as stored.
+                self.get(id)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(CoreError::Storage(e))
+            }
+        }
     }
 
     pub fn delete(&self, id: Ulid) -> Result<(), CoreError> {
         let conn = self.conn.lock().unwrap();
-        let affected = conn.execute("DELETE FROM entries WHERE id=?1", params![id.to_string()])?;
-        if affected == 0 {
-            Err(CoreError::NotFound(id))
-        } else {
-            Ok(())
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<Option<()>> {
+            // First SELECT the entry as before-snapshot.
+            let row_result = conn.query_row(
+                "SELECT id, title, body, tags, attrs, source, created_at, updated_at
+                 FROM entries WHERE id = ?1",
+                params![id.to_string()],
+                |row| row_to_entry(row, 0),
+            );
+            let before_entry = match row_result {
+                Ok(e) => e,
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None), // signal NotFound
+                Err(e) => return Err(e),
+            };
+
+            let affected = conn.execute(
+                "DELETE FROM entries WHERE id=?1",
+                params![id.to_string()],
+            )?;
+            // affected must be 1 here because we found the row above.
+            debug_assert_eq!(affected, 1);
+
+            // Emit event with before-snapshot.
+            let event_id = Ulid::new();
+            let event_payload = serde_json::to_value(&before_entry).expect("entry serialize");
+            conn.execute(
+                "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    event_id.to_string(),
+                    "entry.deleted",
+                    "entry",
+                    id.to_string(),
+                    event_payload.to_string(),
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            Ok(Some(()))
+        })();
+        match result {
+            Ok(Some(())) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Ok(None) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(CoreError::NotFound(id))
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(CoreError::Storage(e))
+            }
         }
     }
 
@@ -927,5 +1041,101 @@ mod tests {
         svc.delete_embedding(e.id).unwrap();
         let hits = svc.semantic_search(&[1.0, 0.0], 10).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn create_emits_entry_created_event_with_full_snapshot() {
+        use crate::event_service::EventService;
+        use crate::CreateEntry;
+
+        let entries = EntryService::for_test().unwrap();
+        let events = EventService::for_test_shared_with_entries(&entries);
+        let created = entries
+            .create(CreateEntry {
+                title: "Hello".into(),
+                body: "World".into(),
+                tags: Some(vec!["a".into()]),
+                attrs: Some(serde_json::json!({"k": "v"})),
+                source: Some("test".into()),
+            })
+            .unwrap();
+
+        let result = events.list(Default::default()).unwrap();
+        assert_eq!(result.items.len(), 1);
+        let event = &result.items[0];
+        assert_eq!(event.type_, "entry.created");
+        assert_eq!(event.target_type, "entry");
+        assert_eq!(event.target_id, created.id);
+        assert_eq!(event.payload["title"], "Hello");
+        assert_eq!(event.payload["body"], "World");
+        assert_eq!(event.payload["id"], created.id.to_string());
+    }
+
+    #[test]
+    fn update_emits_entry_updated_event_with_after_snapshot() {
+        use crate::event_service::EventService;
+        use crate::CreateEntry;
+
+        let entries = EntryService::for_test().unwrap();
+        let events = EventService::for_test_shared_with_entries(&entries);
+        let created = entries
+            .create(CreateEntry {
+                title: "orig".into(),
+                body: "b".into(),
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+
+        let _updated = entries
+            .update(
+                created.id,
+                crate::UpdateEntry {
+                    title: Some("new".into()),
+                    body: None,
+                    tags: None,
+                    attrs: None,
+                    source: None,
+                },
+            )
+            .unwrap();
+
+        let result = events.list(Default::default()).unwrap();
+        assert_eq!(result.items.len(), 2);
+        // Last event is the update.
+        let event = &result.items[1];
+        assert_eq!(event.type_, "entry.updated");
+        assert_eq!(event.payload["title"], "new");
+        assert_eq!(event.payload["body"], "b"); // unchanged from created
+    }
+
+    #[test]
+    fn delete_emits_entry_deleted_event_with_before_snapshot() {
+        use crate::event_service::EventService;
+        use crate::CreateEntry;
+
+        let entries = EntryService::for_test().unwrap();
+        let events = EventService::for_test_shared_with_entries(&entries);
+        let created = entries
+            .create(CreateEntry {
+                title: "to be deleted".into(),
+                body: "body".into(),
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+
+        entries.delete(created.id).unwrap();
+
+        let result = events.list(Default::default()).unwrap();
+        assert_eq!(result.items.len(), 2);
+        let event = &result.items[1];
+        assert_eq!(event.type_, "entry.deleted");
+        // Payload is the BEFORE snapshot (entry no longer exists in entries table,
+        // but the event retains it for audit).
+        assert_eq!(event.payload["title"], "to be deleted");
+        assert_eq!(event.payload["body"], "body");
     }
 }
