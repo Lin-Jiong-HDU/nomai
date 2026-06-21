@@ -12,10 +12,10 @@ use ulid::Ulid;
 pub struct Event {
     pub id: Ulid,
     #[serde(rename = "type")]
-    pub type_: String,         // JSON field is "type" (Rust keyword clash)
-    pub target_type: String,   // "entry" | "link"
+    pub type_: String, // JSON field is "type" (Rust keyword clash)
+    pub target_type: String, // "entry" | "link"
     pub target_id: Ulid,
-    pub payload: Value,        // full snapshot JSON
+    pub payload: Value, // full snapshot JSON
     pub created_at: DateTime<Utc>,
 }
 
@@ -109,6 +109,9 @@ mod tests {
     #[test]
     fn list_order_serializes_as_snake_case() {
         assert_eq!(serde_json::to_string(&ListOrder::Asc).unwrap(), r#""asc""#);
-        assert_eq!(serde_json::to_string(&ListOrder::Desc).unwrap(), r#""desc""#);
+        assert_eq!(
+            serde_json::to_string(&ListOrder::Desc).unwrap(),
+            r#""desc""#
+        );
     }
 }

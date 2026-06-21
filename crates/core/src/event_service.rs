@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use ulid::Ulid;
 
 use crate::error::CoreError;
@@ -86,10 +86,8 @@ impl EventService {
         let fetch_limit = (query.limit as i64) + 1;
         let mut params_vec_with_limit = params_vec;
         params_vec_with_limit.push(Box::new(fetch_limit));
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec_with_limit
-            .iter()
-            .map(|p| p.as_ref())
-            .collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec_with_limit.iter().map(|p| p.as_ref()).collect();
 
         let mut stmt = conn.prepare(&select_sql)?;
         let rows = stmt.query_map(params_refs.as_slice(), row_to_event)?;
@@ -186,7 +184,7 @@ impl EventService {
 mod tests {
     use super::*;
     use crate::event_model::{ListEventsQuery, ListOrder};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use ulid::Ulid;
 
     #[test]
@@ -228,8 +226,22 @@ mod tests {
     #[test]
     fn list_returns_all_events_in_asc_order_by_default() {
         let svc = EventService::for_test().unwrap();
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "entry.created", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", json!({}));
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FAW", "entry.updated", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", json!({}));
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "entry.created",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            json!({}),
+        );
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "entry.updated",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            json!({}),
+        );
 
         let result = svc.list(ListEventsQuery::default()).unwrap();
         assert_eq!(result.items.len(), 2);
@@ -242,8 +254,22 @@ mod tests {
     #[test]
     fn list_desc_returns_newest_first() {
         let svc = EventService::for_test().unwrap();
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "t", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", json!({}));
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FAW", "t", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", json!({}));
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "t",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            json!({}),
+        );
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "t",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            json!({}),
+        );
 
         let result = svc
             .list(ListEventsQuery {
@@ -257,8 +283,22 @@ mod tests {
     #[test]
     fn list_since_is_exclusive() {
         let svc = EventService::for_test().unwrap();
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "t", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", json!({}));
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FAW", "t", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", json!({}));
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "t",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            json!({}),
+        );
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "t",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            json!({}),
+        );
 
         let since: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
         let result = svc
@@ -275,8 +315,22 @@ mod tests {
     #[test]
     fn list_filters_by_type() {
         let svc = EventService::for_test().unwrap();
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "entry.created", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", json!({}));
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FAW", "link.created", "link", "01ARZ3NDEKTSV4RRFFQ69G5FAX", json!({}));
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "entry.created",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            json!({}),
+        );
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "link.created",
+            "link",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            json!({}),
+        );
 
         let result = svc
             .list(ListEventsQuery {
@@ -291,9 +345,30 @@ mod tests {
     #[test]
     fn list_filters_by_target_type_and_target_id() {
         let svc = EventService::for_test().unwrap();
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "t", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAQ", json!({}));
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FAW", "t", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAR", json!({}));
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FAX", "t", "link", "01ARZ3NDEKTSV4RRFFQ69G5FAQ", json!({}));
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "t",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAQ",
+            json!({}),
+        );
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "t",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAR",
+            json!({}),
+        );
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            "t",
+            "link",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAQ",
+            json!({}),
+        );
 
         // For the unit test, just verify target_type filter alone (target_id
         // path is exercised indirectly via other tests; this test was
@@ -320,7 +395,14 @@ mod tests {
             "01ARZ3NDEKTSV4RRFFQ69G5FA4",
         ];
         for id in &ids {
-            insert_event(&svc, id, "t", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", json!({}));
+            insert_event(
+                &svc,
+                id,
+                "t",
+                "entry",
+                "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+                json!({}),
+            );
         }
 
         let result = svc
@@ -382,9 +464,30 @@ mod tests {
     #[test]
     fn purge_deletes_events_before_cursor() {
         let svc = EventService::for_test().unwrap();
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FA0", "t", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", serde_json::json!({}));
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FA1", "t", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", serde_json::json!({}));
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FA2", "t", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", serde_json::json!({}));
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FA0",
+            "t",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            serde_json::json!({}),
+        );
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FA1",
+            "t",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            serde_json::json!({}),
+        );
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FA2",
+            "t",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            serde_json::json!({}),
+        );
 
         // before is exclusive: deletes id < before.
         let before: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FA2".parse().unwrap();
@@ -398,15 +501,39 @@ mod tests {
 
         let remaining = svc.list(Default::default()).unwrap();
         assert_eq!(remaining.items.len(), 1);
-        assert_eq!(remaining.items[0].id.to_string(), "01ARZ3NDEKTSV4RRFFQ69G5FA2");
+        assert_eq!(
+            remaining.items[0].id.to_string(),
+            "01ARZ3NDEKTSV4RRFFQ69G5FA2"
+        );
     }
 
     #[test]
     fn purge_filters_by_type() {
         let svc = EventService::for_test().unwrap();
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FA0", "entry.created", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", serde_json::json!({}));
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FA1", "link.created", "link", "01ARZ3NDEKTSV4RRFFQ69G5FAX", serde_json::json!({}));
-        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FA2", "entry.created", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", serde_json::json!({}));
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FA0",
+            "entry.created",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            serde_json::json!({}),
+        );
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FA1",
+            "link.created",
+            "link",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            serde_json::json!({}),
+        );
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FA2",
+            "entry.created",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            serde_json::json!({}),
+        );
 
         let before: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAZ".parse().unwrap();
         let deleted = svc

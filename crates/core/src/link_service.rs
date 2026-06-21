@@ -96,10 +96,7 @@ impl LinkService {
                     // Map ConstraintViolation (FK + UNIQUE) to Validation per spec.
                     if let rusqlite::Error::SqliteFailure(ref fe, _) = e {
                         if fe.code == rusqlite::ErrorCode::ConstraintViolation {
-                            return Err(rusqlite::Error::SqliteFailure(
-                                *fe,
-                                None,
-                            ));
+                            return Err(rusqlite::Error::SqliteFailure(*fe, None));
                         }
                     }
                     Err(e)
@@ -175,10 +172,7 @@ impl LinkService {
                 Err(e) => return Err(e),
             };
 
-            conn.execute(
-                "DELETE FROM links WHERE id = ?1",
-                params![id.to_string()],
-            )?;
+            conn.execute("DELETE FROM links WHERE id = ?1", params![id.to_string()])?;
 
             // Emit event with before-snapshot.
             let event_id = Ulid::new();
@@ -253,8 +247,7 @@ impl LinkService {
         let count_sql = format!("SELECT COUNT(*) FROM links {where_sql}");
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
-        let total: i64 = conn
-            .query_row(&count_sql, params_refs.as_slice(), |row| row.get(0))?;
+        let total: i64 = conn.query_row(&count_sql, params_refs.as_slice(), |row| row.get(0))?;
 
         // Fetch page.
         let limit_idx = params_vec.len() + 1;
@@ -268,10 +261,8 @@ impl LinkService {
         let mut params_vec_with_paging = params_vec;
         params_vec_with_paging.push(Box::new(query.limit as i64));
         params_vec_with_paging.push(Box::new(query.offset as i64));
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec_with_paging
-            .iter()
-            .map(|p| p.as_ref())
-            .collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec_with_paging.iter().map(|p| p.as_ref()).collect();
 
         let mut stmt = conn.prepare(&select_sql)?;
         let rows = stmt.query_map(params_refs.as_slice(), row_to_link)?;
@@ -363,8 +354,12 @@ fn row_to_link_and_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Link, Ent
         target_id: from_text(2, &row.get::<_, String>(2)?, Ulid::from_string)?,
         relation: row.get(3)?,
         attrs: from_text(4, &row.get::<_, String>(4)?, |s| serde_json::from_str(s))?,
-        created_at: from_text(5, &row.get::<_, String>(5)?, chrono::DateTime::parse_from_rfc3339)?
-            .with_timezone(&Utc),
+        created_at: from_text(
+            5,
+            &row.get::<_, String>(5)?,
+            chrono::DateTime::parse_from_rfc3339,
+        )?
+        .with_timezone(&Utc),
     };
     let entry = service::row_to_entry(row, 6)?;
     Ok((link, entry))
@@ -382,8 +377,8 @@ fn row_to_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<Link> {
     let source_id = from_text(1, &source_str, Ulid::from_string)?;
     let target_id = from_text(2, &target_str, Ulid::from_string)?;
     let attrs: serde_json::Value = from_text(4, &attrs_json, |s| serde_json::from_str(s))?;
-    let created_at = from_text(5, &created_at_str, chrono::DateTime::parse_from_rfc3339)?
-        .with_timezone(&Utc);
+    let created_at =
+        from_text(5, &created_at_str, chrono::DateTime::parse_from_rfc3339)?.with_timezone(&Utc);
 
     Ok(Link {
         id,
@@ -763,7 +758,9 @@ mod tests {
     fn list_paginates_with_limit_and_offset() {
         let (entries, links) = setup();
         let a = seed_entry(&entries, "a");
-        let others: Vec<Ulid> = (0..5).map(|i| seed_entry(&entries, &format!("o{i}"))).collect();
+        let others: Vec<Ulid> = (0..5)
+            .map(|i| seed_entry(&entries, &format!("o{i}")))
+            .collect();
         for o in &others {
             seed_link(&links, a, *o, "r");
         }
@@ -901,8 +898,7 @@ mod tests {
             result.entries.iter().map(|e| e.id).collect();
         assert!(neighbor_ids.contains(&b));
         assert!(neighbor_ids.contains(&c));
-        let link_ids: std::collections::HashSet<Ulid> =
-            result.links.iter().map(|l| l.id).collect();
+        let link_ids: std::collections::HashSet<Ulid> = result.links.iter().map(|l| l.id).collect();
         assert!(link_ids.contains(&link_ab.id));
         assert!(link_ids.contains(&link_ac.id));
     }
@@ -984,7 +980,9 @@ mod tests {
     fn neighbors_respects_limit() {
         let (entries, links) = setup();
         let a = seed_entry(&entries, "a");
-        let others: Vec<Ulid> = (0..5).map(|i| seed_entry(&entries, &format!("o{i}"))).collect();
+        let others: Vec<Ulid> = (0..5)
+            .map(|i| seed_entry(&entries, &format!("o{i}")))
+            .collect();
         for o in &others {
             seed_link(&links, a, *o, "r");
         }

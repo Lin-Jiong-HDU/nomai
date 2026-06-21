@@ -180,10 +180,7 @@ impl ChunkService {
                 Err(e) => return Err(e),
             };
 
-            conn.execute(
-                "DELETE FROM chunks WHERE id = ?1",
-                params![id.to_string()],
-            )?;
+            conn.execute("DELETE FROM chunks WHERE id = ?1", params![id.to_string()])?;
 
             // Emit event with before-snapshot.
             let event_id = Ulid::new();
@@ -322,10 +319,10 @@ fn row_to_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chunk> {
     let id = from_text(0, &id_str, Ulid::from_string)?;
     let entry_id = from_text(1, &entry_id_str, Ulid::from_string)?;
     let attrs: serde_json::Value = from_text(4, &attrs_json, |s| serde_json::from_str(s))?;
-    let created_at = from_text(5, &created_at_str, chrono::DateTime::parse_from_rfc3339)?
-        .with_timezone(&Utc);
-    let updated_at = from_text(6, &updated_at_str, chrono::DateTime::parse_from_rfc3339)?
-        .with_timezone(&Utc);
+    let created_at =
+        from_text(5, &created_at_str, chrono::DateTime::parse_from_rfc3339)?.with_timezone(&Utc);
+    let updated_at =
+        from_text(6, &updated_at_str, chrono::DateTime::parse_from_rfc3339)?.with_timezone(&Utc);
 
     Ok(Chunk {
         id,

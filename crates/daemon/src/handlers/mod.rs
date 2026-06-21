@@ -445,7 +445,10 @@ mod tests {
             .await;
 
         let resp = daemon
-            .dispatch(req("link.neighbors", json!({"id": a_id, "direction": "out"})))
+            .dispatch(req(
+                "link.neighbors",
+                json!({"id": a_id, "direction": "out"}),
+            ))
             .await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
@@ -483,7 +486,9 @@ mod tests {
         assert!(del.error.is_none());
         assert_eq!(del.result.unwrap()["deleted"], true);
 
-        let get = daemon.dispatch(req("link.get", json!({"id": link_id}))).await;
+        let get = daemon
+            .dispatch(req("link.get", json!({"id": link_id})))
+            .await;
         assert_eq!(get.error.unwrap().code, 1001); // NotFound
     }
 
@@ -518,10 +523,7 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let create_resp = daemon
-            .dispatch(req(
-                "entry.create",
-                json!({"title":"Note","body":"Hello"}),
-            ))
+            .dispatch(req("entry.create", json!({"title":"Note","body":"Hello"})))
             .await;
         assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
 
@@ -545,7 +547,10 @@ mod tests {
         let create_resp = daemon
             .dispatch(req("entry.create", json!({"title":"orig","body":"x"})))
             .await;
-        let id = create_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let id = create_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         daemon
             .dispatch(req("entry.update", json!({"id": id, "title": "new"})))
             .await;
@@ -709,12 +714,12 @@ mod tests {
 
         // Create an entry first.
         let entry_resp = daemon
-            .dispatch(req(
-                "entry.create",
-                json!({"title":"doc","body":"x"}),
-            ))
+            .dispatch(req("entry.create", json!({"title":"doc","body":"x"})))
             .await;
-        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let entry_id = entry_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // Create a chunk (will fire embedding HTTP call for chunk text).
         let create_resp = daemon
@@ -760,7 +765,10 @@ mod tests {
         let entry_resp = daemon
             .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
             .await;
-        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let entry_id = entry_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // Create chunks out of order.
         for ord in [2, 0, 1] {
@@ -792,14 +800,20 @@ mod tests {
         let entry_resp = daemon
             .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
             .await;
-        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let entry_id = entry_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let create_resp = daemon
             .dispatch(req(
                 "chunk.create",
                 json!({"entry_id": entry_id, "ordinal": 0, "text":"x"}),
             ))
             .await;
-        let chunk_id = create_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let chunk_id = create_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // Verify semantic search finds the chunk.
         let search_resp = daemon
@@ -839,7 +853,10 @@ mod tests {
         let entry_resp = daemon
             .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
             .await;
-        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let entry_id = entry_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // Create a chunk.
         daemon
@@ -871,7 +888,10 @@ mod tests {
         let entry_resp = daemon
             .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
             .await;
-        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let entry_id = entry_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         daemon
             .dispatch(req(
@@ -902,7 +922,10 @@ mod tests {
         let entry_resp = daemon
             .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
             .await;
-        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let entry_id = entry_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // Create 2 chunks.
         for ord in 0..2 {
@@ -938,7 +961,9 @@ mod tests {
         assert_eq!(post.result.unwrap()["items"].as_array().unwrap().len(), 0);
 
         // entry.list should not return the deleted entry.
-        let list = daemon.dispatch(req("entry.list", json!({"limit":100}))).await;
+        let list = daemon
+            .dispatch(req("entry.list", json!({"limit":100})))
+            .await;
         let result = list.result.unwrap();
         let items = result["items"].as_array().unwrap();
         assert!(items.iter().all(|e| e["id"].as_str().unwrap() != entry_id));
@@ -953,7 +978,10 @@ mod tests {
         let entry_resp = daemon
             .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
             .await;
-        let entry_id = entry_resp.result.unwrap()["id"].as_str().unwrap().to_string();
+        let entry_id = entry_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         daemon
             .dispatch(req(
@@ -963,10 +991,7 @@ mod tests {
             .await;
 
         let list_resp = daemon
-            .dispatch(req(
-                "events.list",
-                json!({"type":"chunk.created"}),
-            ))
+            .dispatch(req("events.list", json!({"type":"chunk.created"})))
             .await;
         let result = list_resp.result.unwrap();
         let items = result["items"].as_array().unwrap();

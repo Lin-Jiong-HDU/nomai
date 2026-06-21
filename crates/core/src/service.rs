@@ -284,10 +284,8 @@ impl EntryService {
                 Err(e) => return Err(e),
             };
 
-            let affected = conn.execute(
-                "DELETE FROM entries WHERE id=?1",
-                params![id.to_string()],
-            )?;
+            let affected =
+                conn.execute("DELETE FROM entries WHERE id=?1", params![id.to_string()])?;
             // affected must be 1 here because we found the row above.
             debug_assert_eq!(affected, 1);
 
@@ -343,10 +341,9 @@ impl EntryService {
                  LIMIT ?2 OFFSET ?3"
             );
             let mut stmt = conn.prepare(&sql)?;
-            let rows =
-                stmt.query_map(params![tag, query.limit, query.offset], |row| {
-                    row_to_entry(row, 0)
-                })?;
+            let rows = stmt.query_map(params![tag, query.limit, query.offset], |row| {
+                row_to_entry(row, 0)
+            })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             let sql = format!(
@@ -356,10 +353,9 @@ impl EntryService {
                  LIMIT ?1 OFFSET ?2"
             );
             let mut stmt = conn.prepare(&sql)?;
-            let rows =
-                stmt.query_map(params![query.limit, query.offset], |row| {
-                    row_to_entry(row, 0)
-                })?;
+            let rows = stmt.query_map(params![query.limit, query.offset], |row| {
+                row_to_entry(row, 0)
+            })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
 
@@ -545,12 +541,18 @@ pub(crate) fn row_to_entry(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::
     let id = from_text(offset, &id_str, Ulid::from_string)?;
     let tags: Vec<String> = from_text(offset + 3, &tags_json, |s| serde_json::from_str(s))?;
     let attrs: Value = from_text(offset + 4, &attrs_json, |s| serde_json::from_str(s))?;
-    let created_at =
-        from_text(offset + 6, &created_at_str, chrono::DateTime::parse_from_rfc3339)?
-            .with_timezone(&Utc);
-    let updated_at =
-        from_text(offset + 7, &updated_at_str, chrono::DateTime::parse_from_rfc3339)?
-            .with_timezone(&Utc);
+    let created_at = from_text(
+        offset + 6,
+        &created_at_str,
+        chrono::DateTime::parse_from_rfc3339,
+    )?
+    .with_timezone(&Utc);
+    let updated_at = from_text(
+        offset + 7,
+        &updated_at_str,
+        chrono::DateTime::parse_from_rfc3339,
+    )?
+    .with_timezone(&Utc);
 
     Ok(Entry {
         id,
@@ -638,9 +640,7 @@ mod tests {
             .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='links'")
             .unwrap();
         let sql: String = stmt.query_row([], |row| row.get(0)).unwrap();
-        assert!(sql.contains(
-            "FOREIGN KEY (source_id) REFERENCES entries(id) ON DELETE CASCADE"
-        ));
+        assert!(sql.contains("FOREIGN KEY (source_id) REFERENCES entries(id) ON DELETE CASCADE"));
         assert!(sql.contains("UNIQUE(source_id, target_id, relation)"));
     }
 
@@ -1045,8 +1045,8 @@ mod tests {
 
     #[test]
     fn create_emits_entry_created_event_with_full_snapshot() {
-        use crate::event_service::EventService;
         use crate::CreateEntry;
+        use crate::event_service::EventService;
 
         let entries = EntryService::for_test().unwrap();
         let events = EventService::for_test_shared_with_entries(&entries);
@@ -1073,8 +1073,8 @@ mod tests {
 
     #[test]
     fn update_emits_entry_updated_event_with_after_snapshot() {
-        use crate::event_service::EventService;
         use crate::CreateEntry;
+        use crate::event_service::EventService;
 
         let entries = EntryService::for_test().unwrap();
         let events = EventService::for_test_shared_with_entries(&entries);
@@ -1112,8 +1112,8 @@ mod tests {
 
     #[test]
     fn delete_emits_entry_deleted_event_with_before_snapshot() {
-        use crate::event_service::EventService;
         use crate::CreateEntry;
+        use crate::event_service::EventService;
 
         let entries = EntryService::for_test().unwrap();
         let events = EventService::for_test_shared_with_entries(&entries);
