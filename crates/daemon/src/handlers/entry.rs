@@ -78,13 +78,21 @@ pub async fn update(daemon: &Daemon, params: Value) -> Result<Value, CoreError> 
     let updated = blocking(move || entries.update(id_for_update, fields)).await??;
 
     // Re-embed if body changed.
-    if updated.body != old_body && !updated.body.is_empty() {
-        let body = updated.body.clone();
-        let embeddings = daemon.embedder.embed(&[&body]).await?;
-        if let Some(emb) = embeddings.into_iter().next() {
+    if updated.body != old_body {
+        if updated.body.is_empty() {
+            // body cleared — remove stale embedding so searches no longer match.
             let entries = daemon.entries.clone();
             let id = updated.id;
-            blocking(move || entries.write_embedding(id, &emb)).await??;
+            blocking(move || entries.delete_embedding(id)).await??;
+        } else {
+            // body changed (non-empty) — re-embed.
+            let body = updated.body.clone();
+            let embeddings = daemon.embedder.embed(&[&body]).await?;
+            if let Some(emb) = embeddings.into_iter().next() {
+                let entries = daemon.entries.clone();
+                let id = updated.id;
+                blocking(move || entries.write_embedding(id, &emb)).await??;
+            }
         }
     }
 

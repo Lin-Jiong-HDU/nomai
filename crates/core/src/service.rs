@@ -307,6 +307,20 @@ impl EntryService {
         Ok(())
     }
 
+    /// Delete the stored embedding for an entry, if any.
+    ///
+    /// Used when an entry's body is cleared (set to empty) so the previous
+    /// embedding no longer matches semantic searches. Returns `Ok(())` whether
+    /// or not a row existed (delete-by-id is idempotent at the call site).
+    pub fn delete_embedding(&self, id: Ulid) -> Result<(), CoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM vec_embeddings WHERE entry_id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn write_embedding(&self, id: Ulid, embedding: &[f32]) -> Result<(), CoreError> {
         let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
         let id_str = id.to_string();
@@ -822,6 +836,34 @@ mod tests {
         storage::init_sqlite_extensions();
         let svc = EntryService::for_test().unwrap();
         svc.ensure_vec_embeddings(2).unwrap();
+        let hits = svc.semantic_search(&[1.0, 0.0], 10).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn delete_embedding_removes_row() {
+        storage::init_sqlite_extensions();
+        let svc = EntryService::for_test().unwrap();
+        svc.ensure_vec_embeddings(2).unwrap();
+
+        let e = svc
+            .create(CreateEntry {
+                title: "t".into(),
+                body: "b".into(),
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+        svc.write_embedding(e.id, &[1.0, 0.0]).unwrap();
+
+        // Precondition: search finds the row.
+        let hits = svc.semantic_search(&[1.0, 0.0], 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry.id, e.id);
+
+        // Delete, then search returns empty.
+        svc.delete_embedding(e.id).unwrap();
         let hits = svc.semantic_search(&[1.0, 0.0], 10).unwrap();
         assert!(hits.is_empty());
     }
