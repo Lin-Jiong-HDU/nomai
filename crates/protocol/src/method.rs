@@ -29,6 +29,16 @@ pub mod provider {
     pub const SET: &str = "provider.set";
 }
 
+pub mod link {
+    pub const CREATE: &str = "link.create";
+    pub const GET: &str = "link.get";
+    pub const DELETE: &str = "link.delete";
+    pub const LIST: &str = "link.list";
+    pub const NEIGHBORS: &str = "link.neighbors";
+    /// Reserved for Phase 2 (spec §5): returns `METHOD_NOT_FOUND` (-32601).
+    pub const TRAVERSE: &str = "link.traverse";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,5 +64,14 @@ mod tests {
         assert_eq!(qa::ASK, "qa.ask");
         assert_eq!(provider::LIST, "provider.list");
         assert_eq!(provider::SET, "provider.set");
+    }
+
+    #[test]
+    fn link_namespace_methods() {
+        assert_eq!(link::CREATE, "link.create");
+        assert_eq!(link::GET, "link.get");
+        assert_eq!(link::DELETE, "link.delete");
+        assert_eq!(link::LIST, "link.list");
+        assert_eq!(link::NEIGHBORS, "link.neighbors");
     }
 }
