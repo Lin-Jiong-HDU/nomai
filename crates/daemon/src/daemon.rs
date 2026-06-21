@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
-use nomai_core::{CoreError, EntryService, LinkService};
+use nomai_core::{CoreError, EntryService, EventService, LinkService};
 use nomai_providers::{EmbeddingProvider, LlmProvider, OpenAiCompatibleEmbed, OpenAiCompatibleLlm};
 
 use crate::config::Config;
@@ -12,6 +12,8 @@ use crate::config::Config;
 pub struct Daemon {
     pub(crate) entries: Arc<EntryService>,
     pub(crate) links: Arc<LinkService>,
+    #[allow(dead_code)]
+    pub(crate) events: Arc<EventService>,
     pub(crate) embedder: Arc<dyn EmbeddingProvider>,
     pub(crate) llm: Arc<dyn LlmProvider>,
     pub(crate) embedding_model: String,
@@ -31,6 +33,7 @@ impl Daemon {
         // Run migrations + ensure vec_embeddings exists.
         let entries = Arc::new(EntryService::new(conn.clone())?);
         let links = Arc::new(LinkService::new(conn.clone())?);
+        let events = Arc::new(EventService::new(conn.clone())?);
         entries.ensure_vec_embeddings(config.embedding.dim)?;
 
         // Read API keys (config.validate already checked env var presence).
@@ -55,6 +58,7 @@ impl Daemon {
         Ok(Self {
             entries,
             links,
+            events,
             embedder,
             llm,
             embedding_model: config.embedding.model,
@@ -77,9 +81,12 @@ impl Daemon {
         // accessor to share it with LinkService.
         let conn = entries.conn_for_test();
         let links = Arc::new(LinkService::new(conn).unwrap());
+        let conn2 = entries.conn_for_test();
+        let events = Arc::new(EventService::new(conn2).unwrap());
         Self {
             entries,
             links,
+            events,
             embedder,
             llm,
             embedding_model,
