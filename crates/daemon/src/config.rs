@@ -92,6 +92,15 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static CONFIG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Acquire the global lock for config tests so env var mutations don't race
+    /// under `cargo test` parallelism (process-global env vars are not thread-safe).
+    fn lock() -> MutexGuard<'static, ()> {
+        CONFIG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn unset(name: &str) -> Option<String> {
         std::env::var(name).ok().inspect(|_| {
@@ -109,6 +118,7 @@ mod tests {
 
     #[test]
     fn parses_minimal_config() {
+        let _guard = lock();
         let old_emb = unset("TEST_OPENAI_KEY");
         let old_llm = unset("TEST_OPENAI_KEY");
         // SAFETY: tests are single-threaded within this module.
@@ -142,6 +152,7 @@ model = "gpt-4o-mini"
 
     #[test]
     fn rejects_missing_env_var() {
+        let _guard = lock();
         let old = unset("TEST_DEFINITELY_MISSING_KEY");
         let toml_text = r#"
 [embedding]
@@ -164,6 +175,7 @@ model = "x"
 
     #[test]
     fn data_section_is_optional_with_default_db_path() {
+        let _guard = lock();
         let old = unset("TEST_OPENAI_KEY");
         // SAFETY: tests are single-threaded within this module.
         unsafe { std::env::set_var("TEST_OPENAI_KEY", "sk") };
