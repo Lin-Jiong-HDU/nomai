@@ -90,9 +90,23 @@ nomai/
 │   ├── core/        # Services + storage (pure lib)
 │   ├── providers/   # EmbeddingProvider / LlmProvider trait + OpenAI impl
 │   └── daemon/      # Binary: stdio loop + RPC dispatch
+├── hooks/           # Git hooks (version-controlled)
+│   └── pre-commit   # Runs `cargo fmt --check` on staged .rs files
 └── docs/
     └── guide.md     # Developer guide
 ```
+
+## Development
+
+**After clone**, enable the pre-commit hook (one-time):
+
+```fish
+git config core.hooksPath hooks
+```
+
+The hook runs `cargo fmt --check` whenever `.rs` files are staged, blocking the commit if code is not rustfmt-clean. Bypass once with `git commit --no-verify`.
+
+Before pushing: `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`.
 
 ## License
 
