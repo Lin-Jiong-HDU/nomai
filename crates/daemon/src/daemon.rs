@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
-use nomai_core::{CoreError, EntryService, EventService, LinkService};
+use nomai_core::{ChunkService, CoreError, EntryService, EventService, LinkService};
 use nomai_providers::{EmbeddingProvider, LlmProvider, OpenAiCompatibleEmbed, OpenAiCompatibleLlm};
 
 use crate::config::Config;
@@ -13,6 +13,7 @@ pub struct Daemon {
     pub(crate) entries: Arc<EntryService>,
     pub(crate) links: Arc<LinkService>,
     pub(crate) events: Arc<EventService>,
+    pub(crate) chunks: Arc<ChunkService>,
     pub(crate) embedder: Arc<dyn EmbeddingProvider>,
     pub(crate) llm: Arc<dyn LlmProvider>,
     pub(crate) embedding_model: String,
@@ -29,10 +30,12 @@ impl Daemon {
         let conn = Connection::open(&db_path)?;
         let conn = Arc::new(Mutex::new(conn));
 
-        // Run migrations + ensure vec_embeddings exists.
+        // Run migrations + ensure vec_embeddings / vec_chunk_embeddings exist.
         let entries = Arc::new(EntryService::new(conn.clone())?);
         let links = Arc::new(LinkService::new(conn.clone())?);
         let events = Arc::new(EventService::new(conn.clone())?);
+        let chunks = Arc::new(ChunkService::new(conn.clone())?);
+        chunks.ensure_vec_chunk_embeddings(config.embedding.dim)?;
         entries.ensure_vec_embeddings(config.embedding.dim)?;
 
         // Read API keys (config.validate already checked env var presence).
@@ -58,6 +61,7 @@ impl Daemon {
             entries,
             links,
             events,
+            chunks,
             embedder,
             llm,
             embedding_model: config.embedding.model,
@@ -82,10 +86,13 @@ impl Daemon {
         let links = Arc::new(LinkService::new(conn).unwrap());
         let conn2 = entries.conn_for_test();
         let events = Arc::new(EventService::new(conn2).unwrap());
+        let conn3 = entries.conn_for_test();
+        let chunks = Arc::new(ChunkService::new(conn3).unwrap());
         Self {
             entries,
             links,
             events,
+            chunks,
             embedder,
             llm,
             embedding_model,

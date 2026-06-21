@@ -107,6 +107,27 @@ pub async fn delete(daemon: &Daemon, params: Value) -> Result<Value, CoreError> 
     let p: Params = serde_json::from_value(params)
         .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
+    // Cleanup chunk embeddings before entry deletion (spec §11 方案 D).
+    // vec_chunk_embeddings is a vec0 virtual table without FK CASCADE —
+    // if we don't clean up here, deleting the entry CASCADE-deletes the
+    // chunk rows but leaves orphan vectors in vec_chunk_embeddings.
+    //
+    // Use a large limit (u32::MAX) as "no effective ceiling" — SQLite
+    // handles it fine and real-world single entries don't approach it.
+    let chunks = daemon.chunks.clone();
+    let id_for_list = p.id;
+    let chunk_ids: Vec<ulid::Ulid> = blocking(move || {
+        let result = chunks.list(id_for_list, u32::MAX, 0)?;
+        Ok(result.items.into_iter().map(|c| c.id).collect::<Vec<_>>())
+    })
+    .await??;
+
+    for cid in chunk_ids {
+        let chunks = daemon.chunks.clone();
+        blocking(move || chunks.delete_embedding(cid)).await??;
+    }
+
+    // Now delete the entry — FK CASCADE will remove chunk rows automatically.
     let entries = daemon.entries.clone();
     blocking(move || entries.delete(p.id)).await??;
     Ok(json!({ "deleted": true }))
