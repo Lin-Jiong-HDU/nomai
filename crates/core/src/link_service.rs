@@ -2,6 +2,7 @@
 //!
 //! See spec §4-§5 for schema and RPC contract.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -9,7 +10,11 @@ use rusqlite::{Connection, params};
 use ulid::Ulid;
 
 use crate::error::CoreError;
-use crate::link_model::{CreateLink, Link, ListLinkQuery, ListLinkResult};
+use crate::link_model::{
+    CreateLink, Direction, Link, ListLinkQuery, ListLinkResult, NeighborsQuery, NeighborsResult,
+};
+use crate::model::Entry;
+use crate::service;
 use crate::storage;
 
 pub struct LinkService {
@@ -201,6 +206,92 @@ impl LinkService {
             total: total as u64,
         })
     }
+
+    /// List neighbor entries + the links that connect them to `query.id`,
+    /// filtered by direction (Out / In / Both) and optional `relation`.
+    ///
+    /// In Both mode, the same neighbor entry appears at most once in `entries`
+    /// even if connected via multiple links (e.g. A→B and B→A); `links`
+    /// contains every matching link.
+    pub fn neighbors(&self, query: NeighborsQuery) -> Result<NeighborsResult, CoreError> {
+        let conn = self.conn.lock().unwrap();
+
+        // Build the WHERE clause based on direction. The query node `id` is
+        // matched against source_id (Out), target_id (In), or both (Both).
+        let direction_filter = match query.direction {
+            Direction::Out => "(source_id = ?1)",
+            Direction::In => "(target_id = ?1)",
+            Direction::Both => "(source_id = ?1 OR target_id = ?1)",
+        };
+
+        let relation_filter = if query.relation.is_some() {
+            " AND relation = ?2"
+        } else {
+            ""
+        };
+
+        let limit_param_idx = if query.relation.is_some() { 3 } else { 2 };
+
+        let sql = format!(
+            "SELECT l.id, l.source_id, l.target_id, l.relation, l.attrs, l.created_at,
+                    e.id, e.title, e.body, e.tags, e.attrs, e.source, e.created_at, e.updated_at
+             FROM links l
+             JOIN entries e ON e.id = CASE WHEN l.source_id = ?1 THEN l.target_id ELSE l.source_id END
+             WHERE {direction_filter}{relation_filter}
+             ORDER BY l.created_at, l.id
+             LIMIT ?{limit_param_idx}"
+        );
+
+        let id_str = query.id.to_string();
+
+        // `query_map` borrows from `stmt`; we materialize the rows to a Vec
+        // inside each branch so the borrow is released before we iterate and
+        // mutate `links` / `entries`.
+        let mapped: Vec<rusqlite::Result<(Link, Entry)>> = match query.relation {
+            Some(ref rel) => {
+                let mut stmt = conn.prepare(&sql)?;
+                stmt.query_map(
+                    params![id_str, rel.clone(), query.limit as i64],
+                    row_to_link_and_entry,
+                )?
+                .collect()
+            }
+            None => {
+                let mut stmt = conn.prepare(&sql)?;
+                stmt.query_map(params![id_str, query.limit as i64], row_to_link_and_entry)?
+                    .collect()
+            }
+        };
+
+        let mut links: Vec<Link> = Vec::new();
+        let mut entries: Vec<Entry> = Vec::new();
+        let mut seen: HashSet<Ulid> = HashSet::new();
+
+        for row_result in mapped {
+            let (link, entry) = row_result?;
+            if seen.insert(entry.id) {
+                entries.push(entry);
+            }
+            links.push(link);
+        }
+
+        Ok(NeighborsResult { entries, links })
+    }
+}
+
+fn row_to_link_and_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Link, Entry)> {
+    // Link columns: 0..6; Entry columns: 6..14.
+    let link = Link {
+        id: from_text(0, &row.get::<_, String>(0)?, Ulid::from_string)?,
+        source_id: from_text(1, &row.get::<_, String>(1)?, Ulid::from_string)?,
+        target_id: from_text(2, &row.get::<_, String>(2)?, Ulid::from_string)?,
+        relation: row.get(3)?,
+        attrs: from_text(4, &row.get::<_, String>(4)?, |s| serde_json::from_str(s))?,
+        created_at: from_text(5, &row.get::<_, String>(5)?, chrono::DateTime::parse_from_rfc3339)?
+            .with_timezone(&Utc),
+    };
+    let entry = service::row_to_entry(row, 6)?;
+    Ok((link, entry))
 }
 
 fn row_to_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<Link> {
@@ -690,5 +781,164 @@ mod tests {
             links.get(link_ca.id).unwrap_err(),
             CoreError::NotFound(_)
         ));
+    }
+
+    use crate::{Direction, NeighborsQuery};
+
+    #[test]
+    fn neighbors_out_returns_target_entries_and_links() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+        let c = seed_entry(&entries, "c");
+
+        let link_ab = links
+            .create(CreateLink {
+                source_id: a,
+                target_id: b,
+                relation: "r".into(),
+                attrs: None,
+            })
+            .unwrap();
+        let link_ac = links
+            .create(CreateLink {
+                source_id: a,
+                target_id: c,
+                relation: "r".into(),
+                attrs: None,
+            })
+            .unwrap();
+        // Irrelevant: someone else's link, and a link into a.
+        seed_link(&links, b, c, "r");
+
+        let result = links
+            .neighbors(NeighborsQuery {
+                id: a,
+                relation: None,
+                direction: Direction::Out,
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(result.links.len(), 2);
+        assert_eq!(result.entries.len(), 2);
+        let neighbor_ids: std::collections::HashSet<Ulid> =
+            result.entries.iter().map(|e| e.id).collect();
+        assert!(neighbor_ids.contains(&b));
+        assert!(neighbor_ids.contains(&c));
+        let link_ids: std::collections::HashSet<Ulid> =
+            result.links.iter().map(|l| l.id).collect();
+        assert!(link_ids.contains(&link_ab.id));
+        assert!(link_ids.contains(&link_ac.id));
+    }
+
+    #[test]
+    fn neighbors_in_returns_source_entries_and_links() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+        let c = seed_entry(&entries, "c");
+
+        seed_link(&links, b, a, "r");
+        seed_link(&links, c, a, "r");
+        // Irrelevant.
+        seed_link(&links, a, b, "r");
+
+        let result = links
+            .neighbors(NeighborsQuery {
+                id: a,
+                relation: None,
+                direction: Direction::In,
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(result.entries.len(), 2);
+        let neighbor_ids: std::collections::HashSet<Ulid> =
+            result.entries.iter().map(|e| e.id).collect();
+        assert!(neighbor_ids.contains(&b));
+        assert!(neighbor_ids.contains(&c));
+    }
+
+    #[test]
+    fn neighbors_both_dedupes_entries() {
+        // If A → B and B → A both exist, neighbors(both) of A should return
+        // B exactly once (in entries), even though there are two links.
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+
+        seed_link(&links, a, b, "r");
+        seed_link(&links, b, a, "r");
+
+        let result = links
+            .neighbors(NeighborsQuery {
+                id: a,
+                relation: None,
+                direction: Direction::Both,
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].id, b);
+        assert_eq!(result.links.len(), 2); // both links returned
+    }
+
+    #[test]
+    fn neighbors_filters_by_relation() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+
+        seed_link(&links, a, b, "references");
+        seed_link(&links, a, b, "see_also");
+
+        let result = links
+            .neighbors(NeighborsQuery {
+                id: a,
+                relation: Some("references".into()),
+                direction: Direction::Out,
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(result.links.len(), 1);
+        assert_eq!(result.links[0].relation, "references");
+        assert_eq!(result.entries.len(), 1);
+    }
+
+    #[test]
+    fn neighbors_respects_limit() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let others: Vec<Ulid> = (0..5).map(|i| seed_entry(&entries, &format!("o{i}"))).collect();
+        for o in &others {
+            seed_link(&links, a, *o, "r");
+        }
+
+        let result = links
+            .neighbors(NeighborsQuery {
+                id: a,
+                relation: None,
+                direction: Direction::Out,
+                limit: 3,
+            })
+            .unwrap();
+        assert_eq!(result.links.len(), 3);
+        assert_eq!(result.entries.len(), 3);
+    }
+
+    #[test]
+    fn neighbors_returns_empty_for_isolated_entry() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+
+        let result = links
+            .neighbors(NeighborsQuery {
+                id: a,
+                relation: None,
+                direction: Direction::Both,
+                limit: 50,
+            })
+            .unwrap();
+        assert!(result.entries.is_empty());
+        assert!(result.links.is_empty());
     }
 }
