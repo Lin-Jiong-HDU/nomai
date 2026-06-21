@@ -45,6 +45,13 @@ pub mod events {
     pub const PURGE: &str = "events.purge";
 }
 
+pub mod chunk {
+    pub const CREATE: &str = "chunk.create";
+    pub const GET: &str = "chunk.get";
+    pub const DELETE: &str = "chunk.delete";
+    pub const LIST: &str = "chunk.list";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +93,13 @@ mod tests {
         assert_eq!(events::LIST, "events.list");
         assert_eq!(events::GET, "events.get");
         assert_eq!(events::PURGE, "events.purge");
+    }
+
+    #[test]
+    fn chunk_namespace_methods() {
+        assert_eq!(chunk::CREATE, "chunk.create");
+        assert_eq!(chunk::GET, "chunk.get");
+        assert_eq!(chunk::DELETE, "chunk.delete");
+        assert_eq!(chunk::LIST, "chunk.list");
     }
 }
