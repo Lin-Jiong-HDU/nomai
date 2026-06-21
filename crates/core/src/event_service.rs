@@ -6,11 +6,11 @@
 
 use std::sync::{Arc, Mutex};
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use ulid::Ulid;
 
 use crate::error::CoreError;
-use crate::event_model::{Event, ListEventsQuery, ListEventsResult, ListOrder};
+use crate::event_model::{Event, ListEventsQuery, ListEventsResult, ListOrder, PurgeQuery};
 use crate::storage;
 
 pub struct EventService {
@@ -101,6 +101,36 @@ impl EventService {
         }
 
         Ok(ListEventsResult { items, has_more })
+    }
+
+    pub fn get(&self, id: Ulid) -> Result<Event, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        match conn.query_row(
+            "SELECT id, type, target_type, target_id, payload, created_at
+             FROM events WHERE id = ?1",
+            params![id.to_string()],
+            row_to_event,
+        ) {
+            Ok(event) => Ok(event),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(CoreError::NotFound(id)),
+            Err(e) => Err(CoreError::Storage(e)),
+        }
+    }
+
+    pub fn purge(&self, query: PurgeQuery) -> Result<u64, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = if let Some(ref t) = query.type_ {
+            conn.execute(
+                "DELETE FROM events WHERE id < ?1 AND type = ?2",
+                params![query.before.to_string(), t.clone()],
+            )?
+        } else {
+            conn.execute(
+                "DELETE FROM events WHERE id < ?1",
+                params![query.before.to_string()],
+            )?
+        };
+        Ok(affected as u64)
     }
 }
 
@@ -310,5 +340,87 @@ mod tests {
         let result = svc.list(ListEventsQuery::default()).unwrap();
         assert!(result.items.is_empty());
         assert!(!result.has_more);
+    }
+
+    #[test]
+    fn get_returns_event_by_id() {
+        let svc = EventService::for_test().unwrap();
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "entry.created",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            serde_json::json!({"title": "x"}),
+        );
+
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let event = svc.get(id).unwrap();
+        assert_eq!(event.type_, "entry.created");
+        assert_eq!(event.target_type, "entry");
+    }
+
+    #[test]
+    fn get_returns_not_found_for_unknown_id() {
+        let svc = EventService::for_test().unwrap();
+        let phantom: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let err = svc.get(phantom).unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn purge_deletes_events_before_cursor() {
+        let svc = EventService::for_test().unwrap();
+        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FA0", "t", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", serde_json::json!({}));
+        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FA1", "t", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", serde_json::json!({}));
+        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FA2", "t", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", serde_json::json!({}));
+
+        // before is exclusive: deletes id < before.
+        let before: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FA2".parse().unwrap();
+        let deleted = svc
+            .purge(PurgeQuery {
+                before,
+                type_: None,
+            })
+            .unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining = svc.list(Default::default()).unwrap();
+        assert_eq!(remaining.items.len(), 1);
+        assert_eq!(remaining.items[0].id.to_string(), "01ARZ3NDEKTSV4RRFFQ69G5FA2");
+    }
+
+    #[test]
+    fn purge_filters_by_type() {
+        let svc = EventService::for_test().unwrap();
+        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FA0", "entry.created", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", serde_json::json!({}));
+        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FA1", "link.created", "link", "01ARZ3NDEKTSV4RRFFQ69G5FAX", serde_json::json!({}));
+        insert_event(&svc, "01ARZ3NDEKTSV4RRFFQ69G5FA2", "entry.created", "entry", "01ARZ3NDEKTSV4RRFFQ69G5FAX", serde_json::json!({}));
+
+        let before: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAZ".parse().unwrap();
+        let deleted = svc
+            .purge(PurgeQuery {
+                before,
+                type_: Some("entry.created".into()),
+            })
+            .unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining = svc.list(Default::default()).unwrap();
+        assert_eq!(remaining.items.len(), 1);
+        assert_eq!(remaining.items[0].type_, "link.created");
+    }
+
+    #[test]
+    fn purge_returns_zero_when_nothing_matches() {
+        let svc = EventService::for_test().unwrap();
+        let before: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let deleted = svc
+            .purge(PurgeQuery {
+                before,
+                type_: None,
+            })
+            .unwrap();
+        assert_eq!(deleted, 0);
     }
 }
