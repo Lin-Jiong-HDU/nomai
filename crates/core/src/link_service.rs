@@ -77,25 +77,59 @@ impl LinkService {
         };
 
         let conn = self.conn.lock().unwrap();
-        let result = conn.execute(
-            "INSERT INTO links (id, source_id, target_id, relation, attrs, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                link.id.to_string(),
-                link.source_id.to_string(),
-                link.target_id.to_string(),
-                &link.relation,
-                link.attrs.to_string(),
-                link.created_at.to_rfc3339(),
-            ],
-        );
-
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            match conn.execute(
+                "INSERT INTO links (id, source_id, target_id, relation, attrs, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    link.id.to_string(),
+                    link.source_id.to_string(),
+                    link.target_id.to_string(),
+                    &link.relation,
+                    link.attrs.to_string(),
+                    link.created_at.to_rfc3339(),
+                ],
+            ) {
+                Ok(_) => Ok::<(), rusqlite::Error>(()),
+                Err(e) => {
+                    // Map ConstraintViolation (FK + UNIQUE) to Validation per spec.
+                    if let rusqlite::Error::SqliteFailure(ref fe, _) = e {
+                        if fe.code == rusqlite::ErrorCode::ConstraintViolation {
+                            return Err(rusqlite::Error::SqliteFailure(
+                                *fe,
+                                None,
+                            ));
+                        }
+                    }
+                    Err(e)
+                }
+            }?;
+            // Emit event.
+            let event_id = Ulid::new();
+            let event_payload = serde_json::to_value(&link).expect("link serialize");
+            conn.execute(
+                "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    event_id.to_string(),
+                    "link.created",
+                    "link",
+                    link.id.to_string(),
+                    event_payload.to_string(),
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            Ok(())
+        })();
         match result {
-            Ok(_) => Ok(link),
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(link)
+            }
             Err(e) => {
-                // FK violation (SQLITE_CONSTRAINT ForeignKey) or UNIQUE
-                // violation (SQLITE_CONSTRAINT PrimaryKey/Unique) both map to
-                // Validation per spec §5.
+                let _ = conn.execute_batch("ROLLBACK");
+                // Re-apply error mapping (FK + UNIQUE → Validation).
                 if let rusqlite::Error::SqliteFailure(ref fe, _) = e {
                     if fe.code == rusqlite::ErrorCode::ConstraintViolation {
                         return Err(CoreError::Validation(format!(
@@ -126,14 +160,56 @@ impl LinkService {
     /// Delete a link by id. Returns `CoreError::NotFound` if no link has this id.
     pub fn delete(&self, id: Ulid) -> Result<(), CoreError> {
         let conn = self.conn.lock().unwrap();
-        let affected = conn.execute(
-            "DELETE FROM links WHERE id = ?1",
-            params![id.to_string()],
-        )?;
-        if affected == 0 {
-            Err(CoreError::NotFound(id))
-        } else {
-            Ok(())
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<Option<()>> {
+            // SELECT before-snapshot.
+            let row_result = conn.query_row(
+                "SELECT id, source_id, target_id, relation, attrs, created_at
+                 FROM links WHERE id = ?1",
+                params![id.to_string()],
+                row_to_link,
+            );
+            let before_link = match row_result {
+                Ok(l) => l,
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+                Err(e) => return Err(e),
+            };
+
+            conn.execute(
+                "DELETE FROM links WHERE id = ?1",
+                params![id.to_string()],
+            )?;
+
+            // Emit event with before-snapshot.
+            let event_id = Ulid::new();
+            let event_payload = serde_json::to_value(&before_link).expect("link serialize");
+            conn.execute(
+                "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    event_id.to_string(),
+                    "link.deleted",
+                    "link",
+                    id.to_string(),
+                    event_payload.to_string(),
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            Ok(Some(()))
+        })();
+        match result {
+            Ok(Some(())) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Ok(None) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(CoreError::NotFound(id))
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(CoreError::Storage(e))
+            }
         }
     }
 
@@ -940,5 +1016,71 @@ mod tests {
             .unwrap();
         assert!(result.entries.is_empty());
         assert!(result.links.is_empty());
+    }
+
+    #[test]
+    fn create_emits_link_created_event_with_full_snapshot() {
+        use crate::EventService;
+        use crate::ListEventsQuery;
+
+        let (entries, links) = setup();
+        let events = EventService::for_test_shared_with_entries(&entries);
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+        let link = links
+            .create(crate::CreateLink {
+                source_id: a,
+                target_id: b,
+                relation: "references".into(),
+                attrs: None,
+            })
+            .unwrap();
+
+        let result = events.list(ListEventsQuery::default()).unwrap();
+        // 3 events: 2x entry.created + 1x link.created
+        let link_events: Vec<_> = result
+            .items
+            .iter()
+            .filter(|e| e.type_ == "link.created")
+            .collect();
+        assert_eq!(link_events.len(), 1);
+        let event = link_events[0];
+        assert_eq!(event.target_type, "link");
+        assert_eq!(event.target_id, link.id);
+        assert_eq!(event.payload["relation"], "references");
+        assert_eq!(event.payload["source_id"], a.to_string());
+        assert_eq!(event.payload["target_id"], b.to_string());
+    }
+
+    #[test]
+    fn delete_emits_link_deleted_event_with_before_snapshot() {
+        use crate::EventService;
+        use crate::ListEventsQuery;
+
+        let (entries, links) = setup();
+        let events = EventService::for_test_shared_with_entries(&entries);
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+        let link = links
+            .create(crate::CreateLink {
+                source_id: a,
+                target_id: b,
+                relation: "r".into(),
+                attrs: None,
+            })
+            .unwrap();
+
+        links.delete(link.id).unwrap();
+
+        let result = events.list(ListEventsQuery::default()).unwrap();
+        let delete_events: Vec<_> = result
+            .items
+            .iter()
+            .filter(|e| e.type_ == "link.deleted")
+            .collect();
+        assert_eq!(delete_events.len(), 1);
+        let event = delete_events[0];
+        assert_eq!(event.payload["relation"], "r");
+        assert_eq!(event.payload["id"], link.id.to_string());
     }
 }
