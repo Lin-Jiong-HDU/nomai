@@ -1,0 +1,17 @@
+#!/bin/sh
+# nomai pre-commit hook: enforce rustfmt cleanliness.
+#
+# Install (one-time, after clone): git config core.hooksPath hooks
+# Skip for a single commit:        git commit --no-verify
+
+# Only check Rust files if any are staged.
+if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$'; then
+    echo "[pre-commit] Running cargo fmt --check ..."
+    if ! cargo fmt --check; then
+        echo "" >&2
+        echo "[pre-commit] FAIL: code is not rustfmt-clean." >&2
+        echo "[pre-commit] Run 'cargo fmt' and retry, or 'git commit --no-verify' to bypass." >&2
+        exit 1
+    fi
+    echo "[pre-commit] OK: rustfmt clean"
+fi
