@@ -8,7 +8,9 @@ pub mod service;
 pub mod storage;
 
 pub use error::CoreError;
-pub use link_model::{CreateLink, Link};
+pub use link_model::{
+    CreateLink, Direction, Link, ListLinkQuery, ListLinkResult, NeighborsQuery, NeighborsResult,
+};
 pub use link_service::LinkService;
 pub use model::Entry;
 pub use service::{
