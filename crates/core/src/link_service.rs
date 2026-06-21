@@ -2,6 +2,7 @@
 //!
 //! See spec §4-§5 for schema and RPC contract.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -9,7 +10,11 @@ use rusqlite::{Connection, params};
 use ulid::Ulid;
 
 use crate::error::CoreError;
-use crate::link_model::{CreateLink, Link};
+use crate::link_model::{
+    CreateLink, Direction, Link, ListLinkQuery, ListLinkResult, NeighborsQuery, NeighborsResult,
+};
+use crate::model::Entry;
+use crate::service;
 use crate::storage;
 
 pub struct LinkService {
@@ -131,6 +136,162 @@ impl LinkService {
             Ok(())
         }
     }
+
+    /// List links filtered by source, target, and/or relation.
+    ///
+    /// At least one of `from` / `to` must be `Some` — "list all links" is
+    /// rejected with `CoreError::Validation` (spec §5). Results are ordered by
+    /// `created_at, id` and paged via `limit` / `offset`. Returns the page
+    /// plus the total count of matching rows (ignoring paging).
+    pub fn list(&self, query: ListLinkQuery) -> Result<ListLinkResult, CoreError> {
+        if query.from.is_none() && query.to.is_none() {
+            return Err(CoreError::Validation(
+                "list requires at least one of `from` or `to`".into(),
+            ));
+        }
+
+        let conn = self.conn.lock().unwrap();
+
+        // Build WHERE clause dynamically based on which filters are present.
+        let mut where_clauses: Vec<String> = Vec::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(from) = query.from {
+            where_clauses.push(format!("source_id = ?{}", where_clauses.len() + 1));
+            params_vec.push(Box::new(from.to_string()));
+        }
+        if let Some(to) = query.to {
+            where_clauses.push(format!("target_id = ?{}", where_clauses.len() + 1));
+            params_vec.push(Box::new(to.to_string()));
+        }
+        if let Some(ref relation) = query.relation {
+            where_clauses.push(format!("relation = ?{}", where_clauses.len() + 1));
+            params_vec.push(Box::new(relation.clone()));
+        }
+        let where_sql = if where_clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_clauses.join(" AND "))
+        };
+
+        // Count total.
+        let count_sql = format!("SELECT COUNT(*) FROM links {where_sql}");
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let total: i64 = conn
+            .query_row(&count_sql, params_refs.as_slice(), |row| row.get(0))?;
+
+        // Fetch page.
+        let limit_idx = params_vec.len() + 1;
+        let offset_idx = params_vec.len() + 2;
+        let select_sql = format!(
+            "SELECT id, source_id, target_id, relation, attrs, created_at
+             FROM links {where_sql}
+             ORDER BY created_at, id
+             LIMIT ?{limit_idx} OFFSET ?{offset_idx}"
+        );
+        let mut params_vec_with_paging = params_vec;
+        params_vec_with_paging.push(Box::new(query.limit as i64));
+        params_vec_with_paging.push(Box::new(query.offset as i64));
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec_with_paging
+            .iter()
+            .map(|p| p.as_ref())
+            .collect();
+
+        let mut stmt = conn.prepare(&select_sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), row_to_link)?;
+        let items: Vec<_> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(ListLinkResult {
+            items,
+            total: total as u64,
+        })
+    }
+
+    /// List neighbor entries + the links that connect them to `query.id`,
+    /// filtered by direction (Out / In / Both) and optional `relation`.
+    ///
+    /// In Both mode, the same neighbor entry appears at most once in `entries`
+    /// even if connected via multiple links (e.g. A→B and B→A); `links`
+    /// contains every matching link.
+    pub fn neighbors(&self, query: NeighborsQuery) -> Result<NeighborsResult, CoreError> {
+        let conn = self.conn.lock().unwrap();
+
+        // Build the WHERE clause based on direction. The query node `id` is
+        // matched against source_id (Out), target_id (In), or both (Both).
+        let direction_filter = match query.direction {
+            Direction::Out => "(source_id = ?1)",
+            Direction::In => "(target_id = ?1)",
+            Direction::Both => "(source_id = ?1 OR target_id = ?1)",
+        };
+
+        let relation_filter = if query.relation.is_some() {
+            " AND relation = ?2"
+        } else {
+            ""
+        };
+
+        let limit_param_idx = if query.relation.is_some() { 3 } else { 2 };
+
+        let sql = format!(
+            "SELECT l.id, l.source_id, l.target_id, l.relation, l.attrs, l.created_at,
+                    e.id, e.title, e.body, e.tags, e.attrs, e.source, e.created_at, e.updated_at
+             FROM links l
+             JOIN entries e ON e.id = CASE WHEN l.source_id = ?1 THEN l.target_id ELSE l.source_id END
+             WHERE {direction_filter}{relation_filter}
+             ORDER BY l.created_at, l.id
+             LIMIT ?{limit_param_idx}"
+        );
+
+        let id_str = query.id.to_string();
+
+        // `query_map` borrows from `stmt`; we materialize the rows to a Vec
+        // inside each branch so the borrow is released before we iterate and
+        // mutate `links` / `entries`.
+        let mapped: Vec<rusqlite::Result<(Link, Entry)>> = match query.relation {
+            Some(ref rel) => {
+                let mut stmt = conn.prepare(&sql)?;
+                stmt.query_map(
+                    params![id_str, rel.clone(), query.limit as i64],
+                    row_to_link_and_entry,
+                )?
+                .collect()
+            }
+            None => {
+                let mut stmt = conn.prepare(&sql)?;
+                stmt.query_map(params![id_str, query.limit as i64], row_to_link_and_entry)?
+                    .collect()
+            }
+        };
+
+        let mut links: Vec<Link> = Vec::new();
+        let mut entries: Vec<Entry> = Vec::new();
+        let mut seen: HashSet<Ulid> = HashSet::new();
+
+        for row_result in mapped {
+            let (link, entry) = row_result?;
+            if seen.insert(entry.id) {
+                entries.push(entry);
+            }
+            links.push(link);
+        }
+
+        Ok(NeighborsResult { entries, links })
+    }
+}
+
+fn row_to_link_and_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Link, Entry)> {
+    // Link columns: 0..6; Entry columns: 6..14.
+    let link = Link {
+        id: from_text(0, &row.get::<_, String>(0)?, Ulid::from_string)?,
+        source_id: from_text(1, &row.get::<_, String>(1)?, Ulid::from_string)?,
+        target_id: from_text(2, &row.get::<_, String>(2)?, Ulid::from_string)?,
+        relation: row.get(3)?,
+        attrs: from_text(4, &row.get::<_, String>(4)?, |s| serde_json::from_str(s))?,
+        created_at: from_text(5, &row.get::<_, String>(5)?, chrono::DateTime::parse_from_rfc3339)?
+            .with_timezone(&Utc),
+    };
+    let entry = service::row_to_entry(row, 6)?;
+    Ok((link, entry))
 }
 
 fn row_to_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<Link> {
@@ -174,7 +335,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CreateEntry, EntryService};
+    use crate::{CreateEntry, EntryService, ListLinkQuery};
     use serde_json::json;
     use ulid::Ulid;
 
@@ -423,6 +584,165 @@ mod tests {
         assert!(matches!(err, CoreError::NotFound(_)));
     }
 
+    fn seed_link(links: &LinkService, src: Ulid, tgt: Ulid, relation: &str) -> Ulid {
+        links
+            .create(CreateLink {
+                source_id: src,
+                target_id: tgt,
+                relation: relation.into(),
+                attrs: None,
+            })
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn list_returns_validation_when_neither_from_nor_to_given() {
+        let links = LinkService::for_test().unwrap();
+        let err = links
+            .list(ListLinkQuery {
+                from: None,
+                to: None,
+                relation: None,
+                limit: 50,
+                offset: 0,
+            })
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Validation(_)));
+    }
+
+    #[test]
+    fn list_by_from_returns_all_outgoing_links() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+        let c = seed_entry(&entries, "c");
+
+        seed_link(&links, a, b, "references");
+        seed_link(&links, a, c, "see_also");
+        seed_link(&links, b, c, "references"); // not from a
+
+        let result = links
+            .list(ListLinkQuery {
+                from: Some(a),
+                to: None,
+                relation: None,
+                limit: 50,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.total, 2);
+        assert!(result.items.iter().all(|l| l.source_id == a));
+    }
+
+    #[test]
+    fn list_by_to_returns_all_incoming_links() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+        let c = seed_entry(&entries, "c");
+
+        seed_link(&links, a, c, "r");
+        seed_link(&links, b, c, "r");
+        seed_link(&links, c, a, "r"); // not to c
+
+        let result = links
+            .list(ListLinkQuery {
+                from: None,
+                to: Some(c),
+                relation: None,
+                limit: 50,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.total, 2);
+        assert!(result.items.iter().all(|l| l.target_id == c));
+    }
+
+    #[test]
+    fn list_filters_by_relation() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+
+        seed_link(&links, a, b, "references");
+        seed_link(&links, a, b, "see_also");
+
+        let result = links
+            .list(ListLinkQuery {
+                from: Some(a),
+                to: None,
+                relation: Some("references".into()),
+                limit: 50,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].relation, "references");
+    }
+
+    #[test]
+    fn list_paginates_with_limit_and_offset() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let others: Vec<Ulid> = (0..5).map(|i| seed_entry(&entries, &format!("o{i}"))).collect();
+        for o in &others {
+            seed_link(&links, a, *o, "r");
+        }
+
+        let page1 = links
+            .list(ListLinkQuery {
+                from: Some(a),
+                to: None,
+                relation: None,
+                limit: 2,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(page1.items.len(), 2);
+        assert_eq!(page1.total, 5);
+
+        let page2 = links
+            .list(ListLinkQuery {
+                from: Some(a),
+                to: None,
+                relation: None,
+                limit: 2,
+                offset: 2,
+            })
+            .unwrap();
+        assert_eq!(page2.items.len(), 2);
+        // Pages should not overlap (links ordered by created_at then id; same
+        // millisecond is possible, so just assert count + total here).
+    }
+
+    #[test]
+    fn list_from_and_to_both_filters_intersection() {
+        // from=A AND to=B: only the direct A→B links (any relation).
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+        let c = seed_entry(&entries, "c");
+
+        seed_link(&links, a, b, "r");
+        seed_link(&links, a, c, "r"); // not to b
+        seed_link(&links, c, b, "r"); // not from a
+
+        let result = links
+            .list(ListLinkQuery {
+                from: Some(a),
+                to: Some(b),
+                relation: None,
+                limit: 50,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.total, 1);
+    }
+
     #[test]
     fn deleting_entry_cascades_to_links_as_source() {
         // FK ON DELETE CASCADE: removing entry A should remove all links where
@@ -461,5 +781,164 @@ mod tests {
             links.get(link_ca.id).unwrap_err(),
             CoreError::NotFound(_)
         ));
+    }
+
+    use crate::{Direction, NeighborsQuery};
+
+    #[test]
+    fn neighbors_out_returns_target_entries_and_links() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+        let c = seed_entry(&entries, "c");
+
+        let link_ab = links
+            .create(CreateLink {
+                source_id: a,
+                target_id: b,
+                relation: "r".into(),
+                attrs: None,
+            })
+            .unwrap();
+        let link_ac = links
+            .create(CreateLink {
+                source_id: a,
+                target_id: c,
+                relation: "r".into(),
+                attrs: None,
+            })
+            .unwrap();
+        // Irrelevant: someone else's link, and a link into a.
+        seed_link(&links, b, c, "r");
+
+        let result = links
+            .neighbors(NeighborsQuery {
+                id: a,
+                relation: None,
+                direction: Direction::Out,
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(result.links.len(), 2);
+        assert_eq!(result.entries.len(), 2);
+        let neighbor_ids: std::collections::HashSet<Ulid> =
+            result.entries.iter().map(|e| e.id).collect();
+        assert!(neighbor_ids.contains(&b));
+        assert!(neighbor_ids.contains(&c));
+        let link_ids: std::collections::HashSet<Ulid> =
+            result.links.iter().map(|l| l.id).collect();
+        assert!(link_ids.contains(&link_ab.id));
+        assert!(link_ids.contains(&link_ac.id));
+    }
+
+    #[test]
+    fn neighbors_in_returns_source_entries_and_links() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+        let c = seed_entry(&entries, "c");
+
+        seed_link(&links, b, a, "r");
+        seed_link(&links, c, a, "r");
+        // Irrelevant.
+        seed_link(&links, a, b, "r");
+
+        let result = links
+            .neighbors(NeighborsQuery {
+                id: a,
+                relation: None,
+                direction: Direction::In,
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(result.entries.len(), 2);
+        let neighbor_ids: std::collections::HashSet<Ulid> =
+            result.entries.iter().map(|e| e.id).collect();
+        assert!(neighbor_ids.contains(&b));
+        assert!(neighbor_ids.contains(&c));
+    }
+
+    #[test]
+    fn neighbors_both_dedupes_entries() {
+        // If A → B and B → A both exist, neighbors(both) of A should return
+        // B exactly once (in entries), even though there are two links.
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+
+        seed_link(&links, a, b, "r");
+        seed_link(&links, b, a, "r");
+
+        let result = links
+            .neighbors(NeighborsQuery {
+                id: a,
+                relation: None,
+                direction: Direction::Both,
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].id, b);
+        assert_eq!(result.links.len(), 2); // both links returned
+    }
+
+    #[test]
+    fn neighbors_filters_by_relation() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+
+        seed_link(&links, a, b, "references");
+        seed_link(&links, a, b, "see_also");
+
+        let result = links
+            .neighbors(NeighborsQuery {
+                id: a,
+                relation: Some("references".into()),
+                direction: Direction::Out,
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(result.links.len(), 1);
+        assert_eq!(result.links[0].relation, "references");
+        assert_eq!(result.entries.len(), 1);
+    }
+
+    #[test]
+    fn neighbors_respects_limit() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let others: Vec<Ulid> = (0..5).map(|i| seed_entry(&entries, &format!("o{i}"))).collect();
+        for o in &others {
+            seed_link(&links, a, *o, "r");
+        }
+
+        let result = links
+            .neighbors(NeighborsQuery {
+                id: a,
+                relation: None,
+                direction: Direction::Out,
+                limit: 3,
+            })
+            .unwrap();
+        assert_eq!(result.links.len(), 3);
+        assert_eq!(result.entries.len(), 3);
+    }
+
+    #[test]
+    fn neighbors_returns_empty_for_isolated_entry() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+
+        let result = links
+            .neighbors(NeighborsQuery {
+                id: a,
+                relation: None,
+                direction: Direction::Both,
+                limit: 50,
+            })
+            .unwrap();
+        assert!(result.entries.is_empty());
+        assert!(result.links.is_empty());
     }
 }

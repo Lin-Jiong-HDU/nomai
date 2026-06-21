@@ -153,7 +153,7 @@ impl EntryService {
             "SELECT id, title, body, tags, attrs, source, created_at, updated_at
              FROM entries WHERE id = ?1",
             params![id.to_string()],
-            row_to_entry,
+            |row| row_to_entry(row, 0),
         ) {
             Ok(entry) => Ok(entry),
             Err(rusqlite::Error::QueryReturnedNoRows) => Err(CoreError::NotFound(id)),
@@ -229,7 +229,10 @@ impl EntryService {
                  LIMIT ?2 OFFSET ?3"
             );
             let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(params![tag, query.limit, query.offset], row_to_entry)?;
+            let rows =
+                stmt.query_map(params![tag, query.limit, query.offset], |row| {
+                    row_to_entry(row, 0)
+                })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             let sql = format!(
@@ -239,7 +242,10 @@ impl EntryService {
                  LIMIT ?1 OFFSET ?2"
             );
             let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(params![query.limit, query.offset], row_to_entry)?;
+            let rows =
+                stmt.query_map(params![query.limit, query.offset], |row| {
+                    row_to_entry(row, 0)
+                })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
 
@@ -274,7 +280,7 @@ impl EntryService {
              LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![query, limit], |row| {
-            let entry = row_to_entry(row)?;
+            let entry = row_to_entry(row, 0)?;
             // bm25 returns negative scores (closer to 0 = better match).
             let rank: f64 = row.get(8)?;
             Ok(FulltextSearchResult {
@@ -374,7 +380,7 @@ impl EntryService {
              ORDER BY v.distance",
         )?;
         let rows = stmt.query_map(params![bytes, limit], |row| {
-            let entry = row_to_entry(row)?;
+            let entry = row_to_entry(row, 0)?;
             let distance: f64 = row.get(8)?;
             Ok(SemanticSearchResult {
                 entry,
@@ -400,23 +406,25 @@ impl EntryService {
     }
 }
 
-fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
-    let id_str: String = row.get(0)?;
-    let title: String = row.get(1)?;
-    let body: String = row.get(2)?;
-    let tags_json: String = row.get(3)?;
-    let attrs_json: String = row.get(4)?;
-    let source: Option<String> = row.get(5)?;
-    let created_at_str: String = row.get(6)?;
-    let updated_at_str: String = row.get(7)?;
+pub(crate) fn row_to_entry(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Entry> {
+    let id_str: String = row.get(offset)?;
+    let title: String = row.get(offset + 1)?;
+    let body: String = row.get(offset + 2)?;
+    let tags_json: String = row.get(offset + 3)?;
+    let attrs_json: String = row.get(offset + 4)?;
+    let source: Option<String> = row.get(offset + 5)?;
+    let created_at_str: String = row.get(offset + 6)?;
+    let updated_at_str: String = row.get(offset + 7)?;
 
-    let id = from_text(0, &id_str, Ulid::from_string)?;
-    let tags: Vec<String> = from_text(3, &tags_json, |s| serde_json::from_str(s))?;
-    let attrs: Value = from_text(4, &attrs_json, |s| serde_json::from_str(s))?;
+    let id = from_text(offset, &id_str, Ulid::from_string)?;
+    let tags: Vec<String> = from_text(offset + 3, &tags_json, |s| serde_json::from_str(s))?;
+    let attrs: Value = from_text(offset + 4, &attrs_json, |s| serde_json::from_str(s))?;
     let created_at =
-        from_text(6, &created_at_str, chrono::DateTime::parse_from_rfc3339)?.with_timezone(&Utc);
+        from_text(offset + 6, &created_at_str, chrono::DateTime::parse_from_rfc3339)?
+            .with_timezone(&Utc);
     let updated_at =
-        from_text(7, &updated_at_str, chrono::DateTime::parse_from_rfc3339)?.with_timezone(&Utc);
+        from_text(offset + 7, &updated_at_str, chrono::DateTime::parse_from_rfc3339)?
+            .with_timezone(&Utc);
 
     Ok(Entry {
         id,
