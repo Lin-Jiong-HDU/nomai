@@ -54,13 +54,13 @@ pub enum ConfigError {
 }
 
 fn default_db_path() -> PathBuf {
-    ProjectDirs::from("dev", "nomai", "knowledge-core")
+    ProjectDirs::from("dev", "nomai", "nomai")
         .map(|d| d.data_dir().join("db.sqlite"))
-        .unwrap_or_else(|| PathBuf::from("knowledge-core.sqlite"))
+        .unwrap_or_else(|| PathBuf::from("nomai.sqlite"))
 }
 
 pub fn default_config_path() -> PathBuf {
-    ProjectDirs::from("dev", "nomai", "knowledge-core")
+    ProjectDirs::from("dev", "nomai", "nomai")
         .map(|d| d.config_dir().join("config.toml"))
         .unwrap_or_else(|| PathBuf::from("config.toml"))
 }
