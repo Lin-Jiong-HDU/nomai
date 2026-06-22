@@ -341,7 +341,9 @@ fn split_block_header(s: &str) -> (&str, &str) {
 }
 
 /// Parse space-separated `key=value` pairs from a block header's attr string.
-/// Same value-escaping rules as header values.
+/// A value may be a bare token or a `"..."`-quoted string (which may contain
+/// whitespace). Same value-escaping rules (`\"`) as header values, handled by
+/// `unescape_value`.
 fn parse_block_attrs(
     s: &str,
     line_no: usize,
@@ -351,7 +353,7 @@ fn parse_block_attrs(
     if s.is_empty() {
         return Ok(out);
     }
-    for pair in s.split_whitespace() {
+    for pair in split_attr_tokens(s) {
         let eq = pair.find('=').ok_or_else(|| ParseError::Syntax {
             line: line_no,
             reason: format!("block attr missing `=`: {pair:?}"),
@@ -366,6 +368,46 @@ fn parse_block_attrs(
         out.insert(key.to_string(), serde_json::Value::String(val));
     }
     Ok(out)
+}
+
+/// Split a block header's attr string into `key=value` tokens, honoring
+/// `"..."`-quoted segments (which may contain whitespace) and `\"` escapes
+/// within them. Outside quotes, whitespace separates tokens.
+fn split_attr_tokens(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_quote {
+            current.push(c);
+            if c == '\\' {
+                if let Some(&next) = chars.peek() {
+                    current.push(next);
+                    chars.next();
+                }
+            } else if c == '"' {
+                in_quote = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                current.push(c);
+                in_quote = true;
+            }
+            w if w.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            other => current.push(other),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
 }
 
 /// Split "key value" or "key \"quoted value\"" — returns (key, value).
@@ -1054,6 +1096,97 @@ Why?
         );
         // And round-trip still works
         let reparsed = parse(&rendered).unwrap();
+        assert_eq!(doc, reparsed);
+    }
+
+    #[test]
+    fn parse_spec_example_4_4_verbatim() {
+        let input = "\
+#format_version 1
+#id 01HXY8K2P3M4N5Q6R7S8T9V0WX
+#title Heliocentrism
+#tags astronomy, astronomy-history
+#created_at 2026-06-22T10:00:00Z
+#updated_at 2026-06-22T11:30:00Z
+#source https://example.com/research
+#author \"John Doe\"
+
+@claim confidence=high
+Earth orbits the sun, not the other way around.
+
+@evidence src=paper.pdf#L42 strength=strong
+Kepler's laws show that planetary orbits are ellipses
+with the sun at one focus. This is inconsistent with
+geocentric models.
+
+@evidence src=https://nasa.gov/orbits
+NASA observations confirm Kepler's predictions to
+within measurement error.
+
+@question status=open
+Why did Ptolemy's geocentric model persist for 1400 years?
+
+@source src=principia.pdf author=\"Isaac Newton\" year=1687
+Newton's Principia unified Kepler's laws with mechanics.
+
+@connection target=01HXY...geocentrism relation=refutes
+
+@note
+This entry was created for the astronomy seminar.
+";
+        let doc = parse(input).unwrap();
+        assert_eq!(doc.format_version, 1);
+        assert_eq!(doc.id.to_string(), "01HXY8K2P3M4N5Q6R7S8T9V0WX");
+        assert_eq!(doc.title, "Heliocentrism");
+        assert_eq!(doc.tags, vec!["astronomy", " astronomy-history"]);
+        assert_eq!(doc.source.as_deref(), Some("https://example.com/research"));
+        assert_eq!(
+            doc.attrs["author"],
+            serde_json::Value::String("John Doe".into())
+        );
+
+        assert_eq!(doc.blocks.len(), 7);
+        assert_eq!(doc.blocks[0].r#type, BlockType::Claim);
+        assert_eq!(
+            doc.blocks[0].attrs["confidence"],
+            serde_json::Value::String("high".into())
+        );
+        assert_eq!(doc.blocks[2].r#type, BlockType::Evidence);
+        assert_eq!(
+            doc.blocks[2].attrs["src"],
+            serde_json::Value::String("https://nasa.gov/orbits".into())
+        );
+        assert_eq!(doc.blocks[5].r#type, BlockType::Connection);
+        assert_eq!(
+            doc.blocks[5].attrs["target"],
+            serde_json::Value::String("01HXY...geocentrism".into())
+        );
+        assert_eq!(
+            doc.blocks[5].attrs["relation"],
+            serde_json::Value::String("refutes".into())
+        );
+        assert_eq!(doc.blocks[5].text, "");
+    }
+
+    #[test]
+    fn round_trip_spec_example_4_4() {
+        let input = "\
+#format_version 1
+#id 01HXY8K2P3M4N5Q6R7S8T9V0WX
+#title Heliocentrism
+#tags astronomy, astronomy-history
+#created_at 2026-06-22T10:00:00Z
+#updated_at 2026-06-22T11:30:00Z
+#source https://example.com/research
+#author \"John Doe\"
+
+@claim confidence=high
+Earth orbits the sun.
+
+@connection target=01HXY...geo relation=refutes
+";
+        let doc = parse(input).unwrap();
+        let reparsed = parse(&render(&doc)).unwrap();
         assert_eq!(doc, reparsed);
     }
 }
