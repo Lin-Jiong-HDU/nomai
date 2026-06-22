@@ -101,9 +101,149 @@ pub enum ParseError {
     EmptyInput,
 }
 
-/// Parse a `.nomai` document. See module docs for the format.
-pub fn parse(_input: &str) -> Result<NomaiDoc, ParseError> {
-    unimplemented!("filled in by Task 2")
+/// Parse a `.nomai` document.
+pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
+    if input.is_empty() {
+        return Err(ParseError::EmptyInput);
+    }
+
+    let mut format_version: Option<u32> = None;
+    let mut id: Option<Ulid> = None;
+    let mut title: Option<String> = None;
+    let mut tags: Vec<String> = Vec::new();
+    let mut attrs = JsonMap::new();
+    let mut source: Option<String> = None;
+    let mut created_at: Option<DateTime<Utc>> = None;
+    let mut updated_at: Option<DateTime<Utc>> = None;
+    let mut blocks: Vec<Block> = Vec::new();
+
+    for (idx, raw_line) in input.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = raw_line;
+
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('@') {
+            // Body starts here; not handled in this task — leave blocks empty.
+            // (Task 5+ extends this loop to consume the body.)
+            break;
+        }
+        if !line.starts_with('#') {
+            return Err(ParseError::Syntax {
+                line: line_no,
+                reason: format!(
+                    "expected `#key value` header line or `@type` block; got: {line:?}"
+                ),
+            });
+        }
+
+        let rest = &line[1..];
+        let (key, value) = split_header_kv(rest).ok_or_else(|| ParseError::Syntax {
+            line: line_no,
+            reason: format!("expected `#key value`; got: {rest:?}"),
+        })?;
+
+        match key.as_str() {
+            "format_version" => {
+                let v: u32 = value.parse().map_err(|_| ParseError::InvalidValue {
+                    line: line_no,
+                    field: "format_version",
+                    reason: format!("not a u32: {value:?}"),
+                })?;
+                format_version = Some(v);
+            }
+            "id" => {
+                let parsed: Ulid = value.parse().map_err(|e: ulid::DecodeError| ParseError::InvalidValue {
+                    line: line_no,
+                    field: "id",
+                    reason: e.to_string(),
+                })?;
+                id = Some(parsed);
+            }
+            "title" => {
+                title = Some(unescape_value(&value).map_err(|e| ParseError::InvalidValue {
+                    line: line_no,
+                    field: "title",
+                    reason: e,
+                })?);
+            }
+            "created_at" => {
+                let t: DateTime<Utc> =
+                    value.parse().map_err(|e: chrono::ParseError| ParseError::InvalidValue {
+                        line: line_no,
+                        field: "created_at",
+                        reason: e.to_string(),
+                    })?;
+                created_at = Some(t);
+            }
+            "updated_at" => {
+                let t: DateTime<Utc> =
+                    value.parse().map_err(|e: chrono::ParseError| ParseError::InvalidValue {
+                        line: line_no,
+                        field: "updated_at",
+                        reason: e.to_string(),
+                    })?;
+                updated_at = Some(t);
+            }
+            "tags" | "source" | _ => {
+                // Task 4 will fill in tags / source / attrs fallback.
+                // For now, skip silently so the minimal test passes.
+            }
+        }
+    }
+
+    let format_version = format_version.ok_or(ParseError::MissingHeader {
+        line: 0,
+        key: "format_version",
+    })?;
+    if format_version != 1 {
+        return Err(ParseError::UnsupportedVersion {
+            line: 0,
+            version: format_version.to_string(),
+        });
+    }
+    let id = id.ok_or(ParseError::MissingHeader { line: 0, key: "id" })?;
+    let title = title.ok_or(ParseError::MissingHeader {
+        line: 0,
+        key: "title",
+    })?;
+    let created_at = created_at.ok_or(ParseError::MissingHeader {
+        line: 0,
+        key: "created_at",
+    })?;
+    let updated_at = updated_at.ok_or(ParseError::MissingHeader {
+        line: 0,
+        key: "updated_at",
+    })?;
+
+    Ok(NomaiDoc {
+        format_version,
+        id,
+        title,
+        tags,
+        attrs,
+        source,
+        created_at,
+        updated_at,
+        blocks,
+    })
+}
+
+/// Split "key value" or "key \"quoted value\"" — returns (key, value).
+/// Returns None if the line has no key.
+fn split_header_kv(s: &str) -> Option<(String, String)> {
+    let mut iter = s.splitn(2, char::is_whitespace);
+    let key = iter.next()?.to_string();
+    let rest = iter.next()?.trim_start_matches(' ');
+    Some((key, rest.to_string()))
+}
+
+/// Unescape a header value. Bare tokens pass through; quoted values unwrap
+/// the quotes and process `\"`. Tasks 4 expands this; v1 minimal version
+/// handles only bare tokens.
+fn unescape_value(s: &str) -> Result<String, String> {
+    Ok(s.to_string())
 }
 
 /// Render a `NomaiDoc` back to `.nomai` text. Infallible for well-formed docs.
@@ -126,5 +266,28 @@ mod tests {
     #[test]
     fn block_type_unknown_returns_none() {
         assert!(BlockType::from_str("definition").is_none());
+    }
+
+    #[test]
+    fn parse_minimal_valid_header() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+";
+        let doc = parse(input).unwrap();
+        assert_eq!(doc.format_version, 1);
+        assert_eq!(doc.id.to_string(), "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(doc.title, "Hello");
+        assert!(doc.tags.is_empty());
+        assert!(doc.attrs.is_empty());
+        assert_eq!(doc.source, None);
+        assert!(doc.blocks.is_empty());
+        assert_eq!(
+            doc.created_at,
+            "2026-06-23T10:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
     }
 }
