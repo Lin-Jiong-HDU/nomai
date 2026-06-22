@@ -290,4 +290,70 @@ mod tests {
             "2026-06-23T10:00:00Z".parse::<DateTime<Utc>>().unwrap()
         );
     }
+
+    #[test]
+    fn parse_empty_input_errors() {
+        assert_eq!(parse("").unwrap_err(), ParseError::EmptyInput);
+    }
+
+    #[test]
+    fn parse_missing_format_version_errors() {
+        let input = "\
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+";
+        assert_eq!(
+            parse(input).unwrap_err(),
+            ParseError::MissingHeader { line: 0, key: "format_version" }
+        );
+    }
+
+    #[test]
+    fn parse_unsupported_version_errors() {
+        let input = "\
+#format_version 2
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+";
+        assert_eq!(
+            parse(input).unwrap_err(),
+            ParseError::UnsupportedVersion { line: 0, version: "2".into() }
+        );
+    }
+
+    #[test]
+    fn parse_missing_id_errors_with_line_zero() {
+        let input = "\
+#format_version 1
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+";
+        assert_eq!(
+            parse(input).unwrap_err(),
+            ParseError::MissingHeader { line: 0, key: "id" }
+        );
+    }
+
+    #[test]
+    fn parse_invalid_ulid_errors() {
+        let input = "\
+#format_version 1
+#id NOT-A-ULID
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+";
+        match parse(input).unwrap_err() {
+            ParseError::InvalidValue { line, field, .. } => {
+                assert_eq!(line, 2);
+                assert_eq!(field, "id");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
 }
