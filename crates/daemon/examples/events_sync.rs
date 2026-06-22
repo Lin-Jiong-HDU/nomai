@@ -44,8 +44,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let llm: Arc<dyn nomai_providers::LlmProvider> = Arc::new(
         nomai_providers::OpenAiCompatibleLlm::new("http://localhost", "x", "x"),
     );
-    let daemon =
-        nomai_daemon::daemon::Daemon::from_services(conn, embedder, llm, 8, "example-model")?;
+    let daemon = nomai_daemon::daemon::Daemon::from_services(
+        conn,
+        embedder,
+        llm,
+        8,
+        "example-model",
+        100_000,
+    )?;
 
     // Poll events since cursor
     let mut params = json!({ "limit": 100, "order": "asc" });

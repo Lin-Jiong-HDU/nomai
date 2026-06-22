@@ -1385,4 +1385,155 @@ mod tests {
             "batch should appear in MCP tools/list"
         );
     }
+
+    // ----- cache.* e2e tests (Spec 5 enhancement) -----
+
+    #[tokio::test]
+    async fn cache_stats_returns_initial_state_with_warn_fields() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon.dispatch(req("cache.stats", json!({}))).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let emb = &resp.result.unwrap()["embeddings"];
+        assert_eq!(emb["model"], "test-model");
+        assert_eq!(emb["dim"], DIM);
+        assert_eq!(emb["rows"], 0);
+        assert_eq!(emb["hits"], 0);
+        assert_eq!(emb["misses"], 0);
+        assert!(emb["warn_rows"].as_u64().is_some());
+        assert_eq!(emb["warning"], false);
+    }
+
+    #[tokio::test]
+    async fn cache_clear_returns_by_model_breakdown() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create two entries (each triggers embedding → 2 rows in emb_cache
+        // under "test-model" — one per body hash; same body → 1 row).
+        daemon
+            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .await;
+        daemon
+            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .await;
+
+        // Inject a row under a different model directly so by_model has 2 keys.
+        {
+            let conn = daemon.entries.conn_for_test();
+            conn.lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        "other-model",
+                        vec![9u8; 32],
+                        DIM,
+                        vec![0u8; DIM * 4],
+                        "2026-01-01T00:00:00Z"
+                    ],
+                )
+                .unwrap();
+        }
+
+        let resp = daemon.dispatch(req("cache.clear", json!({}))).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert!(result["cleared"].as_u64().unwrap() >= 2);
+        let by_model = result["by_model"].as_object().unwrap();
+        assert!(by_model.contains_key("test-model"));
+        assert!(by_model.contains_key("other-model"));
+    }
+
+    #[tokio::test]
+    async fn cache_clear_with_before_filter() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        // Insert two rows directly with different created_at.
+        {
+            let conn = daemon.entries.conn_for_test();
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    "test-model",
+                    vec![1u8; 32],
+                    DIM,
+                    vec![0u8; DIM * 4],
+                    "2026-01-01T00:00:00Z"
+                ],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    "test-model",
+                    vec![2u8; 32],
+                    DIM,
+                    vec![0u8; DIM * 4],
+                    "2026-03-01T00:00:00Z"
+                ],
+            )
+            .unwrap();
+        }
+
+        // Clear everything before 2026-02-01.
+        let resp = daemon
+            .dispatch(req(
+                "cache.clear",
+                json!({
+                    "before": "2026-02-01T00:00:00Z"
+                }),
+            ))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let cleared = resp.result.unwrap()["cleared"].as_u64().unwrap();
+        assert_eq!(cleared, 1, "only the 2026-01-01 row should be cleared");
+
+        // Verify the remaining row is the newer one.
+        let stats = daemon.dispatch(req("cache.stats", json!({}))).await;
+        assert_eq!(stats.result.unwrap()["embeddings"]["rows"], 1);
+    }
+
+    #[tokio::test]
+    async fn cache_clear_with_keep_recent_filter() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        {
+            let conn = daemon.entries.conn_for_test();
+            let c = conn.lock().unwrap();
+            for i in 1..=4u8 {
+                c.execute(
+                    "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        "test-model",
+                        vec![i; 32],
+                        DIM,
+                        vec![0u8; DIM * 4],
+                        format!("2026-0{i}-01T00:00:00Z"),
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        // Keep newest 1 row.
+        let resp = daemon
+            .dispatch(req("cache.clear", json!({"keep_recent": 1})))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let cleared = resp.result.unwrap()["cleared"].as_u64().unwrap();
+        assert_eq!(cleared, 3);
+
+        let stats = daemon.dispatch(req("cache.stats", json!({}))).await;
+        assert_eq!(stats.result.unwrap()["embeddings"]["rows"], 1);
+    }
 }

@@ -11,23 +11,28 @@
 //!
 //! See `docs/superpowers/specs/2026-06-22-embedding-cache-design.md`.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rusqlite::{Connection, params};
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, params, types::Value as SqlValue};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{ProviderError, ProviderErrorKind};
 use crate::traits::EmbeddingProvider;
 
 /// Snapshot of cache statistics returned by `CachedEmbedder::stats`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct CacheStats {
     pub model: String,
     pub dim: usize,
     pub rows: u64,
     pub hits: u64,
     pub misses: u64,
+    pub warn_rows: u64,
+    pub warning: bool,
 }
 
 impl CacheStats {
@@ -41,6 +46,33 @@ impl CacheStats {
     }
 }
 
+/// Options for `CachedEmbedder::clear`. All fields optional; absent filters
+/// match every row. `before` and `keep_recent` may be combined with each
+/// other and with `model`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ClearOptions {
+    /// Restrict to a single model namespace. `None` clears every model.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Delete only rows created strictly before this timestamp (RFC3339).
+    #[serde(default)]
+    pub before: Option<DateTime<Utc>>,
+    /// Keep only the N most-recent rows (by `created_at DESC`) among the
+    /// rows matching the other filters; delete the rest. `None` deletes
+    /// every matching row.
+    #[serde(default)]
+    pub keep_recent: Option<u64>,
+}
+
+/// Result of `CachedEmbedder::clear`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ClearResult {
+    /// Total rows deleted.
+    pub cleared: u64,
+    /// Rows deleted, grouped by model.
+    pub by_model: HashMap<String, u64>,
+}
+
 /// Transparent wrapper that caches embedding API results in SQLite.
 ///
 /// Implements `EmbeddingProvider` by delegating cache-miss lookups to an
@@ -52,6 +84,7 @@ pub struct CachedEmbedder {
     conn: Arc<Mutex<Connection>>,
     model: String,
     dim: usize,
+    warn_rows: u64,
     hits: AtomicU64,
     misses: AtomicU64,
 }
@@ -61,6 +94,7 @@ impl CachedEmbedder {
         inner: Arc<dyn EmbeddingProvider>,
         conn: Arc<Mutex<Connection>>,
         model: impl Into<String>,
+        warn_rows: u64,
     ) -> Self {
         let dim = inner.dim();
         Self {
@@ -68,6 +102,7 @@ impl CachedEmbedder {
             conn,
             model: model.into(),
             dim,
+            warn_rows,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
@@ -75,7 +110,9 @@ impl CachedEmbedder {
 
     /// Snapshot of cache statistics: persistent row count plus in-memory
     /// hit/miss counters. `rows` reflects a fresh `COUNT(*)` on `emb_cache`
-    /// filtered by `self.model`; counters are read atomically.
+    /// filtered by `self.model`; counters are read atomically. `warning` is
+    /// true when `rows > warn_rows` — the cache is never auto-evicted, this
+    /// flag merely signals that the user may want to run `clear`.
     pub fn stats(&self) -> Result<CacheStats, ProviderError> {
         let rows = self.count_rows()?;
         Ok(CacheStats {
@@ -84,24 +121,69 @@ impl CachedEmbedder {
             rows,
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
+            warn_rows: self.warn_rows,
+            warning: rows > self.warn_rows,
         })
     }
 
-    /// Delete cached embeddings. If `model` is `Some`, restricts the delete
-    /// to that model; `None` clears every model. Returns the row count.
+    /// Delete cached embeddings matching `opts`. See [`ClearOptions`] for
+    /// filter semantics. Returns per-model breakdown via `DELETE ... RETURNING`.
     /// Counters (`hits` / `misses`) are not reset — they reflect lifetime
     /// activity, not current cache contents.
-    pub fn clear(&self, model: Option<&str>) -> Result<u64, ProviderError> {
+    pub fn clear(&self, opts: ClearOptions) -> Result<ClearResult, ProviderError> {
         let conn = self.conn.lock().unwrap();
-        let cleared = match model {
-            Some(m) => conn
-                .execute("DELETE FROM emb_cache WHERE model = ?1", params![m])
-                .map_err(storage_err)?,
-            None => conn
-                .execute("DELETE FROM emb_cache", [])
-                .map_err(storage_err)?,
+
+        // Build WHERE conditions and bound params in lock-step so the ?
+        // placeholders line up with params after the IN-subquery OFFSET.
+        let mut conditions: Vec<&'static str> = Vec::new();
+        let mut params: Vec<SqlValue> = Vec::new();
+        if let Some(m) = opts.model.as_ref() {
+            conditions.push("model = ?");
+            params.push(SqlValue::Text(m.clone()));
+        }
+        if let Some(before) = opts.before {
+            conditions.push("created_at < ?");
+            params.push(SqlValue::Text(before.to_rfc3339()));
+        }
+        let where_sql = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
         };
-        Ok(cleared as u64)
+
+        // keep_recent: delete every row except the N newest (by created_at).
+        // SQLite's `LIMIT -1 OFFSET N` selects everything past the first N.
+        // The WHERE clause lives inside the subquery so filters apply before
+        // the OFFSET picks the survivors to keep.
+        let sql = if let Some(keep) = opts.keep_recent {
+            params.push(SqlValue::Integer(keep as i64));
+            format!(
+                "DELETE FROM emb_cache WHERE (model, body_hash) IN (
+                    SELECT model, body_hash FROM emb_cache {where_sql}
+                    ORDER BY created_at DESC
+                    LIMIT -1 OFFSET ?
+                ) RETURNING model"
+            )
+        } else {
+            format!("DELETE FROM emb_cache {where_sql} RETURNING model")
+        };
+
+        let mut by_model: HashMap<String, u64> = HashMap::new();
+        let mut stmt = conn.prepare(&sql).map_err(storage_err)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(param_refs.iter()), |row| {
+                let model: String = row.get(0)?;
+                Ok(model)
+            })
+            .map_err(storage_err)?;
+        for row in rows {
+            let model = row.map_err(storage_err)?;
+            *by_model.entry(model).or_insert(0) += 1;
+        }
+        let cleared = by_model.values().sum();
+        Ok(ClearResult { cleared, by_model })
     }
 
     fn count_rows(&self) -> Result<u64, ProviderError> {
@@ -158,8 +240,10 @@ impl CachedEmbedder {
             return;
         };
         let now = chrono::Utc::now().to_rfc3339();
-        for (i, &idx) in indices.iter().enumerate() {
-            let bytes: Vec<u8> = embeddings[i].iter().flat_map(|f| f.to_le_bytes()).collect();
+        // zip-short-circuits when inner returns fewer embeddings than inputs
+        // (test mocks do this) — only the returned subset is persisted.
+        for (&idx, emb) in indices.iter().zip(embeddings.iter()) {
+            let bytes: Vec<u8> = emb.iter().flat_map(|f| f.to_le_bytes()).collect();
             let _ = stmt.execute(params![
                 &self.model,
                 hashes[idx].to_vec(),
@@ -310,6 +394,12 @@ mod tests {
     }
 
     fn setup() -> (CachedEmbedder, Arc<MockEmbedder>, Arc<Mutex<Connection>>) {
+        setup_with_warn(100)
+    }
+
+    fn setup_with_warn(
+        warn_rows: u64,
+    ) -> (CachedEmbedder, Arc<MockEmbedder>, Arc<Mutex<Connection>>) {
         // Run core migrations (creates emb_cache table).
         // We open an in-memory DB and embed the migration SQL inline because
         // providers cannot depend on core (would create a cycle).
@@ -327,8 +417,21 @@ mod tests {
         .unwrap();
         let conn = Arc::new(Mutex::new(conn));
         let inner = Arc::new(MockEmbedder::new(4));
-        let cached = CachedEmbedder::new(inner.clone(), conn.clone(), "test-model");
+        let cached = CachedEmbedder::new(inner.clone(), conn.clone(), "test-model", warn_rows);
         (cached, inner, conn)
+    }
+
+    /// Insert a row directly with a specific model + created_at, bypassing
+    /// the wrapper. Used to test `before` and `keep_recent` filters.
+    fn insert_row(conn: &Arc<Mutex<Connection>>, model: &str, hash: u8, created_at: &str) {
+        conn.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![model, vec![hash; 32], 4, vec![0u8; 16], created_at],
+            )
+            .unwrap();
     }
 
     #[tokio::test]
@@ -374,7 +477,7 @@ mod tests {
 
         // Build a fresh CachedEmbedder on the same connection: cache survives.
         let inner2 = Arc::new(MockEmbedder::new(4));
-        let cached2 = CachedEmbedder::new(inner2.clone(), conn, "test-model");
+        let cached2 = CachedEmbedder::new(inner2.clone(), conn, "test-model", 100);
         cached2.embed(&["hello"]).await.unwrap();
         assert_eq!(inner2.calls(), 0, "should hit persistent cache");
     }
@@ -387,7 +490,7 @@ mod tests {
 
         // Same conn, different model → fresh cache namespace.
         let inner_b = Arc::new(MockEmbedder::new(4));
-        let cached_b = CachedEmbedder::new(inner_b.clone(), conn, "other-model");
+        let cached_b = CachedEmbedder::new(inner_b.clone(), conn, "other-model", 100);
         cached_b.embed(&["shared body"]).await.unwrap();
         assert_eq!(inner_b.calls(), 1, "different model should miss");
     }
@@ -417,29 +520,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_removes_all_models_when_none() {
+    async fn clear_removes_all_models_when_no_filter() {
         let (cached, _inner, conn) = setup();
         cached.embed(&["a"]).await.unwrap();
+        insert_row(&conn, "other", 1, "2026-01-01T00:00:00Z");
 
-        // Insert a row under a different model directly.
-        {
-            let c = conn.lock().unwrap();
-            c.execute(
-                "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    "other",
-                    vec![1u8; 32],
-                    4,
-                    vec![0u8; 16],
-                    "2026-01-01T00:00:00Z"
-                ],
-            )
-            .unwrap();
-        }
         assert_eq!(cached.stats().unwrap().rows, 1); // only own model counted
-        let cleared = cached.clear(None).unwrap();
-        assert_eq!(cleared, 2);
+        let result = cached.clear(ClearOptions::default()).unwrap();
+        assert_eq!(result.cleared, 2);
+        assert_eq!(result.by_model.get("test-model"), Some(&1));
+        assert_eq!(result.by_model.get("other"), Some(&1));
         assert_eq!(cached.stats().unwrap().rows, 0);
     }
 
@@ -447,34 +537,131 @@ mod tests {
     async fn clear_with_model_filter_only_clears_matching() {
         let (cached, _inner, conn) = setup();
         cached.embed(&["a"]).await.unwrap(); // 1 row in test-model
-        {
-            let c = conn.lock().unwrap();
-            c.execute(
-                "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    "other",
-                    vec![1u8; 32],
-                    4,
-                    vec![0u8; 16],
-                    "2026-01-01T00:00:00Z"
-                ],
+        insert_row(&conn, "other", 1, "2026-01-01T00:00:00Z");
+
+        let result = cached
+            .clear(ClearOptions {
+                model: Some("other".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(result.cleared, 1);
+        assert_eq!(result.by_model.get("other"), Some(&1));
+        assert_eq!(cached.stats().unwrap().rows, 1, "own model untouched");
+    }
+
+    #[tokio::test]
+    async fn clear_by_before_deletes_only_older_rows() {
+        let (cached, _inner, conn) = setup();
+        // 3 rows in test-model with different created_at.
+        insert_row(&conn, "test-model", 1, "2026-01-01T00:00:00Z");
+        insert_row(&conn, "test-model", 2, "2026-02-01T00:00:00Z");
+        insert_row(&conn, "test-model", 3, "2026-03-01T00:00:00Z");
+
+        let cutoff = DateTime::parse_from_rfc3339("2026-01-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let result = cached
+            .clear(ClearOptions {
+                before: Some(cutoff),
+                ..Default::default()
+            })
+            .unwrap();
+        // Only the 2026-01-01 row is before cutoff.
+        assert_eq!(result.cleared, 1);
+        assert_eq!(cached.stats().unwrap().rows, 2);
+    }
+
+    #[tokio::test]
+    async fn clear_keep_recent_preserves_newest_n() {
+        let (cached, _inner, conn) = setup();
+        insert_row(&conn, "test-model", 1, "2026-01-01T00:00:00Z");
+        insert_row(&conn, "test-model", 2, "2026-02-01T00:00:00Z");
+        insert_row(&conn, "test-model", 3, "2026-03-01T00:00:00Z");
+        insert_row(&conn, "test-model", 4, "2026-04-01T00:00:00Z");
+        assert_eq!(cached.stats().unwrap().rows, 4);
+
+        // Keep newest 1: should delete 3 oldest, leave 2026-04-01.
+        let result = cached
+            .clear(ClearOptions {
+                keep_recent: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(result.cleared, 3);
+        assert_eq!(cached.stats().unwrap().rows, 1);
+        // Verify the remaining row is the newest.
+        let remaining_at: String = conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT created_at FROM emb_cache WHERE model = 'test-model'",
+                [],
+                |row| row.get(0),
             )
             .unwrap();
-        }
-        let cleared = cached.clear(Some("other")).unwrap();
-        assert_eq!(cleared, 1);
-        assert_eq!(cached.stats().unwrap().rows, 1, "own model untouched");
+        assert_eq!(remaining_at, "2026-04-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn clear_combine_model_and_keep_recent() {
+        let (cached, _inner, conn) = setup();
+        // 2 in test-model, 2 in other-model.
+        insert_row(&conn, "test-model", 1, "2026-01-01T00:00:00Z");
+        insert_row(&conn, "test-model", 2, "2026-02-01T00:00:00Z");
+        insert_row(&conn, "other-model", 3, "2026-01-01T00:00:00Z");
+        insert_row(&conn, "other-model", 4, "2026-02-01T00:00:00Z");
+
+        // Keep newest 1 row of test-model only.
+        let result = cached
+            .clear(ClearOptions {
+                model: Some("test-model".into()),
+                keep_recent: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(result.cleared, 1);
+        assert_eq!(result.by_model.get("test-model"), Some(&1));
+        assert_eq!(result.by_model.get("other-model"), None);
+        // other-model untouched.
+        let n: i64 = conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM emb_cache WHERE model = 'other-model'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2);
     }
 
     #[tokio::test]
     async fn clear_does_not_reset_counters() {
         let (cached, _inner, _conn) = setup();
         cached.embed(&["a"]).await.unwrap();
-        cached.clear(None).unwrap();
+        cached.clear(ClearOptions::default()).unwrap();
         let s = cached.stats().unwrap();
         assert_eq!(s.hits, 0);
         assert_eq!(s.misses, 1, "counters persist across clear");
+    }
+
+    #[tokio::test]
+    async fn stats_warning_false_below_threshold() {
+        let (cached, _inner, _conn) = setup_with_warn(100);
+        cached.embed(&["a", "b"]).await.unwrap(); // 2 rows
+        let s = cached.stats().unwrap();
+        assert_eq!(s.warn_rows, 100);
+        assert!(!s.warning, "rows=2 < warn_rows=100");
+    }
+
+    #[tokio::test]
+    async fn stats_warning_true_above_threshold() {
+        let (cached, _inner, _conn) = setup_with_warn(1);
+        cached.embed(&["a", "b"]).await.unwrap(); // 2 rows
+        let s = cached.stats().unwrap();
+        assert_eq!(s.warn_rows, 1);
+        assert!(s.warning, "rows=2 > warn_rows=1");
     }
 
     #[tokio::test]
@@ -525,7 +712,7 @@ mod tests {
              ) WITHOUT ROWID;",
             )
             .unwrap();
-        let cached = CachedEmbedder::new(Arc::new(FailingEmbedder), conn.clone(), "test");
+        let cached = CachedEmbedder::new(Arc::new(FailingEmbedder), conn.clone(), "test", 100);
 
         let err = cached.embed(&["x"]).await.unwrap_err();
         assert!(err.message.contains("boom"));

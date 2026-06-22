@@ -56,4 +56,18 @@ mod tests {
         )
         .expect("vec0 should be available after init_sqlite_extensions");
     }
+
+    #[test]
+    fn v5_migration_creates_emb_cache_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='emb_cache'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "V5 migration should create emb_cache table");
+    }
 }

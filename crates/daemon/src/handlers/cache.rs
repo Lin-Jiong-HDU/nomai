@@ -1,10 +1,10 @@
 //! cache.* handlers: embedding cache introspection and management.
 
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::{Value, json};
 
 use nomai_core::CoreError;
+use nomai_providers::ClearOptions;
 
 use crate::daemon::Daemon;
 use crate::rpc::RpcHandler;
@@ -25,16 +25,11 @@ impl RpcHandler for Stats {
                 "hits": stats.hits,
                 "misses": stats.misses,
                 "hit_rate": stats.hit_rate(),
+                "warn_rows": stats.warn_rows,
+                "warning": stats.warning,
             }
         }))
     }
-}
-
-#[derive(Default, Deserialize)]
-struct ClearParams {
-    /// Optional model filter. If omitted, clears every model.
-    #[serde(default)]
-    model: Option<String>,
 }
 
 pub struct Clear;
@@ -44,13 +39,13 @@ impl RpcHandler for Clear {
         "cache.clear"
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
-        let p: ClearParams = if params.is_null() {
-            ClearParams::default()
+        let opts: ClearOptions = if params.is_null() {
+            ClearOptions::default()
         } else {
             serde_json::from_value(params)
                 .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?
         };
-        let cleared = daemon.cache.clear(p.model.as_deref())?;
-        Ok(json!({ "cleared": cleared }))
+        let result = daemon.cache.clear(opts)?;
+        Ok(json!({ "cleared": result.cleared, "by_model": result.by_model }))
     }
 }

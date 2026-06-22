@@ -12,6 +12,8 @@ pub struct Config {
     pub data: DataConfig,
     pub embedding: EmbeddingConfig,
     pub llm: LlmConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +43,28 @@ pub struct LlmConfig {
     pub base_url: String,
     pub api_key_env: String,
     pub model: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CacheConfig {
+    /// Soft capacity threshold. When `emb_cache` row count for the configured
+    /// model exceeds this, `cache.stats` returns `warning: true`. The cache
+    /// is never auto-evicted — `warn_rows` only flags that the user may want
+    /// to run `cache.clear`.
+    #[serde(default = "default_warn_rows")]
+    pub warn_rows: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            warn_rows: default_warn_rows(),
+        }
+    }
+}
+
+fn default_warn_rows() -> u64 {
+    100_000
 }
 
 #[derive(Debug, Error)]

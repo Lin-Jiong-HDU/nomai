@@ -66,6 +66,7 @@ impl Daemon {
             inner,
             conn.clone(),
             &config.embedding.model,
+            config.cache.warn_rows,
         ));
 
         let llm: Arc<dyn LlmProvider> = Arc::new(OpenAiCompatibleLlm::new(
@@ -112,6 +113,7 @@ impl Daemon {
             embedder,
             entries.conn_for_test(),
             embedding_model.as_str(),
+            100_000,
         ));
         Self {
             entries,
@@ -175,7 +177,9 @@ impl Daemon {
     ///
     /// The `cache_model` name namespacing the `emb_cache` rows; pass the
     /// underlying model identifier so cache stats and clears target the
-    /// right namespace.
+    /// right namespace. `warn_rows` is the soft capacity threshold at which
+    /// `cache.stats` starts returning `warning: true` (use `100_000` as a
+    /// sensible default).
     #[allow(dead_code)]
     pub fn from_services(
         conn: Arc<std::sync::Mutex<Connection>>,
@@ -183,6 +187,7 @@ impl Daemon {
         llm: Arc<dyn LlmProvider>,
         embedding_dim: usize,
         cache_model: impl Into<String>,
+        warn_rows: u64,
     ) -> Result<Self, CoreError> {
         let entries = Arc::new(EntryService::new(conn.clone())?);
         let links = Arc::new(LinkService::new(conn.clone())?);
@@ -190,7 +195,7 @@ impl Daemon {
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
         entries.ensure_vec_embeddings(embedding_dim)?;
         chunks.ensure_vec_chunk_embeddings(embedding_dim)?;
-        let cache = Arc::new(CachedEmbedder::new(embedder, conn, cache_model));
+        let cache = Arc::new(CachedEmbedder::new(embedder, conn, cache_model, warn_rows));
         let handlers = crate::handlers::registry();
         Ok(Self {
             entries,

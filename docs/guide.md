@@ -263,10 +263,10 @@ Each `BatchOp` has `{id?: string, method: string, params: object}`. The `id` fie
 
 Embedding cache introspection and management. The cache is a transparent wrapper around the configured embedding provider; it persists `(model, blake3(body)) → embedding` in the `emb_cache` SQLite table so identical bodies never trigger duplicate API calls.
 
-| Method        | Params                | Returns                                                                         |
-| ------------- | --------------------- | ------------------------------------------------------------------------------- |
-| `cache.stats` | —                     | `{embeddings: {model, dim, rows, hits, misses, hit_rate}}`                      |
-| `cache.clear` | `{model?: string}`    | `{cleared: u64}` — omit `model` to clear every model                            |
+| Method        | Params             | Returns                                                    |
+| ------------- | ------------------ | ---------------------------------------------------------- |
+| `cache.stats` | —                  | `{embeddings: {model, dim, rows, hits, misses, hit_rate}}` |
+| `cache.clear` | `{model?: string}` | `{cleared: u64}` — omit `model` to clear every model       |
 
 `hit_rate` is computed as `hits / (hits + misses)` over the daemon's lifetime; `rows` is the current `COUNT(*)` in `emb_cache` for the configured model. Counters are not reset by `cache.clear` — they reflect lifetime activity, not current contents.
 
@@ -392,12 +392,12 @@ Every embedding API call is cached transparently in the `emb_cache` SQLite table
 
 **Hit semantics**:
 
-| Field      | Meaning                                                                  |
-| ---------- | ------------------------------------------------------------------------ |
-| `hits`     | Embed calls served from cache (lifetime counter)                         |
-| `misses`   | Embed calls that fell through to the inner provider (lifetime counter)   |
-| `rows`     | Current `COUNT(*)` in `emb_cache` for the configured model               |
-| `hit_rate` | `hits / (hits + misses)`, or 0.0 when both are zero                      |
+| Field      | Meaning                                                                |
+| ---------- | ---------------------------------------------------------------------- |
+| `hits`     | Embed calls served from cache (lifetime counter)                       |
+| `misses`   | Embed calls that fell through to the inner provider (lifetime counter) |
+| `rows`     | Current `COUNT(*)` in `emb_cache` for the configured model             |
+| `hit_rate` | `hits / (hits + misses)`, or 0.0 when both are zero                    |
 
 `cache.clear` removes rows from `emb_cache` but does not reset `hits` / `misses` — those reflect lifetime cache activity, not current contents. To reset, restart the daemon.
 
@@ -413,11 +413,11 @@ Every embedding API call is cached transparently in the `emb_cache` SQLite table
 
 **Cache layering**:
 
-| Layer               | Caches                            | Owned by                |
-| ------------------- | --------------------------------- | ----------------------- |
-| SQLite page cache   | B-tree nodes (disk I/O avoidance) | SQLite (`cache_size`)   |
+| Layer               | Caches                            | Owned by                 |
+| ------------------- | --------------------------------- | ------------------------ |
+| SQLite page cache   | B-tree nodes (disk I/O avoidance) | SQLite (`cache_size`)    |
 | **emb_cache table** | **`(model, body) → vector`**      | **nomai (this section)** |
-| In-memory LRU       | (future, YAGNI)                   | —                       |
+| In-memory LRU       | (future, YAGNI)                   | —                        |
 
 ---
 
