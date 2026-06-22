@@ -263,12 +263,29 @@ Each `BatchOp` has `{id?: string, method: string, params: object}`. The `id` fie
 
 Embedding cache introspection and management. The cache is a transparent wrapper around the configured embedding provider; it persists `(model, blake3(body)) → embedding` in the `emb_cache` SQLite table so identical bodies never trigger duplicate API calls.
 
-| Method        | Params             | Returns                                                    |
-| ------------- | ------------------ | ---------------------------------------------------------- |
-| `cache.stats` | —                  | `{embeddings: {model, dim, rows, hits, misses, hit_rate}}` |
-| `cache.clear` | `{model?: string}` | `{cleared: u64}` — omit `model` to clear every model       |
+| Method        | Params                                                                               | Returns                                                                     |
+| ------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `cache.stats` | —                                                                                    | `{embeddings: {model, dim, rows, hits, misses, hit_rate, warn_rows, warning}}` |
+| `cache.clear` | `{model?: string, before?: RFC3339, keep_recent?: N}` — all optional, freely combined | `{cleared: N, by_model: {<model>: N, ...}}`                                 |
 
-`hit_rate` is computed as `hits / (hits + misses)` over the daemon's lifetime; `rows` is the current `COUNT(*)` in `emb_cache` for the configured model. Counters are not reset by `cache.clear` — they reflect lifetime activity, not current contents.
+**`cache.stats` fields**:
+
+- `hit_rate` is `hits / (hits + misses)` over the daemon's lifetime
+- `rows` is the current `COUNT(*)` in `emb_cache` for the configured model
+- `warn_rows` is the configured soft-capacity threshold (default 100_000, see `[cache]` in [Configuration](#configuration))
+- `warning` is `true` when `rows > warn_rows` — the cache is **never** auto-evicted, this flag only signals that you may want to run `cache.clear`
+
+**`cache.clear` filters** — all optional and freely combinable:
+
+| Filter        | Effect                                                                    | Example                              |
+| ------------- | ------------------------------------------------------------------------- | ------------------------------------ |
+| `model`       | Restrict to a single model namespace. Omit to clear every model.          | `{"model": "embedding-3"}`           |
+| `before`      | Delete only rows created strictly before this RFC3339 timestamp.          | `{"before": "2026-01-01T00:00:00Z"}` |
+| `keep_recent` | Keep only the N most-recent rows (by `created_at DESC`); delete the rest. | `{"keep_recent": 1000}`              |
+
+Combinations: `{"model": "emb-3", "before": "..."}` clears `emb-3` rows older than the cutoff; `{"keep_recent": 1000}` clears every model except the global 1000 newest rows. The response always includes `by_model` so you can see which namespaces were affected.
+
+Counters (`hits` / `misses`) are **not** reset by `cache.clear` — they reflect lifetime activity, not current contents. Restart the daemon to reset them.
 
 See [Embedding cache](#embedding-cache) below for the caching model and design rationale.
 
@@ -344,6 +361,9 @@ dim         = 2048              # must match model's output dim
 base_url    = "http://your-llm-endpoint/v1"
 api_key_env = "NOMAI_LLM_API_KEY"
 model       = "your-model"
+
+[cache]
+warn_rows   = 100000            # soft cap; cache.stats returns warning=true above
 ```
 
 **API keys are referenced by env var name**, never stored in the config file. Set the env vars in your shell:
@@ -392,14 +412,24 @@ Every embedding API call is cached transparently in the `emb_cache` SQLite table
 
 **Hit semantics**:
 
-| Field      | Meaning                                                                |
-| ---------- | ---------------------------------------------------------------------- |
-| `hits`     | Embed calls served from cache (lifetime counter)                       |
-| `misses`   | Embed calls that fell through to the inner provider (lifetime counter) |
-| `rows`     | Current `COUNT(*)` in `emb_cache` for the configured model             |
-| `hit_rate` | `hits / (hits + misses)`, or 0.0 when both are zero                    |
+| Field       | Meaning                                                                |
+| ----------- | ---------------------------------------------------------------------- |
+| `hits`      | Embed calls served from cache (lifetime counter)                       |
+| `misses`    | Embed calls that fell through to the inner provider (lifetime counter) |
+| `rows`      | Current `COUNT(*)` in `emb_cache` for the configured model             |
+| `hit_rate`  | `hits / (hits + misses)`, or 0.0 when both are zero                    |
+| `warn_rows` | Configured soft-capacity threshold (`[cache] warn_rows`, default 100K) |
+| `warning`   | `true` when `rows > warn_rows` — monitor this in your health checks    |
 
 `cache.clear` removes rows from `emb_cache` but does not reset `hits` / `misses` — those reflect lifetime cache activity, not current contents. To reset, restart the daemon.
+
+**Capacity and eviction**: the cache **grows without bound** and is **never auto-evicted**. This is deliberate — eviction would force a re-computation that costs real API money (the same body re-embedded). Instead, configure `warn_rows` as a soft threshold; when `cache.stats` reports `warning: true`, run `cache.clear` with the filter that fits your situation:
+
+- `cache.clear({model: "old-model"})` — old model leftover after a config switch
+- `cache.clear({before: "2026-01-01T00:00:00Z"})` — bulk-clear stale rows
+- `cache.clear({keep_recent: 10000})` — trim to the most recent 10K rows
+
+Each row is ~8KB at 2048 dims (`dim × 4 bytes + 32B hash + metadata`), so 100K rows ≈ 800MB. Pick `warn_rows` based on your disk budget; the default of 100K is a sensible starting point.
 
 **Model isolation**: the `model` column namespaces rows; switching `config.embedding.model` starts a fresh cache namespace automatically. Old model rows remain until cleared manually.
 
