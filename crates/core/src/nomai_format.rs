@@ -110,12 +110,12 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
     let mut format_version: Option<u32> = None;
     let mut id: Option<Ulid> = None;
     let mut title: Option<String> = None;
-    let mut tags: Vec<String> = Vec::new();
-    let mut attrs = JsonMap::new();
-    let mut source: Option<String> = None;
+    let tags: Vec<String> = Vec::new();
+    let attrs = JsonMap::new();
+    let source: Option<String> = None;
     let mut created_at: Option<DateTime<Utc>> = None;
     let mut updated_at: Option<DateTime<Utc>> = None;
-    let mut blocks: Vec<Block> = Vec::new();
+    let blocks: Vec<Block> = Vec::new();
 
     for (idx, raw_line) in input.lines().enumerate() {
         let line_no = idx + 1;
@@ -186,7 +186,7 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
                     })?;
                 updated_at = Some(t);
             }
-            "tags" | "source" | _ => {
+            _ => {
                 // Task 4 will fill in tags / source / attrs fallback.
                 // For now, skip silently so the minimal test passes.
             }
