@@ -59,6 +59,31 @@ impl LinkService {
     /// to `CoreError::Validation` per spec §5. Other SQLite errors map to
     /// `CoreError::Storage`.
     pub fn create(&self, params: CreateLink) -> Result<Link, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN")?;
+        let result = self.create_in_tx(&conn, params);
+        match result {
+            Ok(link) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(link)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Execute create within an existing transaction. Caller controls BEGIN/COMMIT.
+    /// Does NOT lock self.conn (caller already holds the lock).
+    /// Does NOT call self.get() or other self methods that lock conn.
+    ///
+    /// FK + UNIQUE ConstraintViolation → `CoreError::Validation` per spec §5.
+    pub fn create_in_tx(
+        &self,
+        conn: &Connection,
+        params: CreateLink,
+    ) -> Result<Link, CoreError> {
         let attrs = params
             .attrs
             .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
@@ -76,57 +101,21 @@ impl LinkService {
             created_at: now,
         };
 
-        let conn = self.conn.lock().unwrap();
-        conn.execute_batch("BEGIN")?;
-        let result = (|| -> rusqlite::Result<()> {
-            match conn.execute(
-                "INSERT INTO links (id, source_id, target_id, relation, attrs, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    link.id.to_string(),
-                    link.source_id.to_string(),
-                    link.target_id.to_string(),
-                    &link.relation,
-                    link.attrs.to_string(),
-                    link.created_at.to_rfc3339(),
-                ],
-            ) {
-                Ok(_) => Ok::<(), rusqlite::Error>(()),
-                Err(e) => {
-                    // Map ConstraintViolation (FK + UNIQUE) to Validation per spec.
-                    if let rusqlite::Error::SqliteFailure(ref fe, _) = e {
-                        if fe.code == rusqlite::ErrorCode::ConstraintViolation {
-                            return Err(rusqlite::Error::SqliteFailure(*fe, None));
-                        }
-                    }
-                    Err(e)
-                }
-            }?;
-            // Emit event.
-            let event_id = Ulid::new();
-            let event_payload = serde_json::to_value(&link).expect("link serialize");
-            conn.execute(
-                "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    event_id.to_string(),
-                    "link.created",
-                    "link",
-                    link.id.to_string(),
-                    event_payload.to_string(),
-                    Utc::now().to_rfc3339(),
-                ],
-            )?;
-            Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-                Ok(link)
-            }
+        match conn.execute(
+            "INSERT INTO links (id, source_id, target_id, relation, attrs, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                link.id.to_string(),
+                link.source_id.to_string(),
+                link.target_id.to_string(),
+                &link.relation,
+                link.attrs.to_string(),
+                link.created_at.to_rfc3339(),
+            ],
+        ) {
+            Ok(_) => {}
             Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                // Re-apply error mapping (FK + UNIQUE → Validation).
+                // Map ConstraintViolation (FK + UNIQUE) to Validation per spec.
                 if let rusqlite::Error::SqliteFailure(ref fe, _) = e {
                     if fe.code == rusqlite::ErrorCode::ConstraintViolation {
                         return Err(CoreError::Validation(format!(
@@ -134,9 +123,26 @@ impl LinkService {
                         )));
                     }
                 }
-                Err(CoreError::Storage(e))
+                return Err(CoreError::Storage(e));
             }
         }
+
+        let event_id = Ulid::new();
+        let event_payload = serde_json::to_value(&link).expect("link serialize");
+        conn.execute(
+            "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event_id.to_string(),
+                "link.created",
+                "link",
+                link.id.to_string(),
+                event_payload.to_string(),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(link)
     }
 
     /// Fetch a link by id. Returns `CoreError::NotFound` if no link has this id.
@@ -158,53 +164,51 @@ impl LinkService {
     pub fn delete(&self, id: Ulid) -> Result<(), CoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch("BEGIN")?;
-        let result = (|| -> rusqlite::Result<Option<()>> {
-            // SELECT before-snapshot.
-            let row_result = conn.query_row(
-                "SELECT id, source_id, target_id, relation, attrs, created_at
-                 FROM links WHERE id = ?1",
-                params![id.to_string()],
-                row_to_link,
-            );
-            let before_link = match row_result {
-                Ok(l) => l,
-                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-                Err(e) => return Err(e),
-            };
-
-            conn.execute("DELETE FROM links WHERE id = ?1", params![id.to_string()])?;
-
-            // Emit event with before-snapshot.
-            let event_id = Ulid::new();
-            let event_payload = serde_json::to_value(&before_link).expect("link serialize");
-            conn.execute(
-                "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    event_id.to_string(),
-                    "link.deleted",
-                    "link",
-                    id.to_string(),
-                    event_payload.to_string(),
-                    Utc::now().to_rfc3339(),
-                ],
-            )?;
-            Ok(Some(()))
-        })();
+        let result = self.delete_in_tx(&conn, id);
         match result {
-            Ok(Some(())) => {
+            Ok(()) => {
                 conn.execute_batch("COMMIT")?;
                 Ok(())
             }
-            Ok(None) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(CoreError::NotFound(id))
-            }
             Err(e) => {
                 let _ = conn.execute_batch("ROLLBACK");
-                Err(CoreError::Storage(e))
+                Err(e)
             }
         }
+    }
+
+    /// Execute delete within an existing transaction. Caller controls BEGIN/COMMIT.
+    /// SELECT before-snapshot, DELETE, INSERT event — all via passed conn.
+    pub fn delete_in_tx(&self, conn: &Connection, id: Ulid) -> Result<(), CoreError> {
+        let before_link = match conn.query_row(
+            "SELECT id, source_id, target_id, relation, attrs, created_at
+             FROM links WHERE id = ?1",
+            params![id.to_string()],
+            row_to_link,
+        ) {
+            Ok(l) => l,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(CoreError::NotFound(id)),
+            Err(e) => return Err(CoreError::Storage(e)),
+        };
+
+        conn.execute("DELETE FROM links WHERE id = ?1", params![id.to_string()])?;
+
+        let event_id = Ulid::new();
+        let event_payload = serde_json::to_value(&before_link).expect("link serialize");
+        conn.execute(
+            "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event_id.to_string(),
+                "link.deleted",
+                "link",
+                id.to_string(),
+                event_payload.to_string(),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(())
     }
 
     /// List links filtered by source, target, and/or relation.
@@ -644,6 +648,49 @@ mod tests {
 
         links.delete(created.id).unwrap();
         let err = links.get(created.id).unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn link_create_in_tx_works_within_external_transaction() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+
+        let conn = links.conn.lock().unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        let link = links
+            .create_in_tx(
+                &conn,
+                CreateLink {
+                    source_id: a,
+                    target_id: b,
+                    relation: "r".into(),
+                    attrs: None,
+                },
+            )
+            .unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+        drop(conn);
+
+        let fetched = links.get(link.id).unwrap();
+        assert_eq!(fetched.relation, "r");
+    }
+
+    #[test]
+    fn link_delete_in_tx_works_within_external_transaction() {
+        let (entries, links) = setup();
+        let a = seed_entry(&entries, "a");
+        let b = seed_entry(&entries, "b");
+        let created = seed_link(&links, a, b, "r");
+
+        let conn = links.conn.lock().unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        links.delete_in_tx(&conn, created).unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+        drop(conn);
+
+        let err = links.get(created).unwrap_err();
         assert!(matches!(err, CoreError::NotFound(_)));
     }
 
