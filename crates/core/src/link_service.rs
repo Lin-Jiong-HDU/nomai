@@ -79,11 +79,7 @@ impl LinkService {
     /// Does NOT call self.get() or other self methods that lock conn.
     ///
     /// FK + UNIQUE ConstraintViolation → `CoreError::Validation` per spec §5.
-    pub fn create_in_tx(
-        &self,
-        conn: &Connection,
-        params: CreateLink,
-    ) -> Result<Link, CoreError> {
+    pub fn create_in_tx(&self, conn: &Connection, params: CreateLink) -> Result<Link, CoreError> {
         let attrs = params
             .attrs
             .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
