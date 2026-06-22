@@ -26,7 +26,7 @@ const SYSTEM_PROMPT: &str =
     "Answer based on the following context. If insufficient, say so explicitly.";
 const TOP_K: u32 = 5;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let question = std::env::args().nth(1).ok_or("usage: rag <question>")?;
 
