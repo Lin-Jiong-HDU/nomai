@@ -110,9 +110,9 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
     let mut format_version: Option<u32> = None;
     let mut id: Option<Ulid> = None;
     let mut title: Option<String> = None;
-    let tags: Vec<String> = Vec::new();
-    let attrs = JsonMap::new();
-    let source: Option<String> = None;
+    let mut tags: Vec<String> = Vec::new();
+    let mut attrs = JsonMap::new();
+    let mut source: Option<String> = None;
     let mut created_at: Option<DateTime<Utc>> = None;
     let mut updated_at: Option<DateTime<Utc>> = None;
     let blocks: Vec<Block> = Vec::new();
@@ -195,9 +195,29 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
                         })?;
                 updated_at = Some(t);
             }
+            "tags" => {
+                tags = parse_tags(&value).map_err(|reason| ParseError::InvalidValue {
+                    line: line_no,
+                    field: "tags",
+                    reason,
+                })?;
+            }
+            "source" => {
+                source = Some(
+                    unescape_value(&value).map_err(|e| ParseError::InvalidValue {
+                        line: line_no,
+                        field: "source",
+                        reason: e,
+                    })?,
+                );
+            }
             _ => {
-                // Task 4 will fill in tags / source / attrs fallback.
-                // For now, skip silently so the minimal test passes.
+                let val = unescape_value(&value).map_err(|e| ParseError::InvalidValue {
+                    line: line_no,
+                    field: "attrs",
+                    reason: e,
+                })?;
+                attrs.insert(key, serde_json::Value::String(val));
             }
         }
     }
@@ -249,10 +269,78 @@ fn split_header_kv(s: &str) -> Option<(String, String)> {
 }
 
 /// Unescape a header value. Bare tokens pass through; quoted values unwrap
-/// the quotes and process `\"`. Tasks 4 expands this; v1 minimal version
-/// handles only bare tokens.
+/// the quotes and process `\"`.
 fn unescape_value(s: &str) -> Result<String, String> {
-    Ok(s.to_string())
+    let s = s.trim();
+    if !s.starts_with('"') {
+        return Ok(s.to_string());
+    }
+    if !s.ends_with('"') || s.len() < 2 {
+        return Err(format!("unterminated quoted value: {s:?}"));
+    }
+    let inner = &s[1..s.len() - 1];
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('"') => out.push('"'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+/// Parse comma-separated tags, honoring `"..."` for tags containing commas.
+fn parse_tags(s: &str) -> Result<Vec<String>, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut tags = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_quote {
+            if c == '"' {
+                in_quote = false;
+            } else if c == '\\' {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            } else {
+                current.push(c);
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                // A quote starting a tag segment discards leading whitespace
+                // accumulated before it (e.g. `a, "b" -> ["a", "b"]`).
+                if current.trim().is_empty() {
+                    current.clear();
+                }
+                in_quote = true;
+            }
+            ',' => {
+                tags.push(std::mem::take(&mut current));
+            }
+            other => current.push(other),
+        }
+    }
+    if in_quote {
+        return Err(format!("unterminated quoted tag in: {s:?}"));
+    }
+    tags.push(current);
+    Ok(tags)
 }
 
 /// Render a `NomaiDoc` back to `.nomai` text. Infallible for well-formed docs.
@@ -377,5 +465,81 @@ mod tests {
             }
             other => panic!("expected InvalidValue, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_tags_and_source() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#tags astronomy, astronomy-history
+#source https://example.com/research
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+";
+        let doc = parse(input).unwrap();
+        assert_eq!(doc.tags, vec!["astronomy", " astronomy-history"]);
+        assert_eq!(doc.source.as_deref(), Some("https://example.com/research"));
+    }
+
+    #[test]
+    fn parse_unknown_keys_go_to_attrs() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#author John Doe
+#year 2024
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+";
+        let doc = parse(input).unwrap();
+        assert_eq!(doc.attrs.len(), 2);
+        assert_eq!(
+            doc.attrs["author"],
+            serde_json::Value::String("John Doe".into())
+        );
+        assert_eq!(doc.attrs["year"], serde_json::Value::String("2024".into()));
+    }
+
+    #[test]
+    fn parse_quoted_header_value() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title \"Hello World\"
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+";
+        let doc = parse(input).unwrap();
+        assert_eq!(doc.title, "Hello World");
+    }
+
+    #[test]
+    fn parse_quoted_value_with_escaped_quote() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title \"He said \\\"hi\\\"\"
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+";
+        let doc = parse(input).unwrap();
+        assert_eq!(doc.title, "He said \"hi\"");
+    }
+
+    #[test]
+    fn parse_tags_with_quoted_comma() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#tags astronomy, \"science, history\", math
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+";
+        let doc = parse(input).unwrap();
+        assert_eq!(doc.tags, vec!["astronomy", "science, history", " math"]);
     }
 }
