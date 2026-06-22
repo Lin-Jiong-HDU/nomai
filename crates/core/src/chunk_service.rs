@@ -43,6 +43,31 @@ impl ChunkService {
     }
 
     pub fn create(&self, params: CreateChunk) -> Result<Chunk, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN")?;
+        let result = self.create_in_tx(&conn, params);
+        match result {
+            Ok(chunk) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(chunk)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Execute create within an existing transaction. Caller controls BEGIN/COMMIT.
+    /// Does NOT lock self.conn (caller already holds the lock).
+    /// Does NOT call self.get() or other self methods that lock conn.
+    ///
+    /// FK + UNIQUE ConstraintViolation → `CoreError::Validation` per spec.
+    pub fn create_in_tx(
+        &self,
+        conn: &Connection,
+        params: CreateChunk,
+    ) -> Result<Chunk, CoreError> {
         let attrs = params
             .attrs
             .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
@@ -61,49 +86,21 @@ impl ChunkService {
             updated_at: now,
         };
 
-        let conn = self.conn.lock().unwrap();
-        conn.execute_batch("BEGIN")?;
-        let result = (|| -> rusqlite::Result<()> {
-            match conn.execute(
-                "INSERT INTO chunks (id, entry_id, ordinal, text, attrs, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    chunk.id.to_string(),
-                    chunk.entry_id.to_string(),
-                    chunk.ordinal as i64,
-                    &chunk.text,
-                    chunk.attrs.to_string(),
-                    chunk.created_at.to_rfc3339(),
-                    chunk.updated_at.to_rfc3339(),
-                ],
-            ) {
-                Ok(_) => Ok(()),
-                Err(e) => Err(e),
-            }?;
-            // Emit event.
-            let event_id = Ulid::new();
-            let event_payload = serde_json::to_value(&chunk).expect("chunk serialize");
-            conn.execute(
-                "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    event_id.to_string(),
-                    "chunk.created",
-                    "chunk",
-                    chunk.id.to_string(),
-                    event_payload.to_string(),
-                    Utc::now().to_rfc3339(),
-                ],
-            )?;
-            Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-                Ok(chunk)
-            }
+        match conn.execute(
+            "INSERT INTO chunks (id, entry_id, ordinal, text, attrs, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                chunk.id.to_string(),
+                chunk.entry_id.to_string(),
+                chunk.ordinal as i64,
+                &chunk.text,
+                chunk.attrs.to_string(),
+                chunk.created_at.to_rfc3339(),
+                chunk.updated_at.to_rfc3339(),
+            ],
+        ) {
+            Ok(_) => {}
             Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
                 // Map FK + UNIQUE constraint violations to Validation.
                 if let rusqlite::Error::SqliteFailure(ref fe, _) = e {
                     if fe.code == rusqlite::ErrorCode::ConstraintViolation {
@@ -112,9 +109,26 @@ impl ChunkService {
                         )));
                     }
                 }
-                Err(CoreError::Storage(e))
+                return Err(CoreError::Storage(e));
             }
         }
+
+        let event_id = Ulid::new();
+        let event_payload = serde_json::to_value(&chunk).expect("chunk serialize");
+        conn.execute(
+            "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event_id.to_string(),
+                "chunk.created",
+                "chunk",
+                chunk.id.to_string(),
+                event_payload.to_string(),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(chunk)
     }
 
     pub fn get(&self, id: Ulid) -> Result<Chunk, CoreError> {
@@ -166,53 +180,51 @@ impl ChunkService {
     pub fn delete(&self, id: Ulid) -> Result<(), CoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch("BEGIN")?;
-        let result = (|| -> rusqlite::Result<Option<()>> {
-            // SELECT before-snapshot first.
-            let row_result = conn.query_row(
-                "SELECT id, entry_id, ordinal, text, attrs, created_at, updated_at
-                 FROM chunks WHERE id = ?1",
-                params![id.to_string()],
-                row_to_chunk,
-            );
-            let before_chunk = match row_result {
-                Ok(c) => c,
-                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-                Err(e) => return Err(e),
-            };
-
-            conn.execute("DELETE FROM chunks WHERE id = ?1", params![id.to_string()])?;
-
-            // Emit event with before-snapshot.
-            let event_id = Ulid::new();
-            let event_payload = serde_json::to_value(&before_chunk).expect("chunk serialize");
-            conn.execute(
-                "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    event_id.to_string(),
-                    "chunk.deleted",
-                    "chunk",
-                    id.to_string(),
-                    event_payload.to_string(),
-                    Utc::now().to_rfc3339(),
-                ],
-            )?;
-            Ok(Some(()))
-        })();
+        let result = self.delete_in_tx(&conn, id);
         match result {
-            Ok(Some(())) => {
+            Ok(()) => {
                 conn.execute_batch("COMMIT")?;
                 Ok(())
             }
-            Ok(None) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(CoreError::NotFound(id))
-            }
             Err(e) => {
                 let _ = conn.execute_batch("ROLLBACK");
-                Err(CoreError::Storage(e))
+                Err(e)
             }
         }
+    }
+
+    /// Execute delete within an existing transaction. Caller controls BEGIN/COMMIT.
+    /// SELECT before-snapshot, DELETE, INSERT event — all via passed conn.
+    pub fn delete_in_tx(&self, conn: &Connection, id: Ulid) -> Result<(), CoreError> {
+        let before_chunk = match conn.query_row(
+            "SELECT id, entry_id, ordinal, text, attrs, created_at, updated_at
+             FROM chunks WHERE id = ?1",
+            params![id.to_string()],
+            row_to_chunk,
+        ) {
+            Ok(c) => c,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(CoreError::NotFound(id)),
+            Err(e) => return Err(CoreError::Storage(e)),
+        };
+
+        conn.execute("DELETE FROM chunks WHERE id = ?1", params![id.to_string()])?;
+
+        let event_id = Ulid::new();
+        let event_payload = serde_json::to_value(&before_chunk).expect("chunk serialize");
+        conn.execute(
+            "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event_id.to_string(),
+                "chunk.deleted",
+                "chunk",
+                id.to_string(),
+                event_payload.to_string(),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(())
     }
 
     pub fn ensure_vec_chunk_embeddings(&self, dim: usize) -> Result<(), CoreError> {
@@ -649,6 +661,44 @@ mod tests {
         let (_, chunks, entry_id) = setup_with_entry();
         let id = seed_chunk(&chunks, entry_id, 0, "x");
         chunks.delete(id).unwrap();
+        let err = chunks.get(id).unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn chunk_create_in_tx_works_within_external_transaction() {
+        let (_, chunks, entry_id) = setup_with_entry();
+        let conn = chunks.conn.lock().unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        let chunk = chunks
+            .create_in_tx(
+                &conn,
+                CreateChunk {
+                    entry_id,
+                    ordinal: 0,
+                    text: "in_tx".into(),
+                    attrs: None,
+                },
+            )
+            .unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+        drop(conn);
+
+        let fetched = chunks.get(chunk.id).unwrap();
+        assert_eq!(fetched.text, "in_tx");
+    }
+
+    #[test]
+    fn chunk_delete_in_tx_works_within_external_transaction() {
+        let (_, chunks, entry_id) = setup_with_entry();
+        let id = seed_chunk(&chunks, entry_id, 0, "x");
+
+        let conn = chunks.conn.lock().unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        chunks.delete_in_tx(&conn, id).unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+        drop(conn);
+
         let err = chunks.get(id).unwrap_err();
         assert!(matches!(err, CoreError::NotFound(_)));
     }
