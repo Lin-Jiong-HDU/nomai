@@ -229,16 +229,11 @@ impl RpcHandler for Batch {
                 }))
             }
             CommitOutcome::CommitErr(e) => Err(e),
-            CommitOutcome::OpErr(idx, err) => {
-                let rpc_err = error_to_rpc(&err);
-                let message = rpc_err
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown error");
-                Err(CoreError::Validation(format!(
-                    "op[{}] ({}) failed: {}",
-                    idx, req.ops[idx].method, message
-                )))
+            CommitOutcome::OpErr(_idx, err) => {
+                // Return the underlying CoreError directly so the top-level
+                // JSON-RPC error code matches (NotFound→1001, Validation→1003, etc).
+                // Per-op context (index, method, message) is in the results array.
+                Err(err)
             }
         }
     }

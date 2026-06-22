@@ -1187,7 +1187,10 @@ mod tests {
         let link_source_id = results[3]["result"]["source_id"].as_str().unwrap();
         let link_target_id = results[3]["result"]["target_id"].as_str().unwrap();
         assert_eq!(link_source_id, entry_id, "link source_id should match $ref");
-        assert_eq!(link_target_id, target_id, "link target_id should match $ref");
+        assert_eq!(
+            link_target_id, target_id,
+            "link target_id should match $ref"
+        );
     }
 
     #[tokio::test]
@@ -1218,11 +1221,15 @@ mod tests {
         assert_eq!(err.code, 1003);
 
         // Verify op[0] was rolled back (entry not persisted)
-        let list_resp = daemon.dispatch(req("entry.list", json!({"limit": 100}))).await;
+        let list_resp = daemon
+            .dispatch(req("entry.list", json!({"limit": 100})))
+            .await;
         let list_result = list_resp.result.unwrap();
         let items = list_result["items"].as_array().unwrap();
         assert!(
-            items.iter().all(|e| e["title"].as_str().unwrap() != "will rollback"),
+            items
+                .iter()
+                .all(|e| e["title"].as_str().unwrap() != "will rollback"),
             "entry should have been rolled back"
         );
     }
@@ -1252,9 +1259,7 @@ mod tests {
         let server = MockServer::start().await;
         let daemon = setup_daemon(&server).await;
 
-        let resp = daemon
-            .dispatch(req("batch", json!({"ops": []})))
-            .await;
+        let resp = daemon.dispatch(req("batch", json!({"ops": []}))).await;
 
         let err = resp.error.unwrap();
         assert_eq!(err.code, 1003);
@@ -1298,7 +1303,7 @@ mod tests {
                     {"index": 2, "embedding": vec![1.0_f32; DIM]}
                 ]
             })))
-            .expect(1)  // ← exactly 1 call (batch embed), not 3
+            .expect(1) // ← exactly 1 call (batch embed), not 3
             .mount(&server)
             .await;
 
