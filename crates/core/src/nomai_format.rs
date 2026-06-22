@@ -265,7 +265,20 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
             })?;
         let attrs = parse_block_attrs(attr_str, line_no)?;
 
-        // Task 7 will validate @connection required attrs here.
+        if block_type == BlockType::Connection {
+            if !attrs.contains_key("target") {
+                return Err(ParseError::MissingConnectionAttr {
+                    line: line_no,
+                    attr: "target",
+                });
+            }
+            if !attrs.contains_key("relation") {
+                return Err(ParseError::MissingConnectionAttr {
+                    line: line_no,
+                    attr: "relation",
+                });
+            }
+        }
 
         // Collect body lines until next @type or EOF.
         let mut body_lines: Vec<String> = Vec::new();
@@ -734,6 +747,106 @@ Text.
         assert_eq!(
             block.attrs["relation"],
             serde_json::Value::String("refutes".into())
+        );
+    }
+
+    #[test]
+    fn parse_unknown_block_type_errors() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@definition
+Some text.
+";
+        assert_eq!(
+            parse(input).unwrap_err(),
+            ParseError::UnknownBlockType {
+                line: 7,
+                ty: "definition".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_connection_missing_target_errors() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@connection relation=refutes
+";
+        assert_eq!(
+            parse(input).unwrap_err(),
+            ParseError::MissingConnectionAttr {
+                line: 7,
+                attr: "target"
+            }
+        );
+    }
+
+    #[test]
+    fn parse_connection_missing_relation_errors() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@connection target=01HXZ...geo
+";
+        assert_eq!(
+            parse(input).unwrap_err(),
+            ParseError::MissingConnectionAttr {
+                line: 7,
+                attr: "relation"
+            }
+        );
+    }
+
+    #[test]
+    fn parse_body_with_escaped_at() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@note
+\\@claim should be literal.
+";
+        let doc = parse(input).unwrap();
+        assert_eq!(doc.blocks[0].text, "@claim should be literal.\n");
+    }
+
+    #[test]
+    fn parse_body_with_multiple_paragraphs() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@note
+First paragraph.
+
+Second paragraph.
+
+Third.
+";
+        let doc = parse(input).unwrap();
+        assert_eq!(
+            doc.blocks[0].text,
+            "First paragraph.\n\nSecond paragraph.\n\nThird.\n"
         );
     }
 }
