@@ -644,4 +644,82 @@ Earth orbits the sun.
         assert!(block.attrs.is_empty());
         assert_eq!(block.text, "Earth orbits the sun.\n");
     }
+
+    #[test]
+    fn parse_multiple_blocks() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@claim
+First claim.
+
+@evidence src=paper.pdf#L42
+Evidence text.
+
+@question
+Why?
+";
+        let doc = parse(input).unwrap();
+        assert_eq!(doc.blocks.len(), 3);
+        assert_eq!(doc.blocks[0].r#type, BlockType::Claim);
+        assert_eq!(doc.blocks[0].text, "First claim.\n");
+        assert_eq!(doc.blocks[1].r#type, BlockType::Evidence);
+        assert_eq!(
+            doc.blocks[1].attrs["src"],
+            serde_json::Value::String("paper.pdf#L42".into())
+        );
+        assert_eq!(doc.blocks[1].text, "Evidence text.\n");
+        assert_eq!(doc.blocks[2].r#type, BlockType::Question);
+    }
+
+    #[test]
+    fn parse_block_with_multiple_attrs() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@evidence src=paper.pdf strength=strong
+Text.
+";
+        let doc = parse(input).unwrap();
+        let attrs = &doc.blocks[0].attrs;
+        assert_eq!(attrs.len(), 2);
+        assert_eq!(attrs["src"], serde_json::Value::String("paper.pdf".into()));
+        assert_eq!(
+            attrs["strength"],
+            serde_json::Value::String("strong".into())
+        );
+    }
+
+    #[test]
+    fn parse_block_with_empty_body() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@connection target=01HXZ...geocentrism relation=refutes
+";
+        let doc = parse(input).unwrap();
+        let block = &doc.blocks[0];
+        assert_eq!(block.r#type, BlockType::Connection);
+        assert_eq!(block.text, "");
+        assert_eq!(
+            block.attrs["target"],
+            serde_json::Value::String("01HXZ...geocentrism".into())
+        );
+        assert_eq!(
+            block.attrs["relation"],
+            serde_json::Value::String("refutes".into())
+        );
+    }
 }
