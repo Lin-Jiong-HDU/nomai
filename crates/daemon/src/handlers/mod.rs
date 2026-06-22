@@ -1141,4 +1141,236 @@ mod tests {
         assert!(names.contains(&"custom.echo"));
         assert_eq!(tools.len(), 22); // 21 built-in + custom.echo
     }
+
+    // ----- batch RPC e2e (Plan 2 Task 3) -----
+
+    #[tokio::test]
+    async fn batch_all_success_creates_entry_and_chunks() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "batch",
+                json!({
+                    "ops": [
+                        {"id": "e1", "method": "entry.create", "params": {"title": "doc", "body": "body text"}},
+                        {"id": "e2", "method": "entry.create", "params": {"title": "target", "body": "target body"}},
+                        {"id": "c1", "method": "chunk.create", "params": {
+                            "entry_id": {"$ref": "e1.id"},
+                            "ordinal": 0,
+                            "text": "chunk text"
+                        }},
+                        {"method": "link.create", "params": {
+                            "source_id": {"$ref": "e1.id"},
+                            "target_id": {"$ref": "e2.id"},
+                            "relation": "references"
+                        }}
+                    ]
+                }),
+            ))
+            .await;
+
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["rolled_back"], false);
+        let results = result["results"].as_array().unwrap();
+        assert_eq!(results.len(), 4);
+        assert!(results.iter().all(|r| r["ok"] == true));
+
+        // Verify $ref resolved correctly
+        let entry_id = results[0]["result"]["id"].as_str().unwrap();
+        let target_id = results[1]["result"]["id"].as_str().unwrap();
+        let chunk_entry_id = results[2]["result"]["entry_id"].as_str().unwrap();
+        assert_eq!(chunk_entry_id, entry_id, "chunk entry_id should match $ref");
+        let link_source_id = results[3]["result"]["source_id"].as_str().unwrap();
+        let link_target_id = results[3]["result"]["target_id"].as_str().unwrap();
+        assert_eq!(link_source_id, entry_id, "link source_id should match $ref");
+        assert_eq!(link_target_id, target_id, "link target_id should match $ref");
+    }
+
+    #[tokio::test]
+    async fn batch_atomic_rolls_back_on_failure() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "batch",
+                json!({
+                    "ops": [
+                        {"id": "e1", "method": "entry.create", "params": {"title": "will rollback", "body": "x"}},
+                        {"method": "chunk.create", "params": {
+                            "entry_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",  // phantom entry → FK violation
+                            "ordinal": 0,
+                            "text": "orphan chunk"
+                        }}
+                    ]
+                }),
+            ))
+            .await;
+
+        // Should fail (op[1] FK violation)
+        assert!(resp.error.is_some());
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1003);
+
+        // Verify op[0] was rolled back (entry not persisted)
+        let list_resp = daemon.dispatch(req("entry.list", json!({"limit": 100}))).await;
+        let list_result = list_resp.result.unwrap();
+        let items = list_result["items"].as_array().unwrap();
+        assert!(
+            items.iter().all(|e| e["title"].as_str().unwrap() != "will rollback"),
+            "entry should have been rolled back"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_read_method() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "batch",
+                json!({
+                    "ops": [
+                        {"method": "entry.list", "params": {"limit": 3}}
+                    ]
+                }),
+            ))
+            .await;
+
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1003);
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_empty_ops() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req("batch", json!({"ops": []})))
+            .await;
+
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1003);
+    }
+
+    #[tokio::test]
+    async fn batch_ref_unknown_op_id_fails() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "batch",
+                json!({
+                    "ops": [
+                        {"method": "chunk.create", "params": {
+                            "entry_id": {"$ref": "nonexistent.id"},
+                            "ordinal": 0,
+                            "text": "x"
+                        }}
+                    ]
+                }),
+            ))
+            .await;
+
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1003);
+    }
+
+    #[tokio::test]
+    async fn batch_batch_embedding_calls_embedder_once() {
+        let server = MockServer::start().await;
+        // Mock expects exactly 1 embedding call (batch), not 3 (individual)
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    {"index": 0, "embedding": vec![1.0_f32; DIM]},
+                    {"index": 1, "embedding": vec![1.0_f32; DIM]},
+                    {"index": 2, "embedding": vec![1.0_f32; DIM]}
+                ]
+            })))
+            .expect(1)  // ← exactly 1 call (batch embed), not 3
+            .mount(&server)
+            .await;
+
+        let daemon = setup_daemon(&server).await;
+
+        daemon
+            .dispatch(req(
+                "batch",
+                json!({
+                    "ops": [
+                        {"method": "entry.create", "params": {"title": "a", "body": "text a"}},
+                        {"method": "entry.create", "params": {"title": "b", "body": "text b"}},
+                        {"method": "entry.create", "params": {"title": "c", "body": "text c"}}
+                    ]
+                }),
+            ))
+            .await;
+
+        // Mock's expect(1) verifies on drop that exactly 1 embedding call was made.
+    }
+
+    #[tokio::test]
+    async fn batch_nested_ref_field_access() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "batch",
+                json!({
+                    "ops": [
+                        {"id": "e1", "method": "entry.create", "params": {"title": "doc", "body": "x"}},
+                        {"id": "c1", "method": "chunk.create", "params": {
+                            "entry_id": {"$ref": "e1.id"},
+                            "ordinal": 0,
+                            "text": "chunk"
+                        }},
+                        // Link references chunk's id
+                        {"method": "link.create", "params": {
+                            "source_id": {"$ref": "e1.id"},
+                            "target_id": {"$ref": "c1.entry_id"},
+                            "relation": "has_chunk"
+                        }}
+                    ]
+                }),
+            ))
+            .await;
+
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let results = result["results"].as_array().unwrap();
+
+        // Verify nested ref: link target_id == chunk's entry_id == entry's id
+        let entry_id = results[0]["result"]["id"].as_str().unwrap();
+        let chunk_entry_id = results[1]["result"]["entry_id"].as_str().unwrap();
+        let link_target = results[2]["result"]["target_id"].as_str().unwrap();
+        assert_eq!(chunk_entry_id, entry_id);
+        assert_eq!(link_target, entry_id);
+    }
+
+    #[tokio::test]
+    async fn batch_visible_via_mcp_tools_list() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon.dispatch(req("tools/list", json!({}))).await;
+        let tools = resp.result.unwrap();
+        let tools = tools["tools"].as_array().unwrap();
+        assert!(
+            tools.iter().any(|t| t["name"] == "batch"),
+            "batch should appear in MCP tools/list"
+        );
+    }
 }
