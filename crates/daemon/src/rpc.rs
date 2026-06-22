@@ -1,4 +1,8 @@
-//! CoreError → RpcError mapping and the DispatchError enum.
+//! CoreError → RpcError mapping, the DispatchError enum, and the
+//! RpcHandler trait that every JSON-RPC method handler implements.
+
+use async_trait::async_trait;
+use serde_json::Value;
 
 use nomai_core::CoreError;
 use nomai_protocol::RpcError;
@@ -11,6 +15,21 @@ use serde_json::json;
 pub enum DispatchError {
     Core(CoreError),
     MethodNotFound(String),
+}
+
+/// A JSON-RPC method handler.
+///
+/// Each RPC method is implemented as a zero-sized struct that implements
+/// this trait. Handlers are registered in `handlers::registry()` and
+/// dispatched via the Daemon's `HashMap<&'static str, Arc<dyn RpcHandler>>`.
+#[async_trait]
+pub trait RpcHandler: Send + Sync {
+    /// The JSON-RPC method name (e.g. `"entry.create"`).
+    fn method(&self) -> &'static str;
+
+    /// Invoke the handler with the parsed params JSON value.
+    async fn call(&self, daemon: &crate::daemon::Daemon, params: Value)
+    -> Result<Value, CoreError>;
 }
 
 pub fn core_error_to_rpc(err: CoreError) -> RpcError {

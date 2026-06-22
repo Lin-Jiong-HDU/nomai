@@ -1,11 +1,12 @@
-//! JSON-RPC method dispatch table.
+//! JSON-RPC method dispatch registry.
+//!
+//! Each method is a zero-sized struct implementing `RpcHandler`. The daemon
+//! looks up handlers by method name in a `HashMap` populated by `registry()`.
 
-use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use nomai_protocol::Request;
-
-use crate::daemon::Daemon;
-use crate::rpc::DispatchError;
+use crate::rpc::RpcHandler;
 
 pub mod chunk;
 pub mod entry;
@@ -14,36 +15,66 @@ pub mod link;
 pub mod provider;
 pub mod search;
 
-pub async fn route(daemon: &Daemon, req: Request) -> Result<Value, DispatchError> {
-    let params = req.params.unwrap_or(Value::Null);
-    let result: Result<Value, nomai_core::CoreError> = match req.method.as_str() {
-        "entry.create" => entry::create(daemon, params).await,
-        "entry.get" => entry::get(daemon, params).await,
-        "entry.update" => entry::update(daemon, params).await,
-        "entry.delete" => entry::delete(daemon, params).await,
-        "entry.list" => entry::list(daemon, params).await,
-        "link.create" => link::create(daemon, params).await,
-        "link.get" => link::get(daemon, params).await,
-        "link.delete" => link::delete(daemon, params).await,
-        "link.list" => link::list(daemon, params).await,
-        "link.neighbors" => link::neighbors(daemon, params).await,
-        "chunk.create" => chunk::create(daemon, params).await,
-        "chunk.get" => chunk::get(daemon, params).await,
-        "chunk.delete" => chunk::delete(daemon, params).await,
-        "chunk.list" => chunk::list(daemon, params).await,
-        "events.list" => events::list(daemon, params).await,
-        "events.get" => events::get(daemon, params).await,
-        "events.purge" => events::purge(daemon, params).await,
-        "search.fulltext" => search::fulltext(daemon, params).await,
-        "search.semantic" => search::semantic(daemon, params).await,
-        "provider.list" => provider::list(daemon, params).await,
-        // Reserved method names per spec §6 + primitives spec §5: -32601.
-        "search.hybrid" | "provider.set" | "link.traverse" => {
-            return Err(DispatchError::MethodNotFound(req.method.clone()));
-        }
-        _ => return Err(DispatchError::MethodNotFound(req.method.clone())),
-    };
-    result.map_err(DispatchError::Core)
+/// Build the default method → handler registry for the daemon.
+///
+/// Returns the full set of built-in JSON-RPC handlers. Plugins may add
+/// more via `Daemon::register_handler`.
+pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
+    let mut m: HashMap<&'static str, Arc<dyn RpcHandler>> = HashMap::new();
+
+    // entry.*
+    let h = entry::Create;
+    m.insert(h.method(), Arc::new(h));
+    let h = entry::Get;
+    m.insert(h.method(), Arc::new(h));
+    let h = entry::Update;
+    m.insert(h.method(), Arc::new(h));
+    let h = entry::Delete;
+    m.insert(h.method(), Arc::new(h));
+    let h = entry::List;
+    m.insert(h.method(), Arc::new(h));
+
+    // link.*
+    let h = link::Create;
+    m.insert(h.method(), Arc::new(h));
+    let h = link::Get;
+    m.insert(h.method(), Arc::new(h));
+    let h = link::Delete;
+    m.insert(h.method(), Arc::new(h));
+    let h = link::List;
+    m.insert(h.method(), Arc::new(h));
+    let h = link::Neighbors;
+    m.insert(h.method(), Arc::new(h));
+
+    // chunk.*
+    let h = chunk::Create;
+    m.insert(h.method(), Arc::new(h));
+    let h = chunk::Get;
+    m.insert(h.method(), Arc::new(h));
+    let h = chunk::Delete;
+    m.insert(h.method(), Arc::new(h));
+    let h = chunk::List;
+    m.insert(h.method(), Arc::new(h));
+
+    // events.*
+    let h = events::List;
+    m.insert(h.method(), Arc::new(h));
+    let h = events::Get;
+    m.insert(h.method(), Arc::new(h));
+    let h = events::Purge;
+    m.insert(h.method(), Arc::new(h));
+
+    // search.*
+    let h = search::Fulltext;
+    m.insert(h.method(), Arc::new(h));
+    let h = search::Semantic;
+    m.insert(h.method(), Arc::new(h));
+
+    // provider.*
+    let h = provider::List;
+    m.insert(h.method(), Arc::new(h));
+
+    m
 }
 
 #[cfg(test)]

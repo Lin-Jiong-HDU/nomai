@@ -922,6 +922,7 @@ dependencies = [
 name = "nomai-daemon"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "directories",
  "nomai-core",
  "nomai-protocol",

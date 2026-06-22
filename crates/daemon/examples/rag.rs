@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
-use nomai_core::storage;
 use nomai_core::EntryService;
+use nomai_core::storage;
 use nomai_daemon::config::Config;
 use nomai_providers::{
     ChatMessage, CompletionRequest, EmbeddingProvider, LlmProvider, MessageRole,
