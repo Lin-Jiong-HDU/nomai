@@ -452,9 +452,103 @@ fn parse_tags(s: &str) -> Result<Vec<String>, String> {
     Ok(tags)
 }
 
-/// Render a `NomaiDoc` back to `.nomai` text. Infallible for well-formed docs.
-pub fn render(_doc: &NomaiDoc) -> String {
-    unimplemented!("filled in by Task 8")
+/// Render a `NomaiDoc` to `.nomai` text. Infallible for well-formed docs.
+///
+/// Round-trip property: `parse(&render(doc)).unwrap() == doc` for any
+/// well-formed `doc` (i.e. one that was itself produced by `parse`).
+pub fn render(doc: &NomaiDoc) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("#format_version {}\n", doc.format_version));
+    out.push_str(&format!("#id {}\n", doc.id));
+    out.push_str(&format!("#title {}\n", escape_header_value(&doc.title)));
+
+    if !doc.tags.is_empty() {
+        out.push_str("#tags ");
+        out.push_str(&render_tags(&doc.tags));
+        out.push('\n');
+    }
+    for (key, value) in &doc.attrs {
+        out.push_str(&format!("#{} {}\n", key, render_attr_value(value)));
+    }
+    if let Some(source) = &doc.source {
+        out.push_str(&format!("#source {}\n", escape_header_value(source)));
+    }
+    out.push_str(&format!("#created_at {}\n", doc.created_at));
+    out.push_str(&format!("#updated_at {}\n", doc.updated_at));
+
+    for block in &doc.blocks {
+        out.push('\n');
+        out.push('@');
+        out.push_str(block.r#type.as_str());
+        for (key, value) in &block.attrs {
+            out.push(' ');
+            out.push_str(key);
+            out.push('=');
+            out.push_str(&render_attr_value(value));
+        }
+        out.push('\n');
+        out.push_str(&render_block_body(&block.text));
+    }
+
+    out
+}
+
+/// Escape a header value. Bare tokens (no spaces, quotes, or commas) pass
+/// through unchanged; anything else is wrapped in `"..."` with `"` escaped
+/// as `\"`. The empty string is also quoted to distinguish it from a missing
+/// value on round-trip.
+fn escape_header_value(s: &str) -> String {
+    let needs_quote = s.is_empty() || s.contains(' ') || s.contains('"') || s.contains(',');
+    if !needs_quote {
+        return s.to_string();
+    }
+    let escaped = s.replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// Render a JSON value as a `.nomai` attribute value. Non-string scalars
+/// (numbers, bools) are stringified via serde_json's `Display`; strings use
+/// the same escaping as header values.
+fn render_attr_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => escape_header_value(s),
+        other => escape_header_value(&other.to_string()),
+    }
+}
+
+/// Render a tag list as a comma-separated `#tags` value. Plain tags (no
+/// comma or quote) pass through; tags containing either get wrapped in
+/// `"..."` with `"` escaped as `\"`.
+fn render_tags(tags: &[String]) -> String {
+    let parts: Vec<String> = tags
+        .iter()
+        .map(|t| {
+            if t.contains(',') || t.contains('"') {
+                let escaped = t.replace('"', "\\\"");
+                format!("\"{escaped}\"")
+            } else {
+                t.to_string()
+            }
+        })
+        .collect();
+    parts.join(",")
+}
+
+/// Render a block body to `.nomai` text. Each body line that begins with
+/// `@` is escaped as `\@` so the parser doesn't mistake it for a new block
+/// header. The trailing newline (always present in a parsed body) is
+/// preserved; empty bodies render as the empty string.
+fn render_block_body(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let line_no_newline = line.strip_suffix('\n').unwrap_or(line);
+        if line_no_newline.starts_with('@') {
+            out.push('\\');
+        }
+        out.push_str(line_no_newline);
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -848,5 +942,91 @@ Third.
             doc.blocks[0].text,
             "First paragraph.\n\nSecond paragraph.\n\nThird.\n"
         );
+    }
+
+    #[test]
+    fn render_minimal_doc() {
+        let doc = NomaiDoc {
+            format_version: 1,
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            title: "Hello".into(),
+            tags: vec![],
+            attrs: JsonMap::new(),
+            source: None,
+            created_at: "2026-06-23T10:00:00Z".parse().unwrap(),
+            updated_at: "2026-06-23T10:00:00Z".parse().unwrap(),
+            blocks: vec![],
+        };
+        let rendered = render(&doc);
+        assert!(rendered.contains("#format_version 1"));
+        assert!(rendered.contains("#id 01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert!(rendered.contains("#title Hello"));
+    }
+
+    #[test]
+    fn round_trip_minimal() {
+        let original = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@claim
+Earth orbits the sun.
+";
+        let doc = parse(original).unwrap();
+        let rendered = render(&doc);
+        let reparsed = parse(&rendered).unwrap();
+        assert_eq!(doc, reparsed);
+    }
+
+    #[test]
+    fn round_trip_rich_doc() {
+        let original = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Heliocentrism
+#tags astronomy, astronomy-history
+#source https://example.com/research
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T11:30:00Z
+
+@claim confidence=high
+Earth orbits the sun.
+
+@evidence src=paper.pdf#L42 strength=strong
+Kepler's laws show ellipses.
+
+@question status=open
+Why?
+
+@connection target=01HXZ...geo relation=refutes
+";
+        let doc = parse(original).unwrap();
+        let rendered = render(&doc);
+        let reparsed = parse(&rendered).unwrap();
+        assert_eq!(doc, reparsed);
+    }
+
+    #[test]
+    fn render_escapes_at_at_line_start_in_body() {
+        let doc = NomaiDoc {
+            format_version: 1,
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            title: "t".into(),
+            tags: vec![],
+            attrs: JsonMap::new(),
+            source: None,
+            created_at: "2026-06-23T10:00:00Z".parse().unwrap(),
+            updated_at: "2026-06-23T10:00:00Z".parse().unwrap(),
+            blocks: vec![Block {
+                r#type: BlockType::Note,
+                text: "@claim should be literal.\n".into(),
+                attrs: JsonMap::new(),
+            }],
+        };
+        let rendered = render(&doc);
+        assert!(rendered.contains("\\@claim should be literal."));
     }
 }
