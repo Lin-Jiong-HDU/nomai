@@ -20,10 +20,12 @@ For project overview and install, see the [README](../README.md) first.
   - [search.\*](#search)
   - [provider.\*](#provider)
   - [batch.\*](#batch)
+  - [cache.\*](#cache)
   - [MCP lifecycle](#mcp)
 - [Error codes](#error-codes)
 - [Configuration](#configuration)
 - [Retrieval modes](#retrieval-modes)
+- [Embedding cache](#embedding-cache)
 - [Lib mode (embed nomai-core)](#lib-mode)
 - [Custom RPCs](#custom-rpcs)
 - [What's next](#whats-next)
@@ -257,6 +259,21 @@ Each `BatchOp` has `{id?: string, method: string, params: object}`. The `id` fie
 
 ---
 
+### cache.{#cache}
+
+Embedding cache introspection and management. The cache is a transparent wrapper around the configured embedding provider; it persists `(model, blake3(body)) → embedding` in the `emb_cache` SQLite table so identical bodies never trigger duplicate API calls.
+
+| Method        | Params                | Returns                                                                         |
+| ------------- | --------------------- | ------------------------------------------------------------------------------- |
+| `cache.stats` | —                     | `{embeddings: {model, dim, rows, hits, misses, hit_rate}}`                      |
+| `cache.clear` | `{model?: string}`    | `{cleared: u64}` — omit `model` to clear every model                            |
+
+`hit_rate` is computed as `hits / (hits + misses)` over the daemon's lifetime; `rows` is the current `COUNT(*)` in `emb_cache` for the configured model. Counters are not reset by `cache.clear` — they reflect lifetime activity, not current contents.
+
+See [Embedding cache](#embedding-cache) below for the caching model and design rationale.
+
+---
+
 ### MCP lifecycle{#mcp}
 
 nomai is a native MCP (Model Context Protocol) server. Any MCP-compatible client (Claude Desktop, Cursor, etc.) can connect via stdio and call all RPCs as tools.
@@ -267,7 +284,7 @@ nomai is a native MCP (Model Context Protocol) server. Any MCP-compatible client
 | `tools/list` | `{}`                | `{tools: [{name, inputSchema}]}`              |
 | `tools/call` | `{name, arguments}` | `{content: [{type: "text", text}]}`           |
 
-All 21 primitive RPCs + batch + any custom registered RPCs appear as MCP tools automatically.
+All 23 primitive RPCs + batch + any custom registered RPCs appear as MCP tools automatically.
 
 Example MCP handshake:
 
@@ -355,6 +372,52 @@ Three ways to find entries. Pick based on what you're matching.
 **Fulltext limitations**: FTS5 uses the `unicode61` tokenizer by default, which treats consecutive CJK characters as a single token. Searching for Chinese phrases may return no matches. Use semantic search for Chinese content. (Future: trigram/ICU tokenizer.)
 
 **Combining modes**: nomai does not implement hybrid search (`search.hybrid` is reserved). For RRF fusion or re-ranking, fetch from multiple modes in your client and merge.
+
+---
+
+## Embedding cache{#embedding-cache}
+
+Every embedding API call is cached transparently in the `emb_cache` SQLite table, keyed by `(model, blake3(body))`. Same body, same model → same vector — so repeated embedding work is skipped entirely.
+
+**Why cache**: embeddings are deterministic functions of `(model, body)`. The same body re-submitted (e.g. an unchanged edit, a re-import, a chunking overlap, the same search query) produces the same vector. The cache turns these into a single SQLite lookup instead of a network round-trip + API billing.
+
+**Where it applies** — every `embed()` call in the daemon:
+
+- `entry.create` / `entry.update` with non-empty body
+- `chunk.create` with text
+- `search.semantic` (the query is embedded before KNN)
+- `batch` (commit-time batch embed of all queued texts)
+
+**Transparency**: `CachedEmbedder` implements `EmbeddingProvider` and wraps the real provider (e.g. `OpenAiCompatibleEmbed`). The daemon always wraps the inner provider in `Daemon::new` and `from_services`. `provider.list` still reports the inner provider's identity — the wrapper delegates `name()`.
+
+**Hit semantics**:
+
+| Field      | Meaning                                                                  |
+| ---------- | ------------------------------------------------------------------------ |
+| `hits`     | Embed calls served from cache (lifetime counter)                         |
+| `misses`   | Embed calls that fell through to the inner provider (lifetime counter)   |
+| `rows`     | Current `COUNT(*)` in `emb_cache` for the configured model               |
+| `hit_rate` | `hits / (hits + misses)`, or 0.0 when both are zero                      |
+
+`cache.clear` removes rows from `emb_cache` but does not reset `hits` / `misses` — those reflect lifetime cache activity, not current contents. To reset, restart the daemon.
+
+**Model isolation**: the `model` column namespaces rows; switching `config.embedding.model` starts a fresh cache namespace automatically. Old model rows remain until cleared manually.
+
+**dim changes**: `dim` is part of the lookup condition (`WHERE model = ? AND body_hash = ? AND dim = ?`) but not the primary key, so a config change to `dim` automatically misses the old rows and re-computes. Use `cache.clear({model: ...})` to reclaim the space.
+
+**What is NOT cached**:
+
+- LLM completions (`llm.complete`) — non-deterministic with temperature > 0
+- Fulltext search results — FTS5 is fast enough; YAGNI
+- Entry / chunk objects — SQLite's own page cache covers B-tree nodes
+
+**Cache layering**:
+
+| Layer               | Caches                            | Owned by                |
+| ------------------- | --------------------------------- | ----------------------- |
+| SQLite page cache   | B-tree nodes (disk I/O avoidance) | SQLite (`cache_size`)   |
+| **emb_cache table** | **`(model, body) → vector`**      | **nomai (this section)** |
+| In-memory LRU       | (future, YAGNI)                   | —                       |
 
 ---
 
@@ -467,12 +530,13 @@ The `batch` RPC lets you compose multiple mutations atomically (see [RPC referen
 
 ## What's next
 
-nomai's kernel roadmap (Spec 1-4) is complete:
+nomai's kernel roadmap (Spec 1-5) is complete:
 
 - **Spec 1** — Plugin Registry + MCP compatibility (done)
 - **Spec 2** — Batch RPC with $ref + atomic transactions (done)
 - **Spec 3** — Lib API + Daemon accessors + from_services (done)
 - **Spec 4** — Application-layer examples (done)
+- **Spec 5** — Embedding cache (`emb_cache` + `CachedEmbedder` + `cache.stats` / `cache.clear`) (done)
 
 Future work (not yet started):
 
@@ -480,5 +544,6 @@ Future work (not yet started):
 - **`link.traverse`** — recursive CTE multi-hop graph traversal (use `link.neighbors` in a client-side loop for now)
 - **`search.hybrid`** — RRF fusion of FTS + vector scores (compose your own in client code for now)
 - **FTS5 Chinese tokenization** — trigram/jieba for CJK fulltext search
+- **Object cache (Entry/Chunk LRU)** — for GraphRAG multi-hop workloads with hot entries
 
 For implementation history and design rationale, see the spec docs in `docs/superpowers/specs/` (local-only, not in the public repo).

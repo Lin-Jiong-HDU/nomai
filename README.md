@@ -20,6 +20,7 @@ Early alpha. API surface is stabilizing but may change before 1.0. Currently sin
 - **Batch RPC**: `$ref` inter-op references + atomic transactions — compose multi-step workflows in one request
 - **MCP server**: native Model Context Protocol compatibility — Claude Desktop / Cursor / any MCP client can connect directly
 - **Plugin registry**: `RpcHandler` trait + `register_handler` — add custom RPCs without forking
+- **Embedding cache**: transparent `CachedEmbedder` wrapper persists `(model, blake3(body)) → embedding` in SQLite — repeated bodies skip the network API call entirely (zero invalidate logic; embeddings are deterministic)
 - **lib + daemon dual mode**: embed `nomai-core` directly, or run `nomai-daemon` as a stdio service
 
 ## The four primitives
