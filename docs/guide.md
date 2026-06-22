@@ -18,7 +18,6 @@ For project overview and install, see the [README](../README.md) first.
   - [events.\*](#events)
   - [chunk.\*](#chunk)
   - [search.\*](#search)
-  - [qa.\*](#qa)
   - [provider.\*](#provider)
 - [Error codes](#error-codes)
 - [Configuration](#configuration)
