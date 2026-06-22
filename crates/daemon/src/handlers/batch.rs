@@ -75,143 +75,161 @@ impl RpcHandler for Batch {
             ));
         }
         if req.ops.len() > 1000 {
-            return Err(CoreError::Validation(
-                "batch exceeds 1000 ops limit".into(),
-            ));
+            return Err(CoreError::Validation("batch exceeds 1000 ops limit".into()));
         }
 
-        // Acquire shared connection (all services share the same Arc<Mutex<Connection>>)
-        let conn_arc = daemon.entries.conn_for_test();
-        let conn = conn_arc.lock().unwrap();
+        // Phase 1: transactional dispatch. All connection access is confined to
+        // this block so the MutexGuard is dropped before any subsequent await.
+        // Returns (results, embed_queue, commit_outcome).
+        //
+        // commit_outcome: Ok = COMMIT succeeded; OpErr = ROLLBACK with the
+        // failing op's (idx, err); CommitErr = COMMIT itself failed (returned
+        // verbatim as a Storage error, matching the single-op path).
+        enum CommitOutcome {
+            Ok,
+            OpErr(usize, CoreError),
+            CommitErr(CoreError),
+        }
 
-        // Build id → result index map for $ref resolution
-        let mut id_to_index: HashMap<String, usize> = HashMap::new();
+        let (results, embed_queue, commit_outcome): (Vec<Value>, Vec<EmbedTask>, CommitOutcome) = {
+            let conn_arc = daemon.entries.conn_for_test();
+            let conn = conn_arc.lock().unwrap();
 
-        let mut results: Vec<Value> = Vec::with_capacity(req.ops.len());
-        let mut embed_queue: Vec<EmbedTask> = Vec::new();
-        let mut failed_at: Option<(usize, CoreError)> = None;
+            // Build id → result index map for $ref resolution
+            let mut id_to_index: HashMap<String, usize> = HashMap::new();
 
-        conn.execute_batch("BEGIN").map_err(CoreError::Storage)?;
+            let mut results: Vec<Value> = Vec::with_capacity(req.ops.len());
+            let mut embed_queue: Vec<EmbedTask> = Vec::new();
+            let mut failed_at: Option<(usize, CoreError)> = None;
 
-        for (i, op) in req.ops.iter().enumerate() {
-            if failed_at.is_some() {
-                // atomic=true: subsequent ops are skipped
-                results.push(json!({
-                    "ok": false,
-                    "error": {
-                        "code": -32603,
-                        "message": "skipped due to earlier op failure"
-                    }
-                }));
-                continue;
-            }
+            conn.execute_batch("BEGIN").map_err(CoreError::Storage)?;
 
-            // Check method is allowed
-            if !ALLOWED_METHODS.contains(&op.method.as_str()) {
-                let err = CoreError::Validation(format!(
-                    "method '{}' not allowed in batch (mutation only)",
-                    op.method
-                ));
-                results.push(json!({
-                    "ok": false,
-                    "error": error_to_rpc(&err)
-                }));
-                failed_at = Some((i, err));
-                continue;
-            }
-
-            // Resolve $ref in params
-            let resolved_params = match resolve_refs(&op.params, &results, &id_to_index) {
-                Ok(p) => p,
-                Err(e) => {
+            for (i, op) in req.ops.iter().enumerate() {
+                if failed_at.is_some() {
+                    // atomic=true: subsequent ops are skipped
                     results.push(json!({
                         "ok": false,
-                        "error": error_to_rpc(&e)
+                        "error": {
+                            "code": -32603,
+                            "message": "skipped due to earlier op failure"
+                        }
                     }));
-                    failed_at = Some((i, e));
                     continue;
                 }
-            };
 
-            // Dispatch to service _in_tx
-            let outcome = dispatch_in_tx(
-                &conn,
-                &op.method,
-                resolved_params,
-                &daemon.entries,
-                &daemon.links,
-                &daemon.chunks,
-            );
+                // Check method is allowed
+                if !ALLOWED_METHODS.contains(&op.method.as_str()) {
+                    let err = CoreError::Validation(format!(
+                        "method '{}' not allowed in batch (mutation only)",
+                        op.method
+                    ));
+                    results.push(json!({
+                        "ok": false,
+                        "error": error_to_rpc(&err)
+                    }));
+                    failed_at = Some((i, err));
+                    continue;
+                }
 
-            match outcome {
-                Ok(value) => {
-                    // Track embed targets
-                    if op.method == "entry.create" || op.method == "entry.update" {
-                        if let Some(id_str) = value.get("id").and_then(|v| v.as_str()) {
-                            if let Ok(id) = id_str.parse::<ulid::Ulid>() {
-                                if let Some(text) = value.get("body").and_then(|v| v.as_str()) {
-                                    if !text.is_empty() {
+                // Resolve $ref in params
+                let resolved_params = match resolve_refs(&op.params, &results, &id_to_index) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        results.push(json!({
+                            "ok": false,
+                            "error": error_to_rpc(&e)
+                        }));
+                        failed_at = Some((i, e));
+                        continue;
+                    }
+                };
+
+                // Dispatch to service _in_tx
+                let outcome = dispatch_in_tx(
+                    &conn,
+                    &op.method,
+                    resolved_params,
+                    &daemon.entries,
+                    &daemon.links,
+                    &daemon.chunks,
+                );
+
+                match outcome {
+                    Ok(value) => {
+                        // Track embed targets
+                        if op.method == "entry.create" || op.method == "entry.update" {
+                            if let Some(id_str) = value.get("id").and_then(|v| v.as_str()) {
+                                if let Ok(id) = id_str.parse::<ulid::Ulid>() {
+                                    if let Some(text) = value.get("body").and_then(|v| v.as_str()) {
+                                        if !text.is_empty() {
+                                            embed_queue.push(EmbedTask {
+                                                id,
+                                                text: text.to_string(),
+                                                target: EmbedTarget::Entry,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        } else if op.method == "chunk.create" {
+                            if let Some(id_str) = value.get("id").and_then(|v| v.as_str()) {
+                                if let Ok(id) = id_str.parse::<ulid::Ulid>() {
+                                    if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
                                         embed_queue.push(EmbedTask {
                                             id,
                                             text: text.to_string(),
-                                            target: EmbedTarget::Entry,
+                                            target: EmbedTarget::Chunk,
                                         });
                                     }
                                 }
                             }
                         }
-                    } else if op.method == "chunk.create" {
-                        if let Some(id_str) = value.get("id").and_then(|v| v.as_str()) {
-                            if let Ok(id) = id_str.parse::<ulid::Ulid>() {
-                                if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
-                                    embed_queue.push(EmbedTask {
-                                        id,
-                                        text: text.to_string(),
-                                        target: EmbedTarget::Chunk,
-                                    });
-                                }
-                            }
+
+                        results.push(json!({"ok": true, "result": value}));
+
+                        // Register id for $ref
+                        if let Some(ref id) = op.id {
+                            id_to_index.insert(id.clone(), i);
                         }
                     }
-
-                    results.push(json!({"ok": true, "result": value}));
-
-                    // Register id for $ref
-                    if let Some(ref id) = op.id {
-                        id_to_index.insert(id.clone(), i);
+                    Err(e) => {
+                        results.push(json!({
+                            "ok": false,
+                            "error": error_to_rpc(&e)
+                        }));
+                        failed_at = Some((i, e));
                     }
                 }
-                Err(e) => {
-                    results.push(json!({
-                        "ok": false,
-                        "error": error_to_rpc(&e)
-                    }));
-                    failed_at = Some((i, e));
-                }
             }
-        }
 
-        // Commit or rollback
-        match failed_at {
-            None => {
-                conn.execute_batch("COMMIT").map_err(CoreError::Storage)?;
-                drop(conn);
+            // Commit or rollback (synchronous, before guard drops)
+            let commit_outcome = match failed_at {
+                None => match conn.execute_batch("COMMIT") {
+                    Ok(()) => CommitOutcome::Ok,
+                    Err(e) => CommitOutcome::CommitErr(CoreError::Storage(e)),
+                },
+                Some((idx, err)) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    CommitOutcome::OpErr(idx, err)
+                }
+            };
 
-                // Phase 2: batch embed (deferred to Task 2 — for now, just return results)
-                // TODO: run_embed_queue(daemon, embed_queue).await
-                // For Task 1, skip embedding. Entries/chunks are created but vec is empty.
-                // Task 2 will add this.
-                let _ = embed_queue;
+            (results, embed_queue, commit_outcome)
+            // conn + conn_arc drop here, releasing the Mutex.
+        };
+
+        match commit_outcome {
+            CommitOutcome::Ok => {
+                // Phase 2: batch embed (all texts in one API call)
+                run_embed_queue(daemon, embed_queue).await?;
 
                 Ok(json!({
                     "results": results,
                     "rolled_back": false
                 }))
             }
-            Some((idx, err)) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                drop(conn);
-
+            CommitOutcome::CommitErr(e) => Err(e),
+            CommitOutcome::OpErr(idx, err) => {
                 let rpc_err = error_to_rpc(&err);
                 let message = rpc_err
                     .get("message")
@@ -380,15 +398,49 @@ fn dispatch_in_tx(
     }
 }
 
-/// EmbedTask: queued for post-commit batch embedding (used in Task 2).
-#[allow(dead_code)]
+/// Batch embed all queued texts in a single API call, then write each embedding.
+///
+/// Called after COMMIT (Mutex released). Collects all entry/chunk texts, calls
+/// `embedder.embed` once with the full array (EmbeddingProvider trait supports
+/// batch), then writes each embedding via the appropriate service. Embed
+/// failure bubbles up as `CoreError::Provider` — same weak-consistency model
+/// as single-op path (entries persisted, vec missing).
+async fn run_embed_queue(daemon: &Daemon, queue: Vec<EmbedTask>) -> Result<(), CoreError> {
+    if queue.is_empty() {
+        return Ok(());
+    }
+
+    let texts: Vec<&str> = queue.iter().map(|t| t.text.as_str()).collect();
+    let embeddings = daemon.embedder.embed(&texts).await?;
+
+    for (task, emb) in queue.into_iter().zip(embeddings) {
+        match task.target {
+            EmbedTarget::Entry => {
+                let entries = daemon.entries.clone();
+                let id = task.id;
+                let emb = emb.clone();
+                crate::handlers::entry::blocking(move || entries.write_embedding(id, &emb))
+                    .await??;
+            }
+            EmbedTarget::Chunk => {
+                let chunks = daemon.chunks.clone();
+                let id = task.id;
+                let emb = emb.clone();
+                crate::handlers::entry::blocking(move || chunks.write_embedding(id, &emb))
+                    .await??;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// EmbedTask: queued for post-commit batch embedding.
 pub(crate) struct EmbedTask {
     pub id: ulid::Ulid,
     pub text: String,
     pub target: EmbedTarget,
 }
 
-#[allow(dead_code)]
 pub(crate) enum EmbedTarget {
     Entry,
     Chunk,
