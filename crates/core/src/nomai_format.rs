@@ -473,8 +473,8 @@ pub fn render(doc: &NomaiDoc) -> String {
     if let Some(source) = &doc.source {
         out.push_str(&format!("#source {}\n", escape_header_value(source)));
     }
-    out.push_str(&format!("#created_at {}\n", doc.created_at));
-    out.push_str(&format!("#updated_at {}\n", doc.updated_at));
+    out.push_str(&format!("#created_at {}\n", doc.created_at.to_rfc3339()));
+    out.push_str(&format!("#updated_at {}\n", doc.updated_at.to_rfc3339()));
 
     for block in &doc.blocks {
         out.push('\n');
@@ -1028,5 +1028,32 @@ Why?
         };
         let rendered = render(&doc);
         assert!(rendered.contains("\\@claim should be literal."));
+    }
+
+    #[test]
+    fn render_timestamps_use_rfc3339() {
+        let doc = NomaiDoc {
+            format_version: 1,
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            title: "t".into(),
+            tags: vec![],
+            attrs: JsonMap::new(),
+            source: None,
+            created_at: "2026-06-23T10:00:00Z".parse().unwrap(),
+            updated_at: "2026-06-23T11:30:00Z".parse().unwrap(),
+            blocks: vec![],
+        };
+        let rendered = render(&doc);
+        assert!(
+            rendered.contains("#created_at 2026-06-23T10:00:00"),
+            "created_at must be RFC3339, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("#updated_at 2026-06-23T11:30:00"),
+            "updated_at must be RFC3339, got: {rendered}"
+        );
+        // And round-trip still works
+        let reparsed = parse(&rendered).unwrap();
+        assert_eq!(doc, reparsed);
     }
 }
