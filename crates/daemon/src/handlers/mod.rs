@@ -12,7 +12,6 @@ pub mod entry;
 pub mod events;
 pub mod link;
 pub mod provider;
-pub mod qa;
 pub mod search;
 
 pub async fn route(daemon: &Daemon, req: Request) -> Result<Value, DispatchError> {
@@ -37,7 +36,6 @@ pub async fn route(daemon: &Daemon, req: Request) -> Result<Value, DispatchError
         "events.purge" => events::purge(daemon, params).await,
         "search.fulltext" => search::fulltext(daemon, params).await,
         "search.semantic" => search::semantic(daemon, params).await,
-        "qa.ask" => qa::ask(daemon, params).await,
         "provider.list" => provider::list(daemon, params).await,
         // Reserved method names per spec §6 + primitives spec §5: -32601.
         "search.hybrid" | "provider.set" | "link.traverse" => {
@@ -214,62 +212,6 @@ mod tests {
         let items = resp.result.unwrap()["items"].as_array().unwrap().clone();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["entry"]["title"], "a");
-    }
-
-    #[tokio::test]
-    async fn qa_ask_returns_answer_and_citations() {
-        let server = MockServer::start().await;
-        let daemon = setup_daemon(&server).await;
-
-        // Seed an entry + embedding.
-        let entries = daemon.entries.clone();
-        let e = entries
-            .create(nomai_core::CreateEntry {
-                title: "Rust".into(),
-                body: "Rust is a systems programming language.".into(),
-                tags: None,
-                attrs: None,
-                source: None,
-            })
-            .unwrap();
-        entries
-            .write_embedding(e.id, &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-            .unwrap();
-
-        // Embedding call for the question.
-        Mock::given(method("POST"))
-            .and(path("/embeddings"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{"index": 0, "embedding": vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}]
-            })))
-            .mount(&server)
-            .await;
-        // LLM call.
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "choices": [{
-                    "message": {"role": "assistant", "content": "Rust is a systems language."}
-                }]
-            })))
-            .mount(&server)
-            .await;
-
-        let resp = daemon
-            .dispatch(req(
-                "qa.ask",
-                json!({
-                    "question": "what is rust",
-                    "top_k": 3,
-                }),
-            ))
-            .await;
-        assert!(resp.error.is_none(), "{:?}", resp.error);
-        let result = resp.result.unwrap();
-        assert_eq!(result["answer"], "Rust is a systems language.");
-        let citations = result["citations"].as_array().unwrap();
-        assert_eq!(citations.len(), 1);
-        assert_eq!(citations[0].as_str().unwrap(), e.id.to_string());
     }
 
     #[tokio::test]
