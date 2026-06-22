@@ -109,9 +109,71 @@ impl Daemon {
     /// Register an additional RPC handler. The handler's `method()` name
     /// must not collide with an existing entry (collisions replace the
     /// prior handler, matching standard HashMap::insert semantics).
+    ///
+    /// Custom handlers appear in MCP `tools/list` automatically.
     #[allow(dead_code)] // lib-mode extension point; binary daemon doesn't call this
     pub fn register_handler(&mut self, handler: Arc<dyn RpcHandler>) {
         self.handlers.insert(handler.method(), handler);
+    }
+
+    // --- Public accessors for custom RpcHandler implementations ---
+    // Binary daemon doesn't call these; they exist for lib-mode users
+    // who implement RpcHandler and need access to services via &Daemon.
+
+    #[allow(dead_code)]
+    pub fn entries(&self) -> &Arc<EntryService> {
+        &self.entries
+    }
+    #[allow(dead_code)]
+    pub fn links(&self) -> &Arc<LinkService> {
+        &self.links
+    }
+    #[allow(dead_code)]
+    pub fn events(&self) -> &Arc<EventService> {
+        &self.events
+    }
+    #[allow(dead_code)]
+    pub fn chunks(&self) -> &Arc<ChunkService> {
+        &self.chunks
+    }
+    #[allow(dead_code)]
+    pub fn embedder(&self) -> &Arc<dyn EmbeddingProvider> {
+        &self.embedder
+    }
+    #[allow(dead_code)]
+    pub fn llm(&self) -> &Arc<dyn LlmProvider> {
+        &self.llm
+    }
+
+    /// Construct a Daemon from pre-built services + providers, without
+    /// reading a config.toml file. For lib-mode users who construct their
+    /// own EntryService / EmbeddingProvider / LlmProvider.
+    #[allow(dead_code)]
+    pub fn from_services(
+        conn: Arc<std::sync::Mutex<Connection>>,
+        embedder: Arc<dyn EmbeddingProvider>,
+        llm: Arc<dyn LlmProvider>,
+        embedding_dim: usize,
+    ) -> Result<Self, CoreError> {
+        let entries = Arc::new(EntryService::new(conn.clone())?);
+        let links = Arc::new(LinkService::new(conn.clone())?);
+        let events = Arc::new(EventService::new(conn.clone())?);
+        let chunks = Arc::new(ChunkService::new(conn.clone())?);
+        entries.ensure_vec_embeddings(embedding_dim)?;
+        chunks.ensure_vec_chunk_embeddings(embedding_dim)?;
+        let handlers = crate::handlers::registry();
+        Ok(Self {
+            entries,
+            links,
+            events,
+            chunks,
+            embedder,
+            llm,
+            embedding_model: String::new(),
+            llm_model: String::new(),
+            embedding_dim,
+            handlers,
+        })
     }
 
     /// Run the NDJSON-over-stdio JSON-RPC loop. Stub in Task 4; full impl in Task 5.

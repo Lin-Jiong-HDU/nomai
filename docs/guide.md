@@ -23,6 +23,7 @@ For project overview and install, see the [README](../README.md) first.
 - [Configuration](#configuration)
 - [Retrieval modes](#retrieval-modes)
 - [Lib mode (embed nomai-core)](#lib-mode)
+- [Custom RPCs](#custom-rpcs)
 
 ---
 
@@ -339,3 +340,45 @@ All four services share the same `Arc<Mutex<Connection>>`. Emission (events) sti
 - **`search.hybrid`** is reserved. Compose your own fusion in client code.
 
 For implementation history and design rationale, see the spec docs in `docs/superpowers/specs/` (local-only, not in the public repo).
+
+## Custom RPCs
+
+nomai's daemon uses a plugin registry (`RpcHandler` trait + `HashMap`). You can add custom RPCs without forking the codebase.
+
+### How it works
+
+1. **Implement `RpcHandler`** — a trait with `method()` (returns the RPC name) and `call()` (async, receives `&Daemon` + params).
+2. **Register** — call `daemon.register_handler(Arc::new(YourHandler))`.
+3. **That's it** — your custom RPC appears in `tools/list` and is callable by any MCP client.
+
+### Accessing services
+
+Custom handlers access the four core services via `&Daemon` accessors:
+
+```rust
+daemon.entries()  // &Arc<EntryService>
+daemon.links()    // &Arc<LinkService>
+daemon.events()   // &Arc<EventService>
+daemon.chunks()   // &Arc<ChunkService>
+daemon.embedder() // &Arc<dyn EmbeddingProvider>
+daemon.llm()      // &Arc<dyn LlmProvider>
+```
+
+### Lib-mode construction
+
+Use `Daemon::from_services(conn, embedder, llm, dim)` to build a Daemon without a `config.toml` file. This is the entry point for embedding nomai into your own binary.
+
+### Example
+
+See `crates/daemon/examples/custom_rpc.rs` for a complete working example that:
+- Builds a Daemon via `from_services` (in-memory DB, no config)
+- Implements a `Stats` RPC that queries entry counts
+- Registers it via `register_handler`
+- Dispatches the custom RPC
+- Verifies it appears in MCP `tools/list`
+
+Run: `cargo run --example custom_rpc`
+
+### Batch composition
+
+The `batch` RPC lets you compose multiple mutations atomically (see [RPC reference](#batch) above). Custom handlers participate in the ecosystem but are not callable from within `batch` ops (only built-in mutations are batch-eligible).
