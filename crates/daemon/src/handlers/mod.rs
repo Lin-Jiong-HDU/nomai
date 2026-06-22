@@ -12,6 +12,7 @@ pub mod chunk;
 pub mod entry;
 pub mod events;
 pub mod link;
+pub mod mcp;
 pub mod provider;
 pub mod search;
 
@@ -72,6 +73,14 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
 
     // provider.*
     let h = provider::List;
+    m.insert(h.method(), Arc::new(h));
+
+    // mcp.* (lifecycle: initialize / tools/list / tools/call)
+    let h = mcp::Initialize;
+    m.insert(h.method(), Arc::new(h));
+    let h = mcp::ToolsList;
+    m.insert(h.method(), Arc::new(h));
+    let h = mcp::ToolsCall;
     m.insert(h.method(), Arc::new(h));
 
     m
