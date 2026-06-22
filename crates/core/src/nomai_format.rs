@@ -268,7 +268,7 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
         // Task 7 will validate @connection required attrs here.
 
         // Collect body lines until next @type or EOF.
-        let mut text = String::new();
+        let mut body_lines: Vec<String> = Vec::new();
         while let Some((_, body_raw)) = lines.peek().copied() {
             if body_raw.starts_with('@') && !body_raw.starts_with("\\@") {
                 break;
@@ -279,9 +279,23 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
             } else {
                 body_raw
             };
-            text.push_str(line_to_push);
-            text.push('\n');
+            body_lines.push(line_to_push.to_string());
         }
+
+        // Strip trailing blank-line separators (Spec 6 §4.1): the blank
+        // line(s) before the next @type or EOF are block separators and are
+        // not part of the body. Internal paragraph breaks are preserved.
+        while body_lines.last().map(|s| s.is_empty()).unwrap_or(false) {
+            body_lines.pop();
+        }
+
+        let text = if body_lines.is_empty() {
+            String::new()
+        } else {
+            let mut s = body_lines.join("\n");
+            s.push('\n');
+            s
+        };
 
         blocks.push(Block {
             r#type: block_type,
