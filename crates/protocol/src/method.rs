@@ -19,10 +19,6 @@ pub mod search {
     pub const HYBRID: &str = "search.hybrid";
 }
 
-pub mod qa {
-    pub const ASK: &str = "qa.ask";
-}
-
 pub mod provider {
     pub const LIST: &str = "provider.list";
     /// Reserved: returns `METHOD_NOT_FOUND` (-32601) in MVP.
@@ -73,8 +69,7 @@ mod tests {
     }
 
     #[test]
-    fn qa_and_provider_namespaces() {
-        assert_eq!(qa::ASK, "qa.ask");
+    fn provider_namespace_methods() {
         assert_eq!(provider::LIST, "provider.list");
         assert_eq!(provider::SET, "provider.set");
     }

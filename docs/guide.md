@@ -18,7 +18,6 @@ For project overview and install, see the [README](../README.md) first.
   - [events.\*](#events)
   - [chunk.\*](#chunk)
   - [search.\*](#search)
-  - [qa.\*](#qa)
   - [provider.\*](#provider)
 - [Error codes](#error-codes)
 - [Configuration](#configuration)
@@ -208,14 +207,6 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 
 - `granularity="entry"` (default): `{items: [{entry: Entry, score: f32}]}` — backward compatible
 - `granularity="chunk"`: `{items: [{chunk: Chunk, score: f32}]}` — chunks contain `entry_id` for mapping back
-
-### qa.{#qa-methods}
-
-| Method | Params | Returns | Notes |
-|---|---|---|---|
-| `qa.ask` | `question`, `top_k?`(5), `max_tokens?` | `{answer: String, citations: [Ulid]}` | Embeds question → semantic search top-K → LLM |
-
-`qa.ask` is the one place where nomai encodes a specific strategy (Naive RAG). It's preserved as a reference implementation. For GraphRAG, chunk-level rerank, or HyDE, compose your own flow using the primitives.
 
 ### provider.{#provider-methods}
 

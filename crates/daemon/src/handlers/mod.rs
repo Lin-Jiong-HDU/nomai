@@ -1,51 +1,89 @@
-//! JSON-RPC method dispatch table.
+//! JSON-RPC method dispatch registry.
+//!
+//! Each method is a zero-sized struct implementing `RpcHandler`. The daemon
+//! looks up handlers by method name in a `HashMap` populated by `registry()`.
 
-use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use nomai_protocol::Request;
-
-use crate::daemon::Daemon;
-use crate::rpc::DispatchError;
+use crate::rpc::RpcHandler;
 
 pub mod chunk;
 pub mod entry;
 pub mod events;
 pub mod link;
+pub mod mcp;
 pub mod provider;
-pub mod qa;
 pub mod search;
 
-pub async fn route(daemon: &Daemon, req: Request) -> Result<Value, DispatchError> {
-    let params = req.params.unwrap_or(Value::Null);
-    let result: Result<Value, nomai_core::CoreError> = match req.method.as_str() {
-        "entry.create" => entry::create(daemon, params).await,
-        "entry.get" => entry::get(daemon, params).await,
-        "entry.update" => entry::update(daemon, params).await,
-        "entry.delete" => entry::delete(daemon, params).await,
-        "entry.list" => entry::list(daemon, params).await,
-        "link.create" => link::create(daemon, params).await,
-        "link.get" => link::get(daemon, params).await,
-        "link.delete" => link::delete(daemon, params).await,
-        "link.list" => link::list(daemon, params).await,
-        "link.neighbors" => link::neighbors(daemon, params).await,
-        "chunk.create" => chunk::create(daemon, params).await,
-        "chunk.get" => chunk::get(daemon, params).await,
-        "chunk.delete" => chunk::delete(daemon, params).await,
-        "chunk.list" => chunk::list(daemon, params).await,
-        "events.list" => events::list(daemon, params).await,
-        "events.get" => events::get(daemon, params).await,
-        "events.purge" => events::purge(daemon, params).await,
-        "search.fulltext" => search::fulltext(daemon, params).await,
-        "search.semantic" => search::semantic(daemon, params).await,
-        "qa.ask" => qa::ask(daemon, params).await,
-        "provider.list" => provider::list(daemon, params).await,
-        // Reserved method names per spec §6 + primitives spec §5: -32601.
-        "search.hybrid" | "provider.set" | "link.traverse" => {
-            return Err(DispatchError::MethodNotFound(req.method.clone()));
-        }
-        _ => return Err(DispatchError::MethodNotFound(req.method.clone())),
-    };
-    result.map_err(DispatchError::Core)
+/// Build the default method → handler registry for the daemon.
+///
+/// Returns the full set of built-in JSON-RPC handlers. Plugins may add
+/// more via `Daemon::register_handler`.
+pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
+    let mut m: HashMap<&'static str, Arc<dyn RpcHandler>> = HashMap::new();
+
+    // entry.*
+    let h = entry::Create;
+    m.insert(h.method(), Arc::new(h));
+    let h = entry::Get;
+    m.insert(h.method(), Arc::new(h));
+    let h = entry::Update;
+    m.insert(h.method(), Arc::new(h));
+    let h = entry::Delete;
+    m.insert(h.method(), Arc::new(h));
+    let h = entry::List;
+    m.insert(h.method(), Arc::new(h));
+
+    // link.*
+    let h = link::Create;
+    m.insert(h.method(), Arc::new(h));
+    let h = link::Get;
+    m.insert(h.method(), Arc::new(h));
+    let h = link::Delete;
+    m.insert(h.method(), Arc::new(h));
+    let h = link::List;
+    m.insert(h.method(), Arc::new(h));
+    let h = link::Neighbors;
+    m.insert(h.method(), Arc::new(h));
+
+    // chunk.*
+    let h = chunk::Create;
+    m.insert(h.method(), Arc::new(h));
+    let h = chunk::Get;
+    m.insert(h.method(), Arc::new(h));
+    let h = chunk::Delete;
+    m.insert(h.method(), Arc::new(h));
+    let h = chunk::List;
+    m.insert(h.method(), Arc::new(h));
+
+    // events.*
+    let h = events::List;
+    m.insert(h.method(), Arc::new(h));
+    let h = events::Get;
+    m.insert(h.method(), Arc::new(h));
+    let h = events::Purge;
+    m.insert(h.method(), Arc::new(h));
+
+    // search.*
+    let h = search::Fulltext;
+    m.insert(h.method(), Arc::new(h));
+    let h = search::Semantic;
+    m.insert(h.method(), Arc::new(h));
+
+    // provider.*
+    let h = provider::List;
+    m.insert(h.method(), Arc::new(h));
+
+    // mcp.* (lifecycle: initialize / tools/list / tools/call)
+    let h = mcp::Initialize;
+    m.insert(h.method(), Arc::new(h));
+    let h = mcp::ToolsList;
+    m.insert(h.method(), Arc::new(h));
+    let h = mcp::ToolsCall;
+    m.insert(h.method(), Arc::new(h));
+
+    m
 }
 
 #[cfg(test)]
@@ -214,62 +252,6 @@ mod tests {
         let items = resp.result.unwrap()["items"].as_array().unwrap().clone();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["entry"]["title"], "a");
-    }
-
-    #[tokio::test]
-    async fn qa_ask_returns_answer_and_citations() {
-        let server = MockServer::start().await;
-        let daemon = setup_daemon(&server).await;
-
-        // Seed an entry + embedding.
-        let entries = daemon.entries.clone();
-        let e = entries
-            .create(nomai_core::CreateEntry {
-                title: "Rust".into(),
-                body: "Rust is a systems programming language.".into(),
-                tags: None,
-                attrs: None,
-                source: None,
-            })
-            .unwrap();
-        entries
-            .write_embedding(e.id, &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-            .unwrap();
-
-        // Embedding call for the question.
-        Mock::given(method("POST"))
-            .and(path("/embeddings"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{"index": 0, "embedding": vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}]
-            })))
-            .mount(&server)
-            .await;
-        // LLM call.
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "choices": [{
-                    "message": {"role": "assistant", "content": "Rust is a systems language."}
-                }]
-            })))
-            .mount(&server)
-            .await;
-
-        let resp = daemon
-            .dispatch(req(
-                "qa.ask",
-                json!({
-                    "question": "what is rust",
-                    "top_k": 3,
-                }),
-            ))
-            .await;
-        assert!(resp.error.is_none(), "{:?}", resp.error);
-        let result = resp.result.unwrap();
-        assert_eq!(result["answer"], "Rust is a systems language.");
-        let citations = result["citations"].as_array().unwrap();
-        assert_eq!(citations.len(), 1);
-        assert_eq!(citations[0].as_str().unwrap(), e.id.to_string());
     }
 
     #[tokio::test]
@@ -997,5 +979,161 @@ mod tests {
         let items = result["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["payload"]["entry_id"], entry_id);
+    }
+
+    // ----- MCP lifecycle + plugin registration e2e (Plan KS1-T5) -----
+
+    #[tokio::test]
+    async fn mcp_initialize_returns_capabilities() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon.dispatch(req("initialize", json!({}))).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert!(result["capabilities"]["tools"].is_object());
+        assert_eq!(result["serverInfo"]["name"], "nomai");
+        // version comes from daemon's CARGO_PKG_VERSION at compile time.
+        assert_eq!(
+            result["serverInfo"]["version"].as_str().unwrap(),
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_list_returns_all_registered_methods() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon.dispatch(req("tools/list", json!({}))).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let tools = result["tools"].as_array().expect("tools is array");
+        // 20 built-in non-MCP handlers (entry:5, link:5, chunk:4, events:3,
+        // search:2, provider:1).
+        assert_eq!(tools.len(), 20);
+        for tool in tools {
+            assert!(tool["name"].is_string());
+            assert!(tool["inputSchema"].is_object());
+        }
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        // All core RPC categories present.
+        assert!(names.contains(&"entry.create"));
+        assert!(names.contains(&"link.neighbors"));
+        assert!(names.contains(&"events.list"));
+        assert!(names.contains(&"chunk.create"));
+        assert!(names.contains(&"search.semantic"));
+        assert!(names.contains(&"provider.list"));
+        // MCP meta-methods are not callable tools.
+        assert!(!names.contains(&"initialize"));
+        assert!(!names.contains(&"tools/list"));
+        assert!(!names.contains(&"tools/call"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_call_dispatches_to_handler() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Seed one entry via the core RPC path.
+        let create_resp = daemon
+            .dispatch(req("entry.create", json!({"title":"hi","body":"world"})))
+            .await;
+        assert!(create_resp.error.is_none());
+        let created_id = create_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Dispatch via MCP tools/call → entry.list.
+        let resp = daemon
+            .dispatch(req(
+                "tools/call",
+                json!({"name": "entry.list", "arguments": {"limit": 10}}),
+            ))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let content = result["content"].as_array().expect("content is array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        let text = content[0]["text"].as_str().expect("text is string");
+        let parsed: Value = serde_json::from_str(text).expect("content text is JSON");
+        let items = parsed["items"].as_array().expect("items is array");
+        let found = items
+            .iter()
+            .any(|e| e["id"].as_str() == Some(created_id.as_str()));
+        assert!(found, "created entry missing from tools/call output");
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_call_unknown_returns_error() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "tools/call",
+                json!({"name": "nonexistent.method", "arguments": {}}),
+            ))
+            .await;
+        let err = resp.error.expect("expected validation error");
+        assert_eq!(err.code, 1003); // Validation per spec §5
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_call_rejects_mcp_meta_method() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        // MCP meta-methods (initialize/tools.list/tools.call) cannot be
+        // invoked through tools/call — they are lifecycle, not tools.
+        let resp = daemon
+            .dispatch(req(
+                "tools/call",
+                json!({"name": "initialize", "arguments": {}}),
+            ))
+            .await;
+        let err = resp.error.expect("expected validation error");
+        assert_eq!(err.code, 1003);
+    }
+
+    #[tokio::test]
+    async fn daemon_register_handler_adds_custom_rpc() {
+        use crate::rpc::RpcHandler;
+        use async_trait::async_trait;
+        use nomai_core::CoreError;
+
+        struct CustomHandler;
+        #[async_trait]
+        impl RpcHandler for CustomHandler {
+            fn method(&self) -> &'static str {
+                "custom.echo"
+            }
+            async fn call(&self, _: &Daemon, params: Value) -> Result<Value, CoreError> {
+                Ok(params)
+            }
+        }
+
+        let server = MockServer::start().await;
+        let mut daemon = setup_daemon(&server).await;
+
+        // register_handler requires &mut self; dispatch takes &self after.
+        daemon.register_handler(Arc::new(CustomHandler));
+
+        let resp = daemon
+            .dispatch(req("custom.echo", json!({"hello":"world"})))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.result.unwrap(), json!({"hello":"world"}));
+
+        // Registered handler also surfaces in tools/list.
+        let list = daemon.dispatch(req("tools/list", json!({}))).await;
+        let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"custom.echo"));
+        assert_eq!(tools.len(), 21); // 20 built-in + custom.echo
     }
 }

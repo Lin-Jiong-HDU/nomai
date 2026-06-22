@@ -1,5 +1,6 @@
 //! Daemon: owns EntryService + providers; orchestrates RPC handlers.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
@@ -8,6 +9,7 @@ use nomai_core::{ChunkService, CoreError, EntryService, EventService, LinkServic
 use nomai_providers::{EmbeddingProvider, LlmProvider, OpenAiCompatibleEmbed, OpenAiCompatibleLlm};
 
 use crate::config::Config;
+use crate::rpc::RpcHandler;
 
 pub struct Daemon {
     pub(crate) entries: Arc<EntryService>,
@@ -21,6 +23,7 @@ pub struct Daemon {
     // Used by search.semantic (Task 7); keep despite no current reader.
     #[allow(dead_code)]
     pub(crate) embedding_dim: usize,
+    pub(crate) handlers: HashMap<&'static str, Arc<dyn RpcHandler>>,
 }
 
 impl Daemon {
@@ -67,6 +70,7 @@ impl Daemon {
             embedding_model: config.embedding.model,
             llm_model: config.llm.model,
             embedding_dim: config.embedding.dim,
+            handlers: crate::handlers::registry(),
         })
     }
 
@@ -98,7 +102,16 @@ impl Daemon {
             embedding_model,
             llm_model,
             embedding_dim,
+            handlers: crate::handlers::registry(),
         }
+    }
+
+    /// Register an additional RPC handler. The handler's `method()` name
+    /// must not collide with an existing entry (collisions replace the
+    /// prior handler, matching standard HashMap::insert semantics).
+    #[allow(dead_code)] // lib-mode extension point; binary daemon doesn't call this
+    pub fn register_handler(&mut self, handler: Arc<dyn RpcHandler>) {
+        self.handlers.insert(handler.method(), handler);
     }
 
     /// Run the NDJSON-over-stdio JSON-RPC loop. Stub in Task 4; full impl in Task 5.
@@ -156,7 +169,17 @@ impl Daemon {
         use nomai_protocol::{Response, RpcError};
 
         let id = req.id.clone();
-        match crate::handlers::route(self, req).await {
+        let params = req.params.unwrap_or(serde_json::Value::Null);
+        let result = match self.handlers.get(req.method.as_str()) {
+            Some(handler) => handler
+                .call(self, params)
+                .await
+                .map_err(crate::rpc::DispatchError::Core),
+            None => Err(crate::rpc::DispatchError::MethodNotFound(
+                req.method.clone(),
+            )),
+        };
+        match result {
             Ok(value) => Response::ok(id, value),
             Err(crate::rpc::DispatchError::Core(err)) => {
                 Response::err(id, crate::rpc::core_error_to_rpc(err))
