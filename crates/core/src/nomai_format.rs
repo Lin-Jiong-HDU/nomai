@@ -6,6 +6,12 @@
 //!
 //! See `docs/superpowers/specs/2026-06-22-content-storage-design.md` §4 for
 //! the format specification.
+//!
+//! # Whitespace note
+//!
+//! Tags split on `,` preserve leading/trailing whitespace within each tag
+//! (e.g. `#tags a, b` parses to `["a", " b"]`). Quote tags containing commas
+//! using `"..."`. Renderer wraps tags containing commas/quotes in quotes.
 
 use chrono::{DateTime, Utc};
 use serde_json::Map as JsonMap;
@@ -496,8 +502,11 @@ fn parse_tags(s: &str) -> Result<Vec<String>, String> {
 
 /// Render a `NomaiDoc` to `.nomai` text. Infallible for well-formed docs.
 ///
-/// Round-trip property: `parse(&render(doc)).unwrap() == doc` for any
-/// well-formed `doc` (i.e. one that was itself produced by `parse`).
+/// Round-trip property: `parse(&render(doc))` succeeds and yields a doc
+/// equivalent to `doc` for any doc originally produced by `parse()`. Docs
+/// constructed by hand may not round-trip if they contain body lines
+/// starting with `\@` (the renderer would emit `\@` verbatim, which the
+/// parser would unescape to `@`).
 pub fn render(doc: &NomaiDoc) -> String {
     let mut out = String::new();
     out.push_str(&format!("#format_version {}\n", doc.format_version));
@@ -1156,6 +1165,19 @@ This entry was created for the astronomy seminar.
             doc.blocks[2].attrs["src"],
             serde_json::Value::String("https://nasa.gov/orbits".into())
         );
+        assert_eq!(doc.blocks[4].r#type, BlockType::Source);
+        assert_eq!(
+            doc.blocks[4].attrs["src"],
+            serde_json::Value::String("principia.pdf".into())
+        );
+        assert_eq!(
+            doc.blocks[4].attrs["author"],
+            serde_json::Value::String("Isaac Newton".into())
+        );
+        assert_eq!(
+            doc.blocks[4].attrs["year"],
+            serde_json::Value::String("1687".into())
+        );
         assert_eq!(doc.blocks[5].r#type, BlockType::Connection);
         assert_eq!(
             doc.blocks[5].attrs["target"],
@@ -1188,5 +1210,47 @@ Earth orbits the sun.
         let doc = parse(input).unwrap();
         let reparsed = parse(&render(&doc)).unwrap();
         assert_eq!(doc, reparsed);
+    }
+
+    #[test]
+    fn parse_block_attrs_handles_quoted_values() {
+        let header = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title T
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@source src=paper.pdf author=\"Isaac Newton\" year=1687
+Body.
+";
+        let doc = parse(header).unwrap();
+        let attrs = &doc.blocks[0].attrs;
+        assert_eq!(attrs.len(), 3);
+        assert_eq!(attrs["src"], serde_json::Value::String("paper.pdf".into()));
+        assert_eq!(
+            attrs["author"],
+            serde_json::Value::String("Isaac Newton".into())
+        );
+        assert_eq!(attrs["year"], serde_json::Value::String("1687".into()));
+    }
+
+    #[test]
+    fn parse_block_attrs_handles_empty_quoted_value() {
+        let header = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title T
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@note key=\"\"
+Body.
+";
+        let doc = parse(header).unwrap();
+        assert_eq!(
+            doc.blocks[0].attrs["key"],
+            serde_json::Value::String("".into())
+        );
     }
 }
