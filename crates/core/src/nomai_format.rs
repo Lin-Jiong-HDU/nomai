@@ -154,36 +154,45 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
                 format_version = Some(v);
             }
             "id" => {
-                let parsed: Ulid = value.parse().map_err(|e: ulid::DecodeError| ParseError::InvalidValue {
-                    line: line_no,
-                    field: "id",
-                    reason: e.to_string(),
-                })?;
+                let parsed: Ulid =
+                    value
+                        .parse()
+                        .map_err(|e: ulid::DecodeError| ParseError::InvalidValue {
+                            line: line_no,
+                            field: "id",
+                            reason: e.to_string(),
+                        })?;
                 id = Some(parsed);
             }
             "title" => {
-                title = Some(unescape_value(&value).map_err(|e| ParseError::InvalidValue {
-                    line: line_no,
-                    field: "title",
-                    reason: e,
-                })?);
+                title = Some(
+                    unescape_value(&value).map_err(|e| ParseError::InvalidValue {
+                        line: line_no,
+                        field: "title",
+                        reason: e,
+                    })?,
+                );
             }
             "created_at" => {
                 let t: DateTime<Utc> =
-                    value.parse().map_err(|e: chrono::ParseError| ParseError::InvalidValue {
-                        line: line_no,
-                        field: "created_at",
-                        reason: e.to_string(),
-                    })?;
+                    value
+                        .parse()
+                        .map_err(|e: chrono::ParseError| ParseError::InvalidValue {
+                            line: line_no,
+                            field: "created_at",
+                            reason: e.to_string(),
+                        })?;
                 created_at = Some(t);
             }
             "updated_at" => {
                 let t: DateTime<Utc> =
-                    value.parse().map_err(|e: chrono::ParseError| ParseError::InvalidValue {
-                        line: line_no,
-                        field: "updated_at",
-                        reason: e.to_string(),
-                    })?;
+                    value
+                        .parse()
+                        .map_err(|e: chrono::ParseError| ParseError::InvalidValue {
+                            line: line_no,
+                            field: "updated_at",
+                            reason: e.to_string(),
+                        })?;
                 updated_at = Some(t);
             }
             _ => {
@@ -257,7 +266,14 @@ mod tests {
 
     #[test]
     fn block_type_round_trip() {
-        for s in ["claim", "evidence", "question", "source", "note", "connection"] {
+        for s in [
+            "claim",
+            "evidence",
+            "question",
+            "source",
+            "note",
+            "connection",
+        ] {
             let ty = BlockType::from_str(s).unwrap();
             assert_eq!(ty.as_str(), s);
         }
@@ -306,7 +322,10 @@ mod tests {
 ";
         assert_eq!(
             parse(input).unwrap_err(),
-            ParseError::MissingHeader { line: 0, key: "format_version" }
+            ParseError::MissingHeader {
+                line: 0,
+                key: "format_version"
+            }
         );
     }
 
@@ -321,7 +340,10 @@ mod tests {
 ";
         assert_eq!(
             parse(input).unwrap_err(),
-            ParseError::UnsupportedVersion { line: 0, version: "2".into() }
+            ParseError::UnsupportedVersion {
+                line: 0,
+                version: "2".into()
+            }
         );
     }
 
