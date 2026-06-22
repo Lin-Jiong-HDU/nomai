@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::rpc::RpcHandler;
 
 pub mod batch;
+pub mod cache;
 pub mod chunk;
 pub mod entry;
 pub mod events;
@@ -74,6 +75,12 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
 
     // provider.*
     let h = provider::List;
+    m.insert(h.method(), Arc::new(h));
+
+    // cache.* (embedding cache introspection + management)
+    let h = cache::Stats;
+    m.insert(h.method(), Arc::new(h));
+    let h = cache::Clear;
     m.insert(h.method(), Arc::new(h));
 
     // mcp.* (lifecycle: initialize / tools/list / tools/call)
@@ -1015,9 +1022,9 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 21 built-in non-MCP handlers (entry:5, link:5, chunk:4, events:3,
-        // search:2, provider:1, batch:1).
-        assert_eq!(tools.len(), 21);
+        // 23 built-in non-MCP handlers (entry:5, link:5, chunk:4, events:3,
+        // search:2, provider:1, cache:2, batch:1).
+        assert_eq!(tools.len(), 23);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1139,7 +1146,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 22); // 21 built-in + custom.echo
+        assert_eq!(tools.len(), 24); // 23 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----

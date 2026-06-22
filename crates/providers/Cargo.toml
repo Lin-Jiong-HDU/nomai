@@ -10,7 +10,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = "0.1"
 reqwest = { version = "0.12", features = ["json"] }
+blake3 = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = { version = "0.4" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 wiremock = "0.6"
+tempfile = "3"

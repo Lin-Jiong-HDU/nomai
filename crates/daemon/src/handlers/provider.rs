@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use nomai_core::CoreError;
+use nomai_providers::EmbeddingProvider;
 
 use crate::daemon::Daemon;
 use crate::rpc::RpcHandler;
@@ -17,7 +18,7 @@ impl RpcHandler for List {
     async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
         Ok(json!({
             "embedding": {
-                "name": daemon.embedder.name(),
+                "name": daemon.cache.name(),
                 "model": daemon.embedding_model,
             },
             "llm": {

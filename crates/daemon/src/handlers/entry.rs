@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use nomai_core::{CoreError, CreateEntry, EntryListQuery, UpdateEntry};
+use nomai_providers::EmbeddingProvider;
 
 use crate::daemon::Daemon;
 use crate::rpc::RpcHandler;
@@ -40,7 +41,7 @@ impl RpcHandler for Create {
         // Trigger embedding if body is non-empty.
         if !entry.body.is_empty() {
             let body = entry.body.clone();
-            let embeddings = daemon.embedder.embed(&[&body]).await?;
+            let embeddings = daemon.cache.embed(&[&body]).await?;
             if let Some(emb) = embeddings.into_iter().next() {
                 let entries = daemon.entries.clone();
                 let id = entry.id;
@@ -109,7 +110,7 @@ impl RpcHandler for Update {
             } else {
                 // body changed (non-empty) — re-embed.
                 let body = updated.body.clone();
-                let embeddings = daemon.embedder.embed(&[&body]).await?;
+                let embeddings = daemon.cache.embed(&[&body]).await?;
                 if let Some(emb) = embeddings.into_iter().next() {
                     let entries = daemon.entries.clone();
                     let id = updated.id;

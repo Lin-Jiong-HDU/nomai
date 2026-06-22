@@ -1,0 +1,56 @@
+//! cache.* handlers: embedding cache introspection and management.
+
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use nomai_core::CoreError;
+
+use crate::daemon::Daemon;
+use crate::rpc::RpcHandler;
+
+pub struct Stats;
+#[async_trait]
+impl RpcHandler for Stats {
+    fn method(&self) -> &'static str {
+        "cache.stats"
+    }
+    async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
+        let stats = daemon.cache.stats()?;
+        Ok(json!({
+            "embeddings": {
+                "model": stats.model,
+                "dim": stats.dim,
+                "rows": stats.rows,
+                "hits": stats.hits,
+                "misses": stats.misses,
+                "hit_rate": stats.hit_rate(),
+            }
+        }))
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct ClearParams {
+    /// Optional model filter. If omitted, clears every model.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+pub struct Clear;
+#[async_trait]
+impl RpcHandler for Clear {
+    fn method(&self) -> &'static str {
+        "cache.clear"
+    }
+    async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
+        let p: ClearParams = if params.is_null() {
+            ClearParams::default()
+        } else {
+            serde_json::from_value(params)
+                .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?
+        };
+        let cleared = daemon.cache.clear(p.model.as_deref())?;
+        Ok(json!({ "cleared": cleared }))
+    }
+}

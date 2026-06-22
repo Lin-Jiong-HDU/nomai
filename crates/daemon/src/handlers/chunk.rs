@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use nomai_core::{ChunkService, CoreError, CreateChunk};
+use nomai_providers::EmbeddingProvider;
 
 use crate::daemon::Daemon;
 use crate::handlers::entry::blocking;
@@ -27,7 +28,7 @@ impl RpcHandler for Create {
 
         // Auto-embed chunk text (same as entry.create pattern).
         let text = chunk.text.clone();
-        let embeddings = daemon.embedder.embed(&[&text]).await?;
+        let embeddings = daemon.cache.embed(&[&text]).await?;
         if let Some(emb) = embeddings.into_iter().next() {
             let chunks = daemon.chunks.clone();
             let id = chunk.id;

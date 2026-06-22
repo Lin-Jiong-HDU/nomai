@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         nomai_providers::OpenAiCompatibleLlm::new("http://localhost", "dummy", "dummy"),
     );
 
-    let mut daemon = Daemon::from_services(conn, embedder, llm, 8)?;
+    let mut daemon = Daemon::from_services(conn, embedder, llm, 8, "example-model")?;
 
     // 5. Register custom RPC
     daemon.register_handler(Arc::new(Stats));

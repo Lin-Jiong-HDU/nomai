@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 
 use nomai_core::{ChunkService, CoreError, EntryService, EventService, LinkService};
-use nomai_providers::{EmbeddingProvider, LlmProvider, OpenAiCompatibleEmbed, OpenAiCompatibleLlm};
+use nomai_providers::{
+    CachedEmbedder, EmbeddingProvider, LlmProvider, OpenAiCompatibleEmbed, OpenAiCompatibleLlm,
+};
 
 use crate::config::Config;
 use crate::rpc::RpcHandler;
@@ -16,7 +18,12 @@ pub struct Daemon {
     pub(crate) links: Arc<LinkService>,
     pub(crate) events: Arc<EventService>,
     pub(crate) chunks: Arc<ChunkService>,
-    pub(crate) embedder: Arc<dyn EmbeddingProvider>,
+    /// Cached embedding provider. Transparent wrapper around the configured
+    /// `OpenAiCompatibleEmbed` (or any `EmbeddingProvider` in lib mode) that
+    /// persists embeddings in the `emb_cache` table. Accessed as both the
+    /// typed `cache` (for `cache.stats` / `cache.clear` RPCs) and via the
+    /// `EmbeddingProvider` trait (transparent delegation to inner).
+    pub(crate) cache: Arc<CachedEmbedder>,
     pub(crate) llm: Arc<dyn LlmProvider>,
     pub(crate) embedding_model: String,
     pub(crate) llm_model: String,
@@ -48,12 +55,19 @@ impl Daemon {
         let llm_key = std::env::var(&config.llm.api_key_env)
             .map_err(|_| CoreError::Config(format!("missing env: {}", config.llm.api_key_env)))?;
 
-        let embedder: Arc<dyn EmbeddingProvider> = Arc::new(OpenAiCompatibleEmbed::new(
+        let inner: Arc<dyn EmbeddingProvider> = Arc::new(OpenAiCompatibleEmbed::new(
             &config.embedding.base_url,
             &embedding_key,
             &config.embedding.model,
             config.embedding.dim,
         ));
+        // Wrap inner with CachedEmbedder so all embed() calls consult emb_cache.
+        let cache = Arc::new(CachedEmbedder::new(
+            inner,
+            conn.clone(),
+            &config.embedding.model,
+        ));
+
         let llm: Arc<dyn LlmProvider> = Arc::new(OpenAiCompatibleLlm::new(
             &config.llm.base_url,
             &llm_key,
@@ -65,7 +79,7 @@ impl Daemon {
             links,
             events,
             chunks,
-            embedder,
+            cache,
             llm,
             embedding_model: config.embedding.model,
             llm_model: config.llm.model,
@@ -92,12 +106,19 @@ impl Daemon {
         let events = Arc::new(EventService::new(conn2).unwrap());
         let conn3 = entries.conn_for_test();
         let chunks = Arc::new(ChunkService::new(conn3).unwrap());
+        // Wrap embedder in CachedEmbedder using the shared connection so
+        // tests exercise the same code path as production.
+        let cache = Arc::new(CachedEmbedder::new(
+            embedder,
+            entries.conn_for_test(),
+            embedding_model.as_str(),
+        ));
         Self {
             entries,
             links,
             events,
             chunks,
-            embedder,
+            cache,
             llm,
             embedding_model,
             llm_model,
@@ -136,9 +157,12 @@ impl Daemon {
     pub fn chunks(&self) -> &Arc<ChunkService> {
         &self.chunks
     }
+    /// Access the cached embedding provider. Trait methods (`embed`, `dim`,
+    /// `name`) delegate transparently to the inner provider; the concrete
+    /// `CachedEmbedder` type exposes `stats()` and `clear()` for cache RPCs.
     #[allow(dead_code)]
-    pub fn embedder(&self) -> &Arc<dyn EmbeddingProvider> {
-        &self.embedder
+    pub fn cache(&self) -> &Arc<CachedEmbedder> {
+        &self.cache
     }
     #[allow(dead_code)]
     pub fn llm(&self) -> &Arc<dyn LlmProvider> {
@@ -148,12 +172,17 @@ impl Daemon {
     /// Construct a Daemon from pre-built services + providers, without
     /// reading a config.toml file. For lib-mode users who construct their
     /// own EntryService / EmbeddingProvider / LlmProvider.
+    ///
+    /// The `cache_model` name namespacing the `emb_cache` rows; pass the
+    /// underlying model identifier so cache stats and clears target the
+    /// right namespace.
     #[allow(dead_code)]
     pub fn from_services(
         conn: Arc<std::sync::Mutex<Connection>>,
         embedder: Arc<dyn EmbeddingProvider>,
         llm: Arc<dyn LlmProvider>,
         embedding_dim: usize,
+        cache_model: impl Into<String>,
     ) -> Result<Self, CoreError> {
         let entries = Arc::new(EntryService::new(conn.clone())?);
         let links = Arc::new(LinkService::new(conn.clone())?);
@@ -161,13 +190,14 @@ impl Daemon {
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
         entries.ensure_vec_embeddings(embedding_dim)?;
         chunks.ensure_vec_chunk_embeddings(embedding_dim)?;
+        let cache = Arc::new(CachedEmbedder::new(embedder, conn, cache_model));
         let handlers = crate::handlers::registry();
         Ok(Self {
             entries,
             links,
             events,
             chunks,
-            embedder,
+            cache,
             llm,
             embedding_model: String::new(),
             llm_model: String::new(),

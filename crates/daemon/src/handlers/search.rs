@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use nomai_core::{CoreError, Granularity};
+use nomai_providers::EmbeddingProvider;
 
 use crate::daemon::Daemon;
 use crate::handlers::entry::blocking;
@@ -58,7 +59,7 @@ impl RpcHandler for Semantic {
 
         // Embed query, then KNN.
         let query_str = p.query;
-        let embeddings = daemon.embedder.embed(&[&query_str]).await?;
+        let embeddings = daemon.cache.embed(&[&query_str]).await?;
         let qvec = embeddings
             .into_iter()
             .next()

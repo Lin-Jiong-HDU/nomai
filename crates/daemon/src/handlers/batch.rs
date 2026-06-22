@@ -13,6 +13,7 @@ use nomai_core::{
     ChunkService, CoreError, CreateChunk, CreateEntry, CreateLink, EntryService, LinkService,
     UpdateEntry,
 };
+use nomai_providers::EmbeddingProvider;
 
 use crate::daemon::Daemon;
 use crate::rpc::RpcHandler;
@@ -406,7 +407,7 @@ async fn run_embed_queue(daemon: &Daemon, queue: Vec<EmbedTask>) -> Result<(), C
     }
 
     let texts: Vec<&str> = queue.iter().map(|t| t.text.as_str()).collect();
-    let embeddings = daemon.embedder.embed(&texts).await?;
+    let embeddings = daemon.cache.embed(&texts).await?;
 
     for (task, emb) in queue.into_iter().zip(embeddings) {
         match task.target {
