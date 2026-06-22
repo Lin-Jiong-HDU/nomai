@@ -980,4 +980,160 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["payload"]["entry_id"], entry_id);
     }
+
+    // ----- MCP lifecycle + plugin registration e2e (Plan KS1-T5) -----
+
+    #[tokio::test]
+    async fn mcp_initialize_returns_capabilities() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon.dispatch(req("initialize", json!({}))).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert!(result["capabilities"]["tools"].is_object());
+        assert_eq!(result["serverInfo"]["name"], "nomai");
+        // version comes from daemon's CARGO_PKG_VERSION at compile time.
+        assert_eq!(
+            result["serverInfo"]["version"].as_str().unwrap(),
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_list_returns_all_registered_methods() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon.dispatch(req("tools/list", json!({}))).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let tools = result["tools"].as_array().expect("tools is array");
+        // 20 built-in non-MCP handlers (entry:5, link:5, chunk:4, events:3,
+        // search:2, provider:1).
+        assert_eq!(tools.len(), 20);
+        for tool in tools {
+            assert!(tool["name"].is_string());
+            assert!(tool["inputSchema"].is_object());
+        }
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        // All core RPC categories present.
+        assert!(names.contains(&"entry.create"));
+        assert!(names.contains(&"link.neighbors"));
+        assert!(names.contains(&"events.list"));
+        assert!(names.contains(&"chunk.create"));
+        assert!(names.contains(&"search.semantic"));
+        assert!(names.contains(&"provider.list"));
+        // MCP meta-methods are not callable tools.
+        assert!(!names.contains(&"initialize"));
+        assert!(!names.contains(&"tools/list"));
+        assert!(!names.contains(&"tools/call"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_call_dispatches_to_handler() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Seed one entry via the core RPC path.
+        let create_resp = daemon
+            .dispatch(req("entry.create", json!({"title":"hi","body":"world"})))
+            .await;
+        assert!(create_resp.error.is_none());
+        let created_id = create_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Dispatch via MCP tools/call → entry.list.
+        let resp = daemon
+            .dispatch(req(
+                "tools/call",
+                json!({"name": "entry.list", "arguments": {"limit": 10}}),
+            ))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let content = result["content"].as_array().expect("content is array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        let text = content[0]["text"].as_str().expect("text is string");
+        let parsed: Value = serde_json::from_str(text).expect("content text is JSON");
+        let items = parsed["items"].as_array().expect("items is array");
+        let found = items
+            .iter()
+            .any(|e| e["id"].as_str() == Some(created_id.as_str()));
+        assert!(found, "created entry missing from tools/call output");
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_call_unknown_returns_error() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "tools/call",
+                json!({"name": "nonexistent.method", "arguments": {}}),
+            ))
+            .await;
+        let err = resp.error.expect("expected validation error");
+        assert_eq!(err.code, 1003); // Validation per spec §5
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_call_rejects_mcp_meta_method() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        // MCP meta-methods (initialize/tools.list/tools.call) cannot be
+        // invoked through tools/call — they are lifecycle, not tools.
+        let resp = daemon
+            .dispatch(req(
+                "tools/call",
+                json!({"name": "initialize", "arguments": {}}),
+            ))
+            .await;
+        let err = resp.error.expect("expected validation error");
+        assert_eq!(err.code, 1003);
+    }
+
+    #[tokio::test]
+    async fn daemon_register_handler_adds_custom_rpc() {
+        use crate::rpc::RpcHandler;
+        use async_trait::async_trait;
+        use nomai_core::CoreError;
+
+        struct CustomHandler;
+        #[async_trait]
+        impl RpcHandler for CustomHandler {
+            fn method(&self) -> &'static str {
+                "custom.echo"
+            }
+            async fn call(&self, _: &Daemon, params: Value) -> Result<Value, CoreError> {
+                Ok(params)
+            }
+        }
+
+        let server = MockServer::start().await;
+        let mut daemon = setup_daemon(&server).await;
+
+        // register_handler requires &mut self; dispatch takes &self after.
+        daemon.register_handler(Arc::new(CustomHandler));
+
+        let resp = daemon
+            .dispatch(req("custom.echo", json!({"hello":"world"})))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.result.unwrap(), json!({"hello":"world"}));
+
+        // Registered handler also surfaces in tools/list.
+        let list = daemon.dispatch(req("tools/list", json!({}))).await;
+        let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"custom.echo"));
+        assert_eq!(tools.len(), 21); // 20 built-in + custom.echo
+    }
 }

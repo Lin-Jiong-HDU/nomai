@@ -109,7 +109,7 @@ impl Daemon {
     /// Register an additional RPC handler. The handler's `method()` name
     /// must not collide with an existing entry (collisions replace the
     /// prior handler, matching standard HashMap::insert semantics).
-    #[allow(dead_code)] // consumed by MCP plugin task (KS1-T4)
+    #[allow(dead_code)] // lib-mode extension point; binary daemon doesn't call this
     pub fn register_handler(&mut self, handler: Arc<dyn RpcHandler>) {
         self.handlers.insert(handler.method(), handler);
     }

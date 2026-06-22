@@ -129,10 +129,7 @@ impl RpcHandler for ToolsCall {
 
         // MCP handlers are not themselves callable as tools.
         if is_mcp_method(p.name.as_str()) {
-            return Err(CoreError::Validation(format!(
-                "not a tool: {}",
-                p.name
-            )));
+            return Err(CoreError::Validation(format!("not a tool: {}", p.name)));
         }
 
         let result = handler.call(daemon, p.arguments).await?;
@@ -270,7 +267,8 @@ mod tests {
             async fn complete(
                 &self,
                 _req: nomai_providers::CompletionRequest,
-            ) -> Result<nomai_providers::CompletionResponse, nomai_protocol::ProviderError> {
+            ) -> Result<nomai_providers::CompletionResponse, nomai_protocol::ProviderError>
+            {
                 Err(nomai_protocol::ProviderError::new(
                     nomai_protocol::ProviderErrorKind::Unknown,
                     "null llm",
