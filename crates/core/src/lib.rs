@@ -8,6 +8,7 @@ pub mod event_service;
 pub mod link_model;
 pub mod link_service;
 pub mod model;
+pub mod nomai_format;
 pub mod service;
 pub mod storage;
 
@@ -21,6 +22,9 @@ pub use link_model::{
 };
 pub use link_service::LinkService;
 pub use model::Entry;
+pub use nomai_format::{
+    parse as parse_nomai, render as render_nomai, Block, BlockType, NomaiDoc, ParseError,
+};
 pub use service::{
     CreateEntry, EntryListQuery, EntryListResult, EntryService, FulltextSearchResult,
     SemanticSearchResult, UpdateEntry,
