@@ -2,7 +2,7 @@
 
 **A Nomai-inspired personal knowledge core.** Storage, indexing, and retrieval primitives over JSON-RPC on stdio — bring your own UI.
 
-> Named after the Nomai from *Outer Wilds* — an alien race who wove a network of knowledge across their star system. nomai the project aims to be the substrate on which your knowledge tools are built, not the tool itself.
+> Named after the Nomai from _Outer Wilds_ — an alien race who wove a network of knowledge across their star system. nomai the project aims to be the substrate on which your knowledge tools are built, not the tool itself.
 
 ## What it is
 
@@ -14,14 +14,22 @@ The core is deliberately mechanism, not policy: it stores, indexes, and emits ev
 
 Early alpha. API surface is stabilizing but may change before 1.0. Currently single-user, single-process, single SQLite file.
 
+## Key features
+
+- **4 primitives**: Entry / Links / Events / Chunks — composable building blocks
+- **Batch RPC**: `$ref` inter-op references + atomic transactions — compose multi-step workflows in one request
+- **MCP server**: native Model Context Protocol compatibility — Claude Desktop / Cursor / any MCP client can connect directly
+- **Plugin registry**: `RpcHandler` trait + `register_handler` — add custom RPCs without forking
+- **lib + daemon dual mode**: embed `nomai-core` directly, or run `nomai-daemon` as a stdio service
+
 ## The four primitives
 
-| Primitive | What it does | Typical use |
-|---|---|---|
-| **Entry** | Markdown note with tags + free-form attrs | The atomic unit of knowledge |
-| **Links** | Directed edges between entries | GraphRAG, backlinks, knowledge graph |
-| **Events** | Append-only mutation log | Async embedding retry, external sync, audit |
-| **Chunks** | Entry split into N embeddable pieces | Long-document RAG, fine-grained retrieval |
+| Primitive  | What it does                              | Typical use                                 |
+| ---------- | ----------------------------------------- | ------------------------------------------- |
+| **Entry**  | Markdown note with tags + free-form attrs | The atomic unit of knowledge                |
+| **Links**  | Directed edges between entries            | GraphRAG, backlinks, knowledge graph        |
+| **Events** | Append-only mutation log                  | Async embedding retry, external sync, audit |
+| **Chunks** | Entry split into N embeddable pieces      | Long-document RAG, fine-grained retrieval   |
 
 ## Quick start
 
@@ -75,7 +83,20 @@ echo '{"jsonrpc":"2.0","id":1,"method":"entry.create","params":{"title":"Hello",
 └─────────────────────────────────────────────────┘
 ```
 
-**Lib mode**: `nomai-core` is a plain Rust crate. If you don't want the daemon overhead, depend on it directly and call `EntryService` / `LinkService` / etc. from your own binary.
+**Lib mode**: `nomai-core` is a plain Rust crate. If you don't want the daemon overhead, depend on it directly and call `EntryService` / `LinkService` / etc. from your own binary. Or use `nomai-daemon`'s `Daemon::from_services()` constructor to build a full daemon (with RPC dispatch + MCP + batch) in-process, and `register_handler()` to add custom RPCs.
+
+## Examples
+
+```
+crates/daemon/examples/
+├── rag.rs             # Naive RAG via lib API (search + LLM)
+├── custom_rpc.rs      # Register a custom "stats" RPC
+├── import_markdown.rs # Batch import: entry + chunks + links atomically
+├── graph_rag.rs       # GraphRAG: search → link.neighbors → LLM
+└── events_sync.rs     # Incremental sync: events.list → export to .md files
+```
+
+Run any example: `cargo run --example <name>`
 
 ## Documentation
 

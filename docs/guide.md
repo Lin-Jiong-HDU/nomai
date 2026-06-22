@@ -19,11 +19,14 @@ For project overview and install, see the [README](../README.md) first.
   - [chunk.\*](#chunk)
   - [search.\*](#search)
   - [provider.\*](#provider)
+  - [batch.\*](#batch)
+  - [MCP lifecycle](#mcp)
 - [Error codes](#error-codes)
 - [Configuration](#configuration)
 - [Retrieval modes](#retrieval-modes)
 - [Lib mode (embed nomai-core)](#lib-mode)
 - [Custom RPCs](#custom-rpcs)
+- [What's next](#whats-next)
 
 ---
 
@@ -60,11 +63,11 @@ The atomic unit of knowledge. A markdown note with structured metadata.
 
 ```json
 {
-  "id": "01KVM7KFNT82JWCEM31FESCEXP",  // ULID, time-sortable
+  "id": "01KVM7KFNT82JWCEM31FESCEXP", // ULID, time-sortable
   "title": "Rust 入门",
-  "body": "Rust 是一门系统编程语言...",  // markdown
+  "body": "Rust 是一门系统编程语言...", // markdown
   "tags": ["rust", "programming"],
-  "attrs": {"difficulty": "beginner"},   // free-form JSON object
+  "attrs": { "difficulty": "beginner" }, // free-form JSON object
   "source": null,
   "created_at": "2026-06-21T04:38:37Z",
   "updated_at": "2026-06-21T04:38:37Z"
@@ -88,8 +91,8 @@ Directed edges between entries. One entry can link to many others with different
   "id": "01KVN...",
   "source_id": "01KVM7KFNT82JWCEM31FESCEXP",
   "target_id": "01KVM7K3G9AA5804VFTZ483SHD",
-  "relation": "references",    // free-form string
-  "attrs": {"weight": 0.8},
+  "relation": "references", // free-form string
+  "attrs": { "weight": 0.8 },
   "created_at": "2026-06-21T..."
 }
 ```
@@ -111,7 +114,9 @@ Append-only log of every mutation. Every `entry.*` / `link.*` / `chunk.*` write 
   "type": "chunk.created",
   "target_type": "chunk",
   "target_id": "01KVNFA23R9MA0A57YRVY7QP8E",
-  "payload": { /* full entity snapshot at the time of mutation */ },
+  "payload": {
+    /* full entity snapshot at the time of mutation */
+  },
   "created_at": "2026-06-21T16:13:07Z"
 }
 ```
@@ -133,7 +138,7 @@ An entry can be split into N chunks, each embedded independently. This unlocks f
   "entry_id": "01KVM7KFNT82JWCEM31FESCEXP",
   "ordinal": 2,
   "text": "Nomai 文化的核心是对知识和真相的不懈追求。",
-  "attrs": {"section": "conclusion"},
+  "attrs": { "section": "conclusion" },
   "created_at": "...",
   "updated_at": "..."
 }
@@ -148,10 +153,10 @@ An entry can be split into N chunks, each embedded independently. This unlocks f
 
 **Empirical comparison** (real data from this daemon):
 
-| Query | Retrieval | Top result | Score |
-|---|---|---|---|
-| "Nomai 文化追求什么" | `granularity=chunk` | chunk about "文化...追求..." | **0.707** |
-| "Nomai 文化追求什么" | `granularity=entry` (default) | entire Nomai entry | 0.453 |
+| Query                | Retrieval                     | Top result                   | Score     |
+| -------------------- | ----------------------------- | ---------------------------- | --------- |
+| "Nomai 文化追求什么" | `granularity=chunk`           | chunk about "文化...追求..." | **0.707** |
+| "Nomai 文化追求什么" | `granularity=entry` (default) | entire Nomai entry           | 0.453     |
 
 ---
 
@@ -161,48 +166,48 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 
 ### entry.{#entry-methods}
 
-| Method | Params | Returns | Notes |
-|---|---|---|---|
-| `entry.create` | `title`, `body`, `tags?`, `attrs?`, `source?` | `Entry` | Auto-embeds body if non-empty |
-| `entry.get` | `id` | `Entry` | 1001 if not found |
-| `entry.update` | `id`, `title?`, `body?`, `tags?`, `attrs?`, `source?` | `Entry` | Re-embeds if body changes; clears embedding if body becomes empty |
-| `entry.delete` | `id` | `{"deleted": true}` | Cascades to links + chunks + chunk embeddings |
-| `entry.list` | `tag?`, `limit?`(50), `offset?`(0), `order?` | `{items, total}` | `order`: `created_desc`(default) / `created_asc` / `updated_desc` / `updated_asc` |
+| Method         | Params                                                | Returns             | Notes                                                                             |
+| -------------- | ----------------------------------------------------- | ------------------- | --------------------------------------------------------------------------------- |
+| `entry.create` | `title`, `body`, `tags?`, `attrs?`, `source?`         | `Entry`             | Auto-embeds body if non-empty                                                     |
+| `entry.get`    | `id`                                                  | `Entry`             | 1001 if not found                                                                 |
+| `entry.update` | `id`, `title?`, `body?`, `tags?`, `attrs?`, `source?` | `Entry`             | Re-embeds if body changes; clears embedding if body becomes empty                 |
+| `entry.delete` | `id`                                                  | `{"deleted": true}` | Cascades to links + chunks + chunk embeddings                                     |
+| `entry.list`   | `tag?`, `limit?`(50), `offset?`(0), `order?`          | `{items, total}`    | `order`: `created_desc`(default) / `created_asc` / `updated_desc` / `updated_asc` |
 
 ### link.{#link-methods}
 
-| Method | Params | Returns | Notes |
-|---|---|---|---|
-| `link.create` | `source_id`, `target_id`, `relation`, `attrs?` | `Link` | 1003 if source/target missing or duplicate |
-| `link.get` | `id` | `Link` | 1001 if not found |
-| `link.delete` | `id` | `{"deleted": true}` | 1001 if not found |
-| `link.list` | `from?`, `to?`, `relation?`, `limit?`(50), `offset?`(0) | `{items, total}` | At least one of `from`/`to` required |
-| `link.neighbors` | `id`, `relation?`, `direction?`("out"\|"in"\|"both"=both), `limit?`(50) | `{entries, links}` | One-hop graph traversal |
+| Method           | Params                                                                  | Returns             | Notes                                      |
+| ---------------- | ----------------------------------------------------------------------- | ------------------- | ------------------------------------------ |
+| `link.create`    | `source_id`, `target_id`, `relation`, `attrs?`                          | `Link`              | 1003 if source/target missing or duplicate |
+| `link.get`       | `id`                                                                    | `Link`              | 1001 if not found                          |
+| `link.delete`    | `id`                                                                    | `{"deleted": true}` | 1001 if not found                          |
+| `link.list`      | `from?`, `to?`, `relation?`, `limit?`(50), `offset?`(0)                 | `{items, total}`    | At least one of `from`/`to` required       |
+| `link.neighbors` | `id`, `relation?`, `direction?`("out"\|"in"\|"both"=both), `limit?`(50) | `{entries, links}`  | One-hop graph traversal                    |
 
 ### events.{#events-methods}
 
-| Method | Params | Returns | Notes |
-|---|---|---|---|
-| `events.list` | `since?`(ULID, exclusive), `type?`, `target_type?`, `target_id?`, `limit?`(100), `order?`("asc"=default\|"desc") | `{items, has_more}` | Client-cursor model |
-| `events.get` | `id` | `Event` | 1001 if not found |
-| `events.purge` | `before`(ULID, exclusive), `type?` | `{deleted: N}` | For retention |
+| Method         | Params                                                                                                           | Returns             | Notes               |
+| -------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------- | ------------------- |
+| `events.list`  | `since?`(ULID, exclusive), `type?`, `target_type?`, `target_id?`, `limit?`(100), `order?`("asc"=default\|"desc") | `{items, has_more}` | Client-cursor model |
+| `events.get`   | `id`                                                                                                             | `Event`             | 1001 if not found   |
+| `events.purge` | `before`(ULID, exclusive), `type?`                                                                               | `{deleted: N}`      | For retention       |
 
 ### chunk.{#chunk-methods}
 
-| Method | Params | Returns | Notes |
-|---|---|---|---|
-| `chunk.create` | `entry_id`, `ordinal`, `text`, `attrs?` | `Chunk` | Auto-embeds text; 1003 on FK/UNIQUE violation |
-| `chunk.get` | `id` | `Chunk` | 1001 if not found |
-| `chunk.delete` | `id` | `{"deleted": true}` | Also removes chunk embedding |
-| `chunk.list` | `entry_id`, `limit?`(100), `offset?`(0) | `{items, total}` | Sorted by `ordinal` ascending |
+| Method         | Params                                  | Returns             | Notes                                         |
+| -------------- | --------------------------------------- | ------------------- | --------------------------------------------- |
+| `chunk.create` | `entry_id`, `ordinal`, `text`, `attrs?` | `Chunk`             | Auto-embeds text; 1003 on FK/UNIQUE violation |
+| `chunk.get`    | `id`                                    | `Chunk`             | 1001 if not found                             |
+| `chunk.delete` | `id`                                    | `{"deleted": true}` | Also removes chunk embedding                  |
+| `chunk.list`   | `entry_id`, `limit?`(100), `offset?`(0) | `{items, total}`    | Sorted by `ordinal` ascending                 |
 
 ### search.{#search-methods}
 
-| Method | Params | Returns | Notes |
-|---|---|---|---|
-| `search.fulltext` | `query`, `limit?`(10) | `{items: [{entry, score}]}` | FTS5 bm25 ranking |
-| `search.semantic` | `query`, `limit?`(10), `granularity?`("entry"=default\|"chunk") | `{items}` | Items shape depends on granularity (see below) |
-| `search.hybrid` | — | — | **Reserved**: returns -32601 |
+| Method            | Params                                                          | Returns                     | Notes                                          |
+| ----------------- | --------------------------------------------------------------- | --------------------------- | ---------------------------------------------- |
+| `search.fulltext` | `query`, `limit?`(10)                                           | `{items: [{entry, score}]}` | FTS5 bm25 ranking                              |
+| `search.semantic` | `query`, `limit?`(10), `granularity?`("entry"=default\|"chunk") | `{items}`                   | Items shape depends on granularity (see below) |
+| `search.hybrid`   | —                                                               | —                           | **Reserved**: returns -32601                   |
 
 **`search.semantic` return shapes**:
 
@@ -211,26 +216,82 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 
 ### provider.{#provider-methods}
 
-| Method | Params | Returns | Notes |
-|---|---|---|---|
-| `provider.list` | — | `{embedding: {name, model}, llm: {name, model}}` | Active provider info from config |
-| `provider.set` | — | — | **Reserved**: returns -32601 |
+| Method          | Params | Returns                                          | Notes                            |
+| --------------- | ------ | ------------------------------------------------ | -------------------------------- |
+| `provider.list` | —      | `{embedding: {name, model}, llm: {name, model}}` | Active provider info from config |
+| `provider.set`  | —      | —                                                | **Reserved**: returns -32601     |
+
+### batch.{#batch}
+
+Execute multiple mutations atomically in a single request.
+
+| Method  | Params                            | Returns                                         |
+| ------- | --------------------------------- | ----------------------------------------------- |
+| `batch` | `{ops: [BatchOp], atomic?: bool}` | `{results: [{ok, result?}], rolled_back: bool}` |
+
+Each `BatchOp` has `{id?: string, method: string, params: object}`. The `id` field enables `$ref` referencing — subsequent ops can reference earlier results:
+
+```json
+{
+  "ops": [
+    {
+      "id": "e1",
+      "method": "entry.create",
+      "params": { "title": "doc", "body": "..." }
+    },
+    {
+      "method": "chunk.create",
+      "params": { "entry_id": { "$ref": "e1.id" }, "ordinal": 0, "text": "..." }
+    }
+  ]
+}
+```
+
+`$ref` supports dot-path: `{"$ref": "op_id.field.subfield"}`.
+
+**Atomicity**: `atomic` defaults to `true`. Any op failure rolls back the entire batch. `atomic: false` is reserved for future implementation.
+
+**Batch embedding**: After transaction commit, all `entry.create` / `chunk.create` texts are batched into a single `embedder.embed()` call (one HTTP request regardless of op count).
+
+**Allowed methods in batch**: mutation only (`entry.create/update/delete`, `chunk.create/delete`, `link.create/delete`). Read methods and meta-methods are rejected with code 1003.
+
+---
+
+### MCP lifecycle{#mcp}
+
+nomai is a native MCP (Model Context Protocol) server. Any MCP-compatible client (Claude Desktop, Cursor, etc.) can connect via stdio and call all RPCs as tools.
+
+| Method       | Params              | Returns                                       |
+| ------------ | ------------------- | --------------------------------------------- |
+| `initialize` | `{}`                | `{protocolVersion, capabilities, serverInfo}` |
+| `tools/list` | `{}`                | `{tools: [{name, inputSchema}]}`              |
+| `tools/call` | `{name, arguments}` | `{content: [{type: "text", text}]}`           |
+
+All 21 primitive RPCs + batch + any custom registered RPCs appear as MCP tools automatically.
+
+Example MCP handshake:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"entry.list","arguments":{"limit":3}}}
+```
 
 ---
 
 ## Error codes
 
-| Code | Meaning | When |
-|---|---|---|
-| `-32700` | Parse error | Invalid JSON in request |
-| `-32600` | Invalid request | Not a valid JSON-RPC request object |
+| Code     | Meaning          | When                                                                                  |
+| -------- | ---------------- | ------------------------------------------------------------------------------------- |
+| `-32700` | Parse error      | Invalid JSON in request                                                               |
+| `-32600` | Invalid request  | Not a valid JSON-RPC request object                                                   |
 | `-32601` | Method not found | Unknown method, or reserved method (`search.hybrid`, `provider.set`, `link.traverse`) |
-| `-32602` | Invalid params | Malformed params |
-| `-32603` | Internal error | Unexpected server error |
-| `1001` | NotFound | Entry / link / event / chunk id does not exist |
-| `1002` | Provider error | Embedding or LLM HTTP failure (data has `kind` field) |
-| `1003` | Validation error | Bad attrs (non-object), FK violation, UNIQUE conflict, missing required params |
-| `1004` | Config error | Missing env var, malformed config |
+| `-32602` | Invalid params   | Malformed params                                                                      |
+| `-32603` | Internal error   | Unexpected server error                                                               |
+| `1001`   | NotFound         | Entry / link / event / chunk id does not exist                                        |
+| `1002`   | Provider error   | Embedding or LLM HTTP failure (data has `kind` field)                                 |
+| `1003`   | Validation error | Bad attrs (non-object), FK violation, UNIQUE conflict, missing required params        |
+| `1004`   | Config error     | Missing env var, malformed config                                                     |
 
 Error response shape:
 
@@ -241,7 +302,7 @@ Error response shape:
   "error": {
     "code": 1003,
     "message": "link constraint violation: ...",
-    "data": {"id": "01KVM..."}  // optional, context-specific
+    "data": { "id": "01KVM..." } // optional, context-specific
   }
 }
 ```
@@ -285,10 +346,10 @@ set -Ux NOMAI_LLM_API_KEY "sk-..."
 
 Three ways to find entries. Pick based on what you're matching.
 
-| Mode | Method | Matches by | Best for |
-|---|---|---|---|
-| **Fulltext** | `search.fulltext` | Token overlap (FTS5 bm25) | Keyword search, exact terms |
-| **Semantic (entry)** | `search.semantic` (default) | Cosine similarity of entry embeddings | Concept search, "find similar" |
+| Mode                 | Method                              | Matches by                            | Best for                            |
+| -------------------- | ----------------------------------- | ------------------------------------- | ----------------------------------- |
+| **Fulltext**         | `search.fulltext`                   | Token overlap (FTS5 bm25)             | Keyword search, exact terms         |
+| **Semantic (entry)** | `search.semantic` (default)         | Cosine similarity of entry embeddings | Concept search, "find similar"      |
 | **Semantic (chunk)** | `search.semantic granularity=chunk` | Cosine similarity of chunk embeddings | Long-doc RAG, sub-passage retrieval |
 
 **Fulltext limitations**: FTS5 uses the `unicode61` tokenizer by default, which treats consecutive CJK characters as a single token. Searching for Chinese phrases may return no matches. Use semantic search for Chinese content. (Future: trigram/ICU tokenizer.)
@@ -299,10 +360,9 @@ Three ways to find entries. Pick based on what you're matching.
 
 ## Lib mode
 
-If you don't want the daemon overhead, depend on `nomai-core` directly:
+### Option 1: nomai-core directly (storage primitives only)
 
 ```toml
-# Cargo.toml
 [dependencies]
 nomai-core = { path = "..." }
 ```
@@ -327,19 +387,40 @@ let entry = entries.create(nomai_core::CreateEntry {
 })?;
 ```
 
+### Option 2: nomai-daemon (full Daemon with RPC dispatch + MCP + batch)
+
+```toml
+[dependencies]
+nomai-daemon = { path = "..." }
+nomai-providers = { path = "..." }
+```
+
+```rust
+use nomai_daemon::daemon::Daemon;
+
+// Construct without config.toml — pass services directly
+let mut daemon = Daemon::from_services(conn, embedder, llm, 2048)?;
+
+// Register custom RPCs (see Custom RPCs section below)
+daemon.register_handler(std::sync::Arc::new(MyHandler));
+
+// Dispatch any RPC (batch, search, CRUD, MCP tools/call, etc.)
+let resp = daemon.dispatch(req).await;
+```
+
+See `crates/daemon/examples/` for complete working examples:
+
+- `rag.rs` — Naive RAG via lib API
+- `custom_rpc.rs` — Register a custom `stats` RPC
+- `import_markdown.rs` — Batch import with $ref + chunking
+- `graph_rag.rs` — GraphRAG via search + link.neighbors + LLM
+- `events_sync.rs` — Incremental sync via events.list + cursor
+
 All four services share the same `Arc<Mutex<Connection>>`. Emission (events) still happens automatically inside each mutation method.
 
 **Embedding in lib mode**: `EntryService::create` writes the entry + emits the event, but does **not** call the embedding provider (that's daemon-layer orchestration). You must call `entries.write_embedding(id, &vec)` yourself after creating. Same for `chunks.write_embedding`. The `nomai-providers` crate provides the `EmbeddingProvider` trait and an OpenAI-compatible implementation.
 
 ---
-
-## What's next
-
-- **Phase 4 (Collections)** is planned but not yet implemented — for multi-project isolation, schema enforcement, and ACL.
-- **`link.traverse`** (multi-hop graph traversal) is reserved for a future phase. Until then, use `link.neighbors` in a client-side loop.
-- **`search.hybrid`** is reserved. Compose your own fusion in client code.
-
-For implementation history and design rationale, see the spec docs in `docs/superpowers/specs/` (local-only, not in the public repo).
 
 ## Custom RPCs
 
@@ -371,6 +452,7 @@ Use `Daemon::from_services(conn, embedder, llm, dim)` to build a Daemon without 
 ### Example
 
 See `crates/daemon/examples/custom_rpc.rs` for a complete working example that:
+
 - Builds a Daemon via `from_services` (in-memory DB, no config)
 - Implements a `Stats` RPC that queries entry counts
 - Registers it via `register_handler`
@@ -382,3 +464,21 @@ Run: `cargo run --example custom_rpc`
 ### Batch composition
 
 The `batch` RPC lets you compose multiple mutations atomically (see [RPC reference](#batch) above). Custom handlers participate in the ecosystem but are not callable from within `batch` ops (only built-in mutations are batch-eligible).
+
+## What's next
+
+nomai's kernel roadmap (Spec 1-4) is complete:
+
+- **Spec 1** — Plugin Registry + MCP compatibility (done)
+- **Spec 2** — Batch RPC with $ref + atomic transactions (done)
+- **Spec 3** — Lib API + Daemon accessors + from_services (done)
+- **Spec 4** — Application-layer examples (done)
+
+Future work (not yet started):
+
+- **Phase 4 (Collections)** — multi-project isolation, schema enforcement, ACL
+- **`link.traverse`** — recursive CTE multi-hop graph traversal (use `link.neighbors` in a client-side loop for now)
+- **`search.hybrid`** — RRF fusion of FTS + vector scores (compose your own in client code for now)
+- **FTS5 Chinese tokenization** — trigram/jieba for CJK fulltext search
+
+For implementation history and design rationale, see the spec docs in `docs/superpowers/specs/` (local-only, not in the public repo).
