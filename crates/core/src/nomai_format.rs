@@ -115,36 +115,34 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
     let mut source: Option<String> = None;
     let mut created_at: Option<DateTime<Utc>> = None;
     let mut updated_at: Option<DateTime<Utc>> = None;
-    let blocks: Vec<Block> = Vec::new();
 
-    for (idx, raw_line) in input.lines().enumerate() {
+    let mut lines = input.lines().enumerate().peekable();
+
+    // Phase 1: header
+    while let Some((idx, raw)) = lines.peek().copied() {
         let line_no = idx + 1;
-        let line = raw_line;
-
-        if line.is_empty() {
+        if raw.is_empty() {
+            lines.next();
             continue;
         }
-        if line.starts_with('@') {
-            // Body starts here; not handled in this task — leave blocks empty.
-            // (Task 5+ extends this loop to consume the body.)
+        if raw.starts_with('@') {
             break;
         }
-        if !line.starts_with('#') {
+        if !raw.starts_with('#') {
             return Err(ParseError::Syntax {
                 line: line_no,
-                reason: format!(
-                    "expected `#key value` header line or `@type` block; got: {line:?}"
-                ),
+                reason: format!("expected `#key value` header or `@type` block; got: {raw:?}"),
             });
         }
+        lines.next();
 
-        let rest = &line[1..];
+        let rest = &raw[1..];
         let (key, value) = split_header_kv(rest).ok_or_else(|| ParseError::Syntax {
             line: line_no,
             reason: format!("expected `#key value`; got: {rest:?}"),
         })?;
 
-        match key.as_str() {
+        match key {
             "format_version" => {
                 let v: u32 = value.parse().map_err(|_| ParseError::InvalidValue {
                     line: line_no,
@@ -165,13 +163,11 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
                 id = Some(parsed);
             }
             "title" => {
-                title = Some(
-                    unescape_value(&value).map_err(|e| ParseError::InvalidValue {
-                        line: line_no,
-                        field: "title",
-                        reason: e,
-                    })?,
-                );
+                title = Some(unescape_value(value).map_err(|e| ParseError::InvalidValue {
+                    line: line_no,
+                    field: "title",
+                    reason: e,
+                })?);
             }
             "created_at" => {
                 let t: DateTime<Utc> =
@@ -196,28 +192,26 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
                 updated_at = Some(t);
             }
             "tags" => {
-                tags = parse_tags(&value).map_err(|reason| ParseError::InvalidValue {
+                tags = parse_tags(value).map_err(|reason| ParseError::InvalidValue {
                     line: line_no,
                     field: "tags",
                     reason,
                 })?;
             }
             "source" => {
-                source = Some(
-                    unescape_value(&value).map_err(|e| ParseError::InvalidValue {
-                        line: line_no,
-                        field: "source",
-                        reason: e,
-                    })?,
-                );
+                source = Some(unescape_value(value).map_err(|e| ParseError::InvalidValue {
+                    line: line_no,
+                    field: "source",
+                    reason: e,
+                })?);
             }
             _ => {
-                let val = unescape_value(&value).map_err(|e| ParseError::InvalidValue {
+                let val = unescape_value(value).map_err(|e| ParseError::InvalidValue {
                     line: line_no,
                     field: "attrs",
                     reason: e,
                 })?;
-                attrs.insert(key, serde_json::Value::String(val));
+                attrs.insert(key.to_string(), serde_json::Value::String(val));
             }
         }
     }
@@ -246,6 +240,56 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
         key: "updated_at",
     })?;
 
+    // Phase 2: blocks
+    let mut blocks: Vec<Block> = Vec::new();
+    while let Some((idx, raw)) = lines.peek().copied() {
+        let line_no = idx + 1;
+        if raw.is_empty() {
+            lines.next();
+            continue;
+        }
+        if !raw.starts_with('@') {
+            return Err(ParseError::Syntax {
+                line: line_no,
+                reason: format!("expected `@type` block header; got: {raw:?}"),
+            });
+        }
+        lines.next();
+
+        let header_rest = &raw[1..];
+        let (ty_str, attr_str) = split_block_header(header_rest);
+        let block_type =
+            BlockType::from_str(ty_str).ok_or_else(|| ParseError::UnknownBlockType {
+                line: line_no,
+                ty: ty_str.to_string(),
+            })?;
+        let attrs = parse_block_attrs(attr_str, line_no)?;
+
+        // Task 7 will validate @connection required attrs here.
+
+        // Collect body lines until next @type or EOF.
+        let mut text = String::new();
+        while let Some((_, body_raw)) = lines.peek().copied() {
+            if body_raw.starts_with('@') && !body_raw.starts_with("\\@") {
+                break;
+            }
+            lines.next();
+            let line_to_push = if body_raw.starts_with("\\@") {
+                &body_raw[1..] // drop the leading backslash
+            } else {
+                body_raw
+            };
+            text.push_str(line_to_push);
+            text.push('\n');
+        }
+
+        blocks.push(Block {
+            r#type: block_type,
+            text,
+            attrs,
+        });
+    }
+
     Ok(NomaiDoc {
         format_version,
         id,
@@ -259,13 +303,51 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
     })
 }
 
+/// Split a block header line (after the leading `@`) into `(type, attrs_str)`.
+/// e.g. "evidence src=paper.pdf#L42 strength=strong" -> ("evidence", "src=paper.pdf#L42 strength=strong").
+/// e.g. "claim" -> ("claim", "").
+fn split_block_header(s: &str) -> (&str, &str) {
+    match s.find(char::is_whitespace) {
+        Some(idx) => (&s[..idx], s[idx..].trim_start()),
+        None => (s, ""),
+    }
+}
+
+/// Parse space-separated `key=value` pairs from a block header's attr string.
+/// Same value-escaping rules as header values.
+fn parse_block_attrs(
+    s: &str,
+    line_no: usize,
+) -> Result<JsonMap<String, serde_json::Value>, ParseError> {
+    let mut out = JsonMap::new();
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(out);
+    }
+    for pair in s.split_whitespace() {
+        let eq = pair.find('=').ok_or_else(|| ParseError::Syntax {
+            line: line_no,
+            reason: format!("block attr missing `=`: {pair:?}"),
+        })?;
+        let key = &pair[..eq];
+        let value = &pair[eq + 1..];
+        let val = unescape_value(value).map_err(|e| ParseError::InvalidValue {
+            line: line_no,
+            field: "block_attr",
+            reason: e,
+        })?;
+        out.insert(key.to_string(), serde_json::Value::String(val));
+    }
+    Ok(out)
+}
+
 /// Split "key value" or "key \"quoted value\"" — returns (key, value).
 /// Returns None if the line has no key.
-fn split_header_kv(s: &str) -> Option<(String, String)> {
+fn split_header_kv(s: &str) -> Option<(&str, &str)> {
     let mut iter = s.splitn(2, char::is_whitespace);
-    let key = iter.next()?.to_string();
+    let key = iter.next()?;
     let rest = iter.next()?.trim_start_matches(' ');
-    Some((key, rest.to_string()))
+    Some((key, rest))
 }
 
 /// Unescape a header value. Bare tokens pass through; quoted values unwrap
@@ -541,5 +623,25 @@ mod tests {
 ";
         let doc = parse(input).unwrap();
         assert_eq!(doc.tags, vec!["astronomy", "science, history", " math"]);
+    }
+
+    #[test]
+    fn parse_single_block_no_attrs() {
+        let input = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Hello
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@claim
+Earth orbits the sun.
+";
+        let doc = parse(input).unwrap();
+        assert_eq!(doc.blocks.len(), 1);
+        let block = &doc.blocks[0];
+        assert_eq!(block.r#type, BlockType::Claim);
+        assert!(block.attrs.is_empty());
+        assert_eq!(block.text, "Earth orbits the sun.\n");
     }
 }
