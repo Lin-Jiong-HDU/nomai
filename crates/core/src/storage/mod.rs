@@ -128,10 +128,13 @@ mod tests {
     fn v6_migration_preserves_existing_data() {
         let mut conn = Connection::open_in_memory().unwrap();
         run_migrations(&mut conn).unwrap();
-        // Insert via old schema (no fs_path/block_id) — should succeed.
+        // Insert without fs_path/block_id (legacy columns nullable). body is
+        // still NOT NULL in V6 but is dropped in V7 — this test runs the full
+        // migration chain through V7 so body is gone. Use the V7-era column
+        // set (no body).
         conn.execute(
-            "INSERT INTO entries (id, title, body, tags, attrs, created_at, updated_at)
-             VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAV', 't', 'b', '[]', '{}', '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+            "INSERT INTO entries (id, title, tags, attrs, created_at, updated_at)
+             VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAV', 't', '[]', '{}', '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
             [],
         )
         .unwrap();
@@ -143,5 +146,45 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn v7_migration_drops_entries_body_column() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(entries)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            !cols.contains(&"body".to_string()),
+            "V7 should drop entries.body column"
+        );
+        // fs_path, fs_mtime still present from V6 (V7 only drops body).
+        assert!(cols.contains(&"fs_path".to_string()));
+        assert!(cols.contains(&"fs_mtime".to_string()));
+    }
+
+    #[test]
+    fn v7_migration_drops_v1_fts5_triggers() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        // V1 created entries_ai / entries_ad / entries_au. V7 drops them so
+        // INSERTs into entries no longer maintain fts_entries automatically
+        // (EntryService writes fts_entries directly in the new world).
+        for trigger in ["entries_ai", "entries_ad", "entries_au"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type='trigger' AND name=?1",
+                    [trigger],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "V7 should drop trigger {trigger}");
+        }
     }
 }

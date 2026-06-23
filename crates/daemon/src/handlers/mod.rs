@@ -164,7 +164,7 @@ mod tests {
                 "entry.create",
                 json!({
                     "title": "Note",
-                    "body": "Hello world",
+                    "blocks":[{"type":"note","text":"Hello world"}],
                 }),
             ))
             .await;
@@ -199,7 +199,7 @@ mod tests {
                 "entry.create",
                 json!({
                     "title": "X",
-                    "body": "Y",
+                    "blocks":[{"type":"note","text":"Y"}],
                 }),
             ))
             .await;
@@ -220,7 +220,11 @@ mod tests {
         let a = entries
             .create(nomai_core::CreateEntry {
                 title: "a".into(),
-                body: "near query".into(),
+                blocks: vec![nomai_core::BlockInput {
+                    r#type: "note".into(),
+                    text: "near query".into(),
+                    attrs: None,
+                }],
                 tags: None,
                 attrs: None,
                 source: None,
@@ -229,7 +233,11 @@ mod tests {
         let b = entries
             .create(nomai_core::CreateEntry {
                 title: "b".into(),
-                body: "far".into(),
+                blocks: vec![nomai_core::BlockInput {
+                    r#type: "note".into(),
+                    text: "far".into(),
+                    attrs: None,
+                }],
                 tags: None,
                 attrs: None,
                 source: None,
@@ -320,11 +328,17 @@ mod tests {
 
         // Seed two entries (embedding mock mounted by mount_embedding_mock above).
         let a_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"a","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let a_id = a_resp.result.unwrap()["id"].as_str().unwrap().to_string();
         let b_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"b","blocks":[{"type":"note","text":"y"}]}),
+            ))
             .await;
         let b_id = b_resp.result.unwrap()["id"].as_str().unwrap().to_string();
 
@@ -356,7 +370,10 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let b_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"b","blocks":[{"type":"note","text":"y"}]}),
+            ))
             .await;
         let b_id = b_resp.result.unwrap()["id"].as_str().unwrap().to_string();
         let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -382,15 +399,24 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let a = daemon
-            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"a","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let a_id = a.result.unwrap()["id"].as_str().unwrap().to_string();
         let b = daemon
-            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"b","blocks":[{"type":"note","text":"y"}]}),
+            ))
             .await;
         let b_id = b.result.unwrap()["id"].as_str().unwrap().to_string();
         let c = daemon
-            .dispatch(req("entry.create", json!({"title":"c","body":"z"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"c","blocks":[{"type":"note","text":"z"}]}),
+            ))
             .await;
         let c_id = c.result.unwrap()["id"].as_str().unwrap().to_string();
 
@@ -423,11 +449,17 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let a = daemon
-            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"a","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let a_id = a.result.unwrap()["id"].as_str().unwrap().to_string();
         let b = daemon
-            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"b","blocks":[{"type":"note","text":"y"}]}),
+            ))
             .await;
         let b_id = b.result.unwrap()["id"].as_str().unwrap().to_string();
 
@@ -458,11 +490,17 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let a = daemon
-            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"a","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let a_id = a.result.unwrap()["id"].as_str().unwrap().to_string();
         let b = daemon
-            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"b","blocks":[{"type":"note","text":"y"}]}),
+            ))
             .await;
         let b_id = b.result.unwrap()["id"].as_str().unwrap().to_string();
 
@@ -517,11 +555,18 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let create_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"Note","body":"Hello"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"Note","blocks":[{"type":"note","text":"Hello"}]}),
+            ))
             .await;
         assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
 
-        let list_resp = daemon.dispatch(req("events.list", json!({}))).await;
+        // entry.create also emits block.created (one per block). Filter to
+        // entry.created so this test stays focused on the entry event.
+        let list_resp = daemon
+            .dispatch(req("events.list", json!({"type": "entry.created"})))
+            .await;
         assert!(list_resp.error.is_none(), "{:?}", list_resp.error);
         let result = list_resp.result.unwrap();
         let items = result["items"].as_array().unwrap();
@@ -539,7 +584,10 @@ mod tests {
 
         // Create + update → emits entry.created + entry.updated
         let create_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"orig","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"orig","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let id = create_resp.result.unwrap()["id"]
             .as_str()
@@ -566,10 +614,16 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let _create_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"X","body":"y"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"X","blocks":[{"type":"note","text":"y"}]}),
+            ))
             .await;
-        // Get the event id from events.list
-        let list_resp = daemon.dispatch(req("events.list", json!({}))).await;
+        // Get the entry.created event id (filter by type so block.created
+        // — also emitted by entry.create — doesn't get picked up first).
+        let list_resp = daemon
+            .dispatch(req("events.list", json!({"type": "entry.created"})))
+            .await;
         let event_id = list_resp.result.unwrap()["items"][0]["id"]
             .as_str()
             .unwrap()
@@ -601,29 +655,38 @@ mod tests {
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
 
-        // Create 3 entries → 3 events
+        // Create 3 entries → 3 entry.created + 3 block.created = 6 events.
         daemon
-            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"a","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         daemon
-            .dispatch(req("entry.create", json!({"title":"b","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"b","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let _last_create = daemon
-            .dispatch(req("entry.create", json!({"title":"c","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"c","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
 
         // Get all events; the last event_id is the boundary.
         let list_resp = daemon.dispatch(req("events.list", json!({}))).await;
         let result = list_resp.result.unwrap();
         let items = result["items"].as_array().unwrap();
-        assert_eq!(items.len(), 3);
-        let last_event_id = items[2]["id"].as_str().unwrap().to_string();
+        assert_eq!(items.len(), 6);
+        let last_event_id = items[5]["id"].as_str().unwrap().to_string();
 
         // Purge events with id < last_event_id (exclusive).
         let purge_resp = daemon
             .dispatch(req("events.purge", json!({"before": last_event_id})))
             .await;
-        assert_eq!(purge_resp.result.unwrap()["deleted"], 2);
+        assert_eq!(purge_resp.result.unwrap()["deleted"], 5);
 
         // Verify only 1 event remains.
         let list_resp2 = daemon.dispatch(req("events.list", json!({}))).await;
@@ -638,31 +701,32 @@ mod tests {
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
 
-        // Create 3 entries
+        // Create 3 entries → 6 events total (each entry.create emits
+        // entry.created + block.created).
         for i in 0..3 {
             daemon
                 .dispatch(req(
                     "entry.create",
-                    json!({"title": format!("e{i}"), "body": "x"}),
+                    json!({"title": format!("e{i}"), "blocks":[{"type":"note","text":"x"}]}),
                 ))
                 .await;
         }
 
-        // Page 1: limit=2
+        // Page 1: limit=4
         let p1 = daemon
-            .dispatch(req("events.list", json!({"limit": 2})))
+            .dispatch(req("events.list", json!({"limit": 4})))
             .await;
         let p1_result = p1.result.unwrap();
-        assert_eq!(p1_result["items"].as_array().unwrap().len(), 2);
+        assert_eq!(p1_result["items"].as_array().unwrap().len(), 4);
         assert_eq!(p1_result["has_more"], true);
-        let last_id = p1_result["items"][1]["id"].as_str().unwrap().to_string();
+        let last_id = p1_result["items"][3]["id"].as_str().unwrap().to_string();
 
         // Page 2: since = last_id from page 1
         let p2 = daemon
-            .dispatch(req("events.list", json!({"limit": 2, "since": last_id})))
+            .dispatch(req("events.list", json!({"limit": 4, "since": last_id})))
             .await;
         let p2_result = p2.result.unwrap();
-        assert_eq!(p2_result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(p2_result["items"].as_array().unwrap().len(), 2);
         assert_eq!(p2_result["has_more"], false);
     }
 
@@ -673,11 +737,17 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let a = daemon
-            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"a","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let a_id = a.result.unwrap()["id"].as_str().unwrap().to_string();
         let b = daemon
-            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"b","blocks":[{"type":"note","text":"y"}]}),
+            ))
             .await;
         let b_id = b.result.unwrap()["id"].as_str().unwrap().to_string();
 
@@ -708,7 +778,10 @@ mod tests {
 
         // Create an entry first.
         let entry_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"doc","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"doc","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let entry_id = entry_resp.result.unwrap()["id"]
             .as_str()
@@ -757,7 +830,10 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let entry_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"d","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let entry_id = entry_resp.result.unwrap()["id"]
             .as_str()
@@ -792,7 +868,10 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let entry_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"d","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let entry_id = entry_resp.result.unwrap()["id"]
             .as_str()
@@ -845,7 +924,10 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let entry_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"d","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let entry_id = entry_resp.result.unwrap()["id"]
             .as_str()
@@ -880,7 +962,10 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let entry_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"d","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let entry_id = entry_resp.result.unwrap()["id"]
             .as_str()
@@ -914,7 +999,10 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let entry_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"d","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let entry_id = entry_resp.result.unwrap()["id"]
             .as_str()
@@ -970,7 +1058,10 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         let entry_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"d","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"d","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         let entry_id = entry_resp.result.unwrap()["id"]
             .as_str()
@@ -1051,7 +1142,10 @@ mod tests {
 
         // Seed one entry via the core RPC path.
         let create_resp = daemon
-            .dispatch(req("entry.create", json!({"title":"hi","body":"world"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"hi","blocks":[{"type":"note","text":"world"}]}),
+            ))
             .await;
         assert!(create_resp.error.is_none());
         let created_id = create_resp.result.unwrap()["id"]
@@ -1162,8 +1256,8 @@ mod tests {
                 "batch",
                 json!({
                     "ops": [
-                        {"id": "e1", "method": "entry.create", "params": {"title": "doc", "body": "body text"}},
-                        {"id": "e2", "method": "entry.create", "params": {"title": "target", "body": "target body"}},
+                        {"id": "e1", "method": "entry.create", "params": {"title": "doc", "blocks":[{"type":"note","text":"body text"}]}},
+                        {"id": "e2", "method": "entry.create", "params": {"title": "target", "blocks":[{"type":"note","text":"target body"}]}},
                         {"id": "c1", "method": "chunk.create", "params": {
                             "entry_id": {"$ref": "e1.id"},
                             "ordinal": 0,
@@ -1211,7 +1305,7 @@ mod tests {
                 "batch",
                 json!({
                     "ops": [
-                        {"id": "e1", "method": "entry.create", "params": {"title": "will rollback", "body": "x"}},
+                        {"id": "e1", "method": "entry.create", "params": {"title": "will rollback", "blocks":[{"type":"note","text":"x"}]}},
                         {"method": "chunk.create", "params": {
                             "entry_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",  // phantom entry → FK violation
                             "ordinal": 0,
@@ -1321,9 +1415,9 @@ mod tests {
                 "batch",
                 json!({
                     "ops": [
-                        {"method": "entry.create", "params": {"title": "a", "body": "text a"}},
-                        {"method": "entry.create", "params": {"title": "b", "body": "text b"}},
-                        {"method": "entry.create", "params": {"title": "c", "body": "text c"}}
+                        {"method": "entry.create", "params": {"title": "a", "blocks":[{"type":"note","text":"text a"}]}},
+                        {"method": "entry.create", "params": {"title": "b", "blocks":[{"type":"note","text":"text b"}]}},
+                        {"method": "entry.create", "params": {"title": "c", "blocks":[{"type":"note","text":"text c"}]}}
                     ]
                 }),
             ))
@@ -1343,7 +1437,7 @@ mod tests {
                 "batch",
                 json!({
                     "ops": [
-                        {"id": "e1", "method": "entry.create", "params": {"title": "doc", "body": "x"}},
+                        {"id": "e1", "method": "entry.create", "params": {"title": "doc", "blocks":[{"type":"note","text":"x"}]}},
                         {"id": "c1", "method": "chunk.create", "params": {
                             "entry_id": {"$ref": "e1.id"},
                             "ordinal": 0,
@@ -1414,10 +1508,16 @@ mod tests {
         // Create two entries (each triggers embedding → 2 rows in emb_cache
         // under "test-model" — one per body hash; same body → 1 row).
         daemon
-            .dispatch(req("entry.create", json!({"title":"a","body":"x"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"a","blocks":[{"type":"note","text":"x"}]}),
+            ))
             .await;
         daemon
-            .dispatch(req("entry.create", json!({"title":"b","body":"y"})))
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"b","blocks":[{"type":"note","text":"y"}]}),
+            ))
             .await;
 
         // Inject a row under a different model directly so by_model has 2 keys.

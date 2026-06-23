@@ -39,7 +39,9 @@ impl BlockService {
     #[doc(hidden)]
     pub fn for_test() -> Result<Self, CoreError> {
         let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
-        crate::EntryService::new(conn.clone())?;
+        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", ulid::Ulid::new()));
+        let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
+        crate::EntryService::new(conn.clone(), content_store)?;
         Self::new(conn)
     }
 
@@ -227,7 +229,7 @@ fn map_constraint_violation(e: rusqlite::Error) -> CoreError {
 /// `offset` is kept for signature symmetry with `row_to_entry` (which also
 /// takes an offset for the same reason — currently unused, reserved for
 /// future prepared statements that prefix the row with other columns).
-fn row_to_block(row: &rusqlite::Row<'_>, _offset: usize) -> rusqlite::Result<Block> {
+pub(crate) fn row_to_block(row: &rusqlite::Row<'_>, _offset: usize) -> rusqlite::Result<Block> {
     use chrono::{DateTime, Utc};
 
     let id_str: String = row.get(0)?;
@@ -267,20 +269,37 @@ mod tests {
     use crate::{CreateEntry, EntryService};
     use serde_json::json;
 
-    /// Create an entry via EntryService and return its ULID. BlockService
+    /// Create an entry (with no blocks) and return its ULID. BlockService
     /// tests need this because `blocks.entry_id` has an FK to `entries.id`.
+    /// Uses direct SQL instead of EntryService::create because the latter
+    /// requires at least one block and would collide with the block the test
+    /// is about to create at ordinal 0.
     fn seed_entry(conn: Arc<Mutex<rusqlite::Connection>>) -> Ulid {
-        let entries = EntryService::new(conn).unwrap();
-        let entry = entries
-            .create(CreateEntry {
-                title: "seed".into(),
-                body: "seed body".into(),
-                tags: None,
-                attrs: None,
-                source: None,
-            })
-            .unwrap();
-        entry.id
+        let id = Ulid::new();
+        let now = chrono::Utc::now();
+        let conn = conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO entries (id, title, tags, attrs, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                id.to_string(),
+                "seed",
+                "[]",
+                "{}",
+                now.to_rfc3339(),
+                now.to_rfc3339(),
+            ],
+        )
+        .unwrap();
+        // Also seed fts_entries so V1 trigger absence doesn't break fulltext
+        // cleanup tests. The block_service tests don't exercise FTS directly
+        // but keeping fts in sync is consistent with the production path.
+        conn.execute(
+            "INSERT INTO fts_entries (entry_id, title, body) VALUES (?1, ?2, ?3)",
+            rusqlite::params![id.to_string(), "seed", ""],
+        )
+        .unwrap();
+        id
     }
 
     #[test]
@@ -481,21 +500,9 @@ mod tests {
     fn list_only_returns_blocks_for_target_entry() {
         let svc = BlockService::for_test().unwrap();
         let entry_a = seed_entry(svc.conn.clone());
-        // Need a second entry. seed_entry creates via EntryService::create
-        // which generates a fresh ULID each call.
-        let entry_b = {
-            let entries = EntryService::new(svc.conn.clone()).unwrap();
-            entries
-                .create(CreateEntry {
-                    title: "second".into(),
-                    body: "b".into(),
-                    tags: None,
-                    attrs: None,
-                    source: None,
-                })
-                .unwrap()
-                .id
-        };
+        // Need a second entry. seed_entry uses direct SQL and generates a
+        // fresh ULID each call.
+        let entry_b = seed_entry(svc.conn.clone());
 
         seed_block(&svc, entry_a, 0, "note");
         seed_block(&svc, entry_a, 1, "note");
@@ -569,19 +576,27 @@ mod tests {
         // The FK on blocks.entry_id is ON DELETE CASCADE. Verify EntryService::delete
         // removes the entry's blocks.
         let svc = BlockService::for_test().unwrap();
-        let entries = EntryService::new(svc.conn.clone()).unwrap();
+        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", ulid::Ulid::new()));
+        let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
+        let entries = EntryService::new(svc.conn.clone(), content_store).unwrap();
         let entry = entries
             .create(CreateEntry {
                 title: "x".into(),
-                body: "y".into(),
+                blocks: vec![crate::block_model::BlockInput {
+                    r#type: "note".into(),
+                    text: "y".into(),
+                    attrs: None,
+                }],
                 tags: None,
                 attrs: None,
                 source: None,
             })
             .unwrap();
-        seed_block(&svc, entry.id, 0, "note");
+        // CreateEntry above created block at ordinal 0; add two more at 1, 2.
         seed_block(&svc, entry.id, 1, "note");
-        assert_eq!(svc.list(entry.id).unwrap().total, 2);
+        seed_block(&svc, entry.id, 2, "note");
+        // 3 total blocks: 1 from CreateEntry + 2 from seed_block.
+        assert_eq!(svc.list(entry.id).unwrap().total, 3);
 
         entries.delete(entry.id).unwrap();
 

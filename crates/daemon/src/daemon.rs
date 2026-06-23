@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
-use nomai_core::{ChunkService, CoreError, EntryService, EventService, LinkService};
+use nomai_core::{ChunkService, ContentStore, CoreError, EntryService, EventService, LinkService};
 use nomai_providers::{
     CachedEmbedder, EmbeddingProvider, LlmProvider, OpenAiCompatibleEmbed, OpenAiCompatibleLlm,
 };
@@ -40,8 +40,21 @@ impl Daemon {
         let conn = Connection::open(&db_path)?;
         let conn = Arc::new(Mutex::new(conn));
 
+        // Construct FS-backed ContentStore from config.data.knowledge_root
+        // (or the default <data_dir>/store/). Created here so it can be
+        // shared across EntryService + future Plan 5 index.sync.
+        let default_root = crate::config::default_knowledge_root();
+        let knowledge_root = expand_knowledge_root(
+            config
+                .data
+                .knowledge_root
+                .as_deref()
+                .unwrap_or(&default_root),
+        )?;
+        let content_store = Arc::new(ContentStore::new(knowledge_root));
+
         // Run migrations + ensure vec_embeddings / vec_chunk_embeddings exist.
-        let entries = Arc::new(EntryService::new(conn.clone())?);
+        let entries = Arc::new(EntryService::new(conn.clone(), content_store)?);
         let links = Arc::new(LinkService::new(conn.clone())?);
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
@@ -175,7 +188,9 @@ impl Daemon {
     /// reading a config.toml file. For lib-mode users who construct their
     /// own EntryService / EmbeddingProvider / LlmProvider.
     ///
-    /// The `cache_model` name namespacing the `emb_cache` rows; pass the
+    /// The caller supplies the FS-backed `ContentStore` so it can be shared
+    /// with any other services they manage outside the daemon. The
+    /// `cache_model` name namespacing the `emb_cache` rows; pass the
     /// underlying model identifier so cache stats and clears target the
     /// right namespace. `warn_rows` is the soft capacity threshold at which
     /// `cache.stats` starts returning `warning: true` (use `100_000` as a
@@ -183,13 +198,14 @@ impl Daemon {
     #[allow(dead_code)]
     pub fn from_services(
         conn: Arc<std::sync::Mutex<Connection>>,
+        content_store: Arc<ContentStore>,
         embedder: Arc<dyn EmbeddingProvider>,
         llm: Arc<dyn LlmProvider>,
         embedding_dim: usize,
         cache_model: impl Into<String>,
         warn_rows: u64,
     ) -> Result<Self, CoreError> {
-        let entries = Arc::new(EntryService::new(conn.clone())?);
+        let entries = Arc::new(EntryService::new(conn.clone(), content_store)?);
         let links = Arc::new(LinkService::new(conn.clone())?);
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
@@ -312,6 +328,24 @@ fn expand_db_path(path: &std::path::Path) -> Result<std::path::PathBuf, CoreErro
     Ok(expanded)
 }
 
+/// Resolve `knowledge_root` (FS-backed content storage root): expand `~` to
+/// `$HOME` and `create_dir_all` the path. Unlike `expand_db_path`, the path
+/// itself is the storage directory (not a file with a parent dir).
+fn expand_knowledge_root(path: &std::path::Path) -> Result<std::path::PathBuf, CoreError> {
+    let s = path.to_string_lossy();
+    let expanded = if s.starts_with('~') {
+        let home = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .map_err(|_| CoreError::Config("HOME not set; cannot expand ~".into()))?;
+        home.join(path.strip_prefix("~").unwrap_or(path))
+    } else {
+        path.to_path_buf()
+    };
+    std::fs::create_dir_all(&expanded)
+        .map_err(|e| CoreError::Config(format!("create knowledge_root dir: {e}")))?;
+    Ok(expanded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +356,14 @@ mod tests {
         let nested = tmp.path().join("a/b/c/data.sqlite");
         let expanded = expand_db_path(&nested).unwrap();
         assert!(expanded.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn expand_knowledge_root_creates_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("x/y/z/store");
+        let expanded = expand_knowledge_root(&nested).unwrap();
+        assert!(expanded.exists());
+        assert!(expanded.is_dir());
     }
 }

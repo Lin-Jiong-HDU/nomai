@@ -9,7 +9,7 @@ use ulid::Ulid;
 pub struct Entry {
     pub id: Ulid,
     pub title: String,
-    pub body: String,
+    pub blocks: Vec<crate::block_model::Block>,
     pub tags: Vec<String>,
     pub attrs: Value,
     pub source: Option<String>,
@@ -27,7 +27,7 @@ mod tests {
         let entry = Entry {
             id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
             title: "Hello".into(),
-            body: "# Body\n\nText".into(),
+            blocks: vec![],
             tags: vec!["a".into(), "b".into()],
             attrs: json!({"k": "v"}),
             source: Some("test".into()),
@@ -44,7 +44,7 @@ mod tests {
         let entry = Entry {
             id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
             title: "t".into(),
-            body: "b".into(),
+            blocks: vec![],
             tags: vec![],
             attrs: json!({}),
             source: None,

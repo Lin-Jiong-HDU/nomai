@@ -52,7 +52,9 @@ fn main() {
     let conn = Arc::new(std::sync::Mutex::new(
         rusqlite::Connection::open_in_memory().unwrap(),
     ));
-    let entries = Arc::new(EntryService::new(conn.clone()).unwrap());
+    let tmp_dir = std::env::temp_dir().join(format!("nomai-bench-{}", ulid::Ulid::new()));
+    let content_store = Arc::new(nomai_core::ContentStore::new(tmp_dir));
+    let entries = Arc::new(EntryService::new(conn.clone(), content_store).unwrap());
     let links = Arc::new(LinkService::new(conn.clone()).unwrap());
 
     // ----- Seed: 1000 entries + hub-and-spoke + chain -----
@@ -62,9 +64,13 @@ fn main() {
         let e = entries
             .create(CreateEntry {
                 title: format!("Entry {i}"),
-                body: format!(
-                    "Body of entry {i} with some markdown content and references to topic {i}."
-                ),
+                blocks: vec![nomai_core::BlockInput {
+                    r#type: "note".into(),
+                    text: format!(
+                        "Body of entry {i} with some markdown content and references to topic {i}."
+                    ),
+                    attrs: None,
+                }],
                 tags: Some(vec![format!("tag-{}", i % 10), format!("cat-{}", i % 5)]),
                 attrs: Some(serde_json::json!({"index": i, "bucket": i / 100})),
                 source: None,
