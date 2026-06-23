@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection};
 use ulid::Ulid;
 
-use crate::block_model::{Block, CreateBlock};
+use crate::block_model::{Block, BlockListResult, CreateBlock};
 use crate::error::CoreError;
 use crate::storage;
 
@@ -119,6 +119,39 @@ impl BlockService {
 
         Ok(block)
     }
+
+    /// List all blocks for an entry, ordered by ordinal. Empty result if
+    /// the entry has no blocks or doesn't exist (callers can distinguish
+    /// via EntryService::get if needed).
+    pub fn list(&self, entry_id: Ulid) -> Result<BlockListResult, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, entry_id, ordinal, type, text, attrs, created_at, updated_at
+             FROM blocks WHERE entry_id = ?1
+             ORDER BY ordinal ASC",
+        )?;
+        let items: Result<Vec<Block>, _> = stmt
+            .query_map(params![entry_id.to_string()], |row| row_to_block(row, 0))?
+            .collect();
+        let items = items?;
+        let total = items.len() as u64;
+        Ok(BlockListResult { items, total })
+    }
+
+    /// Fetch a single block by id. NotFound if missing.
+    pub fn get(&self, id: Ulid) -> Result<Block, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        match conn.query_row(
+            "SELECT id, entry_id, ordinal, type, text, attrs, created_at, updated_at
+             FROM blocks WHERE id = ?1",
+            params![id.to_string()],
+            |row| row_to_block(row, 0),
+        ) {
+            Ok(block) => Ok(block),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(CoreError::NotFound(id)),
+            Err(e) => Err(CoreError::Storage(e)),
+        }
+    }
 }
 
 /// Map SQLite ConstraintViolation (FK or UNIQUE) to `CoreError::Validation`.
@@ -131,6 +164,45 @@ fn map_constraint_violation(e: rusqlite::Error) -> CoreError {
         }
         other => CoreError::Storage(other),
     }
+}
+
+/// Map a SQLite row to a `Block`. Expects columns in the canonical order:
+/// id, entry_id, ordinal, type, text, attrs, created_at, updated_at.
+///
+/// `offset` is kept for signature symmetry with `row_to_entry` (which also
+/// takes an offset for the same reason — currently unused, reserved for
+/// future prepared statements that prefix the row with other columns).
+fn row_to_block(row: &rusqlite::Row<'_>, _offset: usize) -> rusqlite::Result<Block> {
+    use chrono::{DateTime, Utc};
+
+    let id_str: String = row.get(0)?;
+    let entry_id_str: String = row.get(1)?;
+    let ordinal: u32 = row.get(2)?;
+    let ty: String = row.get(3)?;
+    let text: String = row.get(4)?;
+    let attrs_str: String = row.get(5)?;
+    let created_str: String = row.get(6)?;
+    let updated_str: String = row.get(7)?;
+
+    let attrs: serde_json::Value =
+        serde_json::from_str(&attrs_str).unwrap_or(serde_json::Value::Object(Default::default()));
+
+    Ok(Block {
+        id: id_str.parse().expect("ULID stored in DB is always valid"),
+        entry_id: entry_id_str
+            .parse()
+            .expect("ULID stored in DB is always valid"),
+        ordinal,
+        r#type: ty,
+        text,
+        attrs,
+        created_at: DateTime::parse_from_rfc3339(&created_str)
+            .expect("RFC3339 stored in DB is always valid")
+            .with_timezone(&Utc),
+        updated_at: DateTime::parse_from_rfc3339(&updated_str)
+            .expect("RFC3339 stored in DB is always valid")
+            .with_timezone(&Utc),
+    })
 }
 
 #[cfg(test)]
@@ -310,5 +382,88 @@ mod tests {
             })
             .unwrap();
         assert_eq!(block.attrs, json!({}));
+    }
+
+    fn seed_block(svc: &BlockService, entry_id: Ulid, ordinal: u32, ty: &str) -> Block {
+        svc.create(CreateBlock {
+            entry_id,
+            ordinal,
+            r#type: ty.into(),
+            text: format!("block {ordinal}"),
+            attrs: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn list_returns_blocks_ordered_by_ordinal() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+
+        // Insert out of order to verify ORDER BY
+        seed_block(&svc, entry_id, 2, "note");
+        seed_block(&svc, entry_id, 0, "claim");
+        seed_block(&svc, entry_id, 1, "evidence");
+
+        let result = svc.list(entry_id).unwrap();
+        assert_eq!(result.total, 3);
+        assert_eq!(result.items[0].ordinal, 0);
+        assert_eq!(result.items[1].ordinal, 1);
+        assert_eq!(result.items[2].ordinal, 2);
+        assert_eq!(result.items[0].r#type, "claim");
+    }
+
+    #[test]
+    fn list_returns_empty_for_entry_with_no_blocks() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        let result = svc.list(entry_id).unwrap();
+        assert_eq!(result.total, 0);
+        assert!(result.items.is_empty());
+    }
+
+    #[test]
+    fn list_only_returns_blocks_for_target_entry() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_a = seed_entry(svc.conn.clone());
+        // Need a second entry. seed_entry creates via EntryService::create
+        // which generates a fresh ULID each call.
+        let entry_b = {
+            let entries = EntryService::new(svc.conn.clone()).unwrap();
+            entries
+                .create(CreateEntry {
+                    title: "second".into(),
+                    body: "b".into(),
+                    tags: None,
+                    attrs: None,
+                    source: None,
+                })
+                .unwrap()
+                .id
+        };
+
+        seed_block(&svc, entry_a, 0, "note");
+        seed_block(&svc, entry_a, 1, "note");
+        seed_block(&svc, entry_b, 0, "note");
+
+        assert_eq!(svc.list(entry_a).unwrap().total, 2);
+        assert_eq!(svc.list(entry_b).unwrap().total, 1);
+    }
+
+    #[test]
+    fn get_returns_block_by_id() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        let created = seed_block(&svc, entry_id, 0, "claim");
+        let fetched = svc.get(created.id).unwrap();
+        assert_eq!(created, fetched);
+    }
+
+    #[test]
+    fn get_returns_not_found_for_missing_id() {
+        let svc = BlockService::for_test().unwrap();
+        let fake_id = Ulid::new();
+        let err = svc.get(fake_id).unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
     }
 }
