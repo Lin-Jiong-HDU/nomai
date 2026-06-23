@@ -5,7 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 
-use nomai_core::{ChunkService, ContentStore, CoreError, EntryService, EventService, LinkService};
+use nomai_core::{
+    ChunkService, ContentStore, CoreError, EntryService, EventService, LinkService,
+    chunk_model::DimReconciliation,
+};
 use nomai_providers::{
     CachedEmbedder, EmbeddingProvider, LlmProvider, OpenAiCompatibleEmbed, OpenAiCompatibleLlm,
 };
@@ -60,7 +63,21 @@ impl Daemon {
         let links = Arc::new(LinkService::new(conn.clone())?);
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
-        chunks.ensure_vec_chunk_embeddings(config.embedding.dim)?;
+        let dim_result = chunks.ensure_vec_chunk_embeddings(config.embedding.dim)?;
+        match dim_result {
+            DimReconciliation::Created { dim } => {
+                eprintln!("info: created vec_chunk_embeddings with dim={dim}");
+            }
+            DimReconciliation::Consistent { dim: _ } => {
+                // Quiet — table already matches; nothing to report at boot.
+            }
+            DimReconciliation::Recreated { from, to } => {
+                eprintln!(
+                    "warn: recreated vec_chunk_embeddings (dim {from} → {to}); \
+                     embeddings will re-populate from emb_cache on next search"
+                );
+            }
+        }
 
         // Read API keys (config.validate already checked env var presence).
         let embedding_key = std::env::var(&config.embedding.api_key_env).map_err(|_| {
