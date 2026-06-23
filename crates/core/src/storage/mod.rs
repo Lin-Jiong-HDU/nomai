@@ -17,6 +17,20 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), CoreError> {
         .map_err(|e| CoreError::Migration(e.to_string()))
 }
 
+/// Map SQLite ConstraintViolation (FK or UNIQUE) to CoreError::Validation.
+/// Other errors pass through as CoreError::Storage. Used by all services
+/// that do INSERT into tables with FK / UNIQUE constraints. Dedup of the
+/// former per-service local helpers (Plan 4 P2-3).
+pub fn map_constraint_violation(e: rusqlite::Error) -> crate::error::CoreError {
+    use rusqlite::ffi::ErrorCode;
+    match e {
+        rusqlite::Error::SqliteFailure(err, _) if err.code == ErrorCode::ConstraintViolation => {
+            crate::error::CoreError::Validation(format!("constraint violation: {e}"))
+        }
+        other => crate::error::CoreError::Storage(other),
+    }
+}
+
 /// Register the sqlite-vec extension globally so any subsequently-opened
 /// `Connection` supports `vec0` virtual tables. Idempotent and safe to call
 /// multiple times.
@@ -186,5 +200,68 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 0, "V7 should drop trigger {trigger}");
         }
+    }
+
+    #[test]
+    fn v8_migration_drops_entry_level_embeddings_and_fts() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('vec_embeddings', 'fts_entries')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "V8 should drop vec_embeddings + fts_entries");
+    }
+
+    #[test]
+    fn v8_migration_creates_fts_blocks() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fts_blocks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "V8 should create fts_blocks virtual table");
+    }
+
+    #[test]
+    fn v8_migration_drops_chunks_entry_id() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(chunks)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            !cols.contains(&"entry_id".to_string()),
+            "chunks.entry_id should be gone"
+        );
+        assert!(
+            cols.contains(&"block_id".to_string()),
+            "chunks.block_id must remain"
+        );
+    }
+
+    #[test]
+    fn v8_migration_creates_blocks_fts_triggers() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN ('blocks_ai', 'blocks_ad')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2, "V8 should create blocks_ai + blocks_ad triggers");
     }
 }

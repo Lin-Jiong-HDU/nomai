@@ -1,8 +1,12 @@
 //! Reference Naive RAG implementation.
 //!
-//! Demonstrates that `nomai-core` (EntryService) + `nomai-providers`
-//! (EmbeddingProvider + LlmProvider) are sufficient to build a RAG flow
-//! *without* any daemon-level RAG support: no qa.ask RPC, no subprocess.
+//! Demonstrates that `nomai-core` (EntryService + ChunkService) +
+//! `nomai-providers` (EmbeddingProvider + LlmProvider) are sufficient to
+//! build a RAG flow *without* any daemon-level RAG support: no qa.ask RPC,
+//! no subprocess.
+//!
+//! Plan 4: semantic search runs over chunks (block-derived); each hit's
+//! parent block/entry is reachable via JOIN.
 //!
 //! Usage:
 //!     cargo run --example rag -- "your question here"
@@ -25,7 +29,7 @@ use nomai_providers::{
 
 const SYSTEM_PROMPT: &str =
     "Answer based on the following context. If insufficient, say so explicitly.";
-const TOP_K: u32 = 5;
+const TOP_K: usize = 5;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,8 +51,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(default_knowledge_root);
     std::fs::create_dir_all(&knowledge_root)?;
     let content_store = Arc::new(nomai_core::ContentStore::new(knowledge_root));
-    let entries = EntryService::new(conn, content_store)?;
-    entries.ensure_vec_embeddings(config.embedding.dim)?;
+    // EntryService is constructed to run migrations + share the connection;
+    // not called directly in this example (Plan 4: chunks drive search).
+    let _entries = EntryService::new(conn.clone(), content_store)?;
+    let chunks = nomai_core::ChunkService::new(conn.clone())?;
+    chunks.ensure_vec_chunk_embeddings(config.embedding.dim)?;
 
     // 2. Read API keys + construct providers (config.validate checked env).
     let embed_key = std::env::var(&config.embedding.api_key_env)?;
@@ -73,26 +80,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .next()
         .ok_or("empty embedding response")?;
 
-    // 4. KNN top-K semantic search over entries.
-    let hits = entries.semantic_search(&qvec, TOP_K)?;
+    // 4. KNN top-K semantic search over chunks (Plan 4). Each hit includes
+    //    the chunk text; we resolve its parent block/entry via the daemon's
+    //    block→entry JOIN when needed.
+    let chunk_hits = chunks.semantic_search(&qvec, TOP_K, None)?;
 
-    // 5. Build context from the title and block texts of each hit. Entries
-    //    store content as blocks; join them with "\n\n" to reconstruct the
-    //    text body for the LLM.
-    let context = hits
-        .iter()
-        .map(|h| {
-            let body = h
-                .entry
-                .blocks
-                .iter()
-                .map(|b| b.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            format!("## {}\n\n{}", h.entry.title, body)
-        })
-        .collect::<Vec<_>>()
-        .join("\n---\n\n");
+    // 5. Build context from chunk text + look up parent entry for headings.
+    let mut context_parts: Vec<String> = Vec::new();
+    for hit in &chunk_hits {
+        // Look up block → entry to title the citation. Lazy JOIN via
+        // direct query (BlockService::get would also work).
+        let block_id = hit.chunk.block_id;
+        let entry_title: Option<String> = {
+            let conn = conn.lock().unwrap();
+            conn.query_row(
+                "SELECT e.title FROM blocks b JOIN entries e ON e.id = b.entry_id WHERE b.id = ?1",
+                rusqlite::params![block_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        };
+        let heading = entry_title.unwrap_or_else(|| "(unknown entry)".into());
+        context_parts.push(format!("## {heading}\n\n{}", hit.chunk.text));
+    }
+    let context = context_parts.join("\n---\n\n");
     let user = if context.is_empty() {
         format!("Question: {question}\n\n(No relevant materials were found.)")
     } else {
@@ -112,9 +123,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
 
-    // 7. Answer + citations.
+    // 7. Answer + citations (entry ids of matched chunks).
     println!("{}", resp.content);
-    let citations: Vec<String> = hits.iter().map(|h| h.entry.id.to_string()).collect();
-    eprintln!("citations: {}", citations.join(", "));
+    let citations: Vec<String> = chunk_hits
+        .iter()
+        .map(|h| h.chunk.block_id.to_string())
+        .collect();
+    eprintln!("citations (block ids): {}", citations.join(", "));
     Ok(())
 }

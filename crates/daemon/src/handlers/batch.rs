@@ -10,9 +10,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use nomai_core::{
-    ChunkService, CoreError, CreateChunk, CreateEntry, CreateLink, EntryService, LinkService,
-    UpdateEntry,
+    ChunkService, CoreError, CreateEntry, CreateLink, EntryService, LinkService, UpdateEntry,
 };
+#[allow(unused_imports)]
 use nomai_providers::EmbeddingProvider;
 
 use crate::daemon::Daemon;
@@ -46,13 +46,12 @@ fn default_atomic() -> bool {
     true
 }
 
-/// Allowed methods in batch (mutation only).
+/// Allowed methods in batch (mutation only). Plan 4: chunk.create/delete
+/// removed (chunks are auto-derived).
 const ALLOWED_METHODS: &[&str] = &[
     "entry.create",
     "entry.update",
     "entry.delete",
-    "chunk.create",
-    "chunk.delete",
     "link.create",
     "link.delete",
     "events.purge",
@@ -81,7 +80,6 @@ impl RpcHandler for Batch {
 
         // Phase 1: transactional dispatch. All connection access is confined to
         // this block so the MutexGuard is dropped before any subsequent await.
-        // Returns (results, embed_queue, commit_outcome).
         //
         // commit_outcome: Ok = COMMIT succeeded; OpErr = ROLLBACK with the
         // failing op's (idx, err); CommitErr = COMMIT itself failed (returned
@@ -92,7 +90,7 @@ impl RpcHandler for Batch {
             CommitErr(CoreError),
         }
 
-        let (results, embed_queue, commit_outcome): (Vec<Value>, Vec<EmbedTask>, CommitOutcome) = {
+        let (results, commit_outcome): (Vec<Value>, CommitOutcome) = {
             let conn_arc = daemon.entries.conn_for_test();
             let conn = conn_arc.lock().unwrap();
 
@@ -100,7 +98,6 @@ impl RpcHandler for Batch {
             let mut id_to_index: HashMap<String, usize> = HashMap::new();
 
             let mut results: Vec<Value> = Vec::with_capacity(req.ops.len());
-            let mut embed_queue: Vec<EmbedTask> = Vec::new();
             let mut failed_at: Option<(usize, CoreError)> = None;
 
             conn.execute_batch("BEGIN").map_err(CoreError::Storage)?;
@@ -157,38 +154,6 @@ impl RpcHandler for Batch {
 
                 match outcome {
                     Ok(value) => {
-                        // Track embed targets
-                        if op.method == "entry.create" || op.method == "entry.update" {
-                            if let Some(id_str) = value.get("id").and_then(|v| v.as_str()) {
-                                if let Ok(id) = id_str.parse::<ulid::Ulid>() {
-                                    // Derived body = blocks' text joined with
-                                    // "\n\n" (mirrors core's
-                                    // `derived_body_from_blocks`). Empty when
-                                    // the entry has no blocks.
-                                    let text = derived_body_from_value(&value);
-                                    if !text.is_empty() {
-                                        embed_queue.push(EmbedTask {
-                                            id,
-                                            text,
-                                            target: EmbedTarget::Entry,
-                                        });
-                                    }
-                                }
-                            }
-                        } else if op.method == "chunk.create" {
-                            if let Some(id_str) = value.get("id").and_then(|v| v.as_str()) {
-                                if let Ok(id) = id_str.parse::<ulid::Ulid>() {
-                                    if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
-                                        embed_queue.push(EmbedTask {
-                                            id,
-                                            text: text.to_string(),
-                                            target: EmbedTarget::Chunk,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-
                         results.push(json!({"ok": true, "result": value}));
 
                         // Register id for $ref
@@ -218,20 +183,15 @@ impl RpcHandler for Batch {
                 }
             };
 
-            (results, embed_queue, commit_outcome)
+            (results, commit_outcome)
             // conn + conn_arc drop here, releasing the Mutex.
         };
 
         match commit_outcome {
-            CommitOutcome::Ok => {
-                // Phase 2: batch embed (all texts in one API call)
-                run_embed_queue(daemon, embed_queue).await?;
-
-                Ok(json!({
-                    "results": results,
-                    "rolled_back": false
-                }))
-            }
+            CommitOutcome::Ok => Ok(json!({
+                "results": results,
+                "rolled_back": false
+            })),
             CommitOutcome::CommitErr(e) => Err(e),
             CommitOutcome::OpErr(_idx, err) => {
                 // Return the underlying CoreError directly so the top-level
@@ -241,25 +201,6 @@ impl RpcHandler for Batch {
             }
         }
     }
-}
-
-/// Compute the derived body from an entry-shaped JSON value (the result of
-/// `entry.create` / `entry.update` inside a batch). Mirrors core's private
-/// `derived_body_from_blocks`: blocks' text fields joined with `\n\n` in
-/// array order. Returns an empty string when there are no blocks or the
-/// value isn't entry-shaped.
-fn derived_body_from_value(value: &Value) -> String {
-    value
-        .get("blocks")
-        .and_then(|v| v.as_array())
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        })
-        .unwrap_or_default()
 }
 
 /// Resolve $ref placeholders in params, using results from previous ops.
@@ -338,7 +279,7 @@ fn dispatch_in_tx(
     params: Value,
     entries: &EntryService,
     links: &LinkService,
-    chunks: &ChunkService,
+    _chunks: &ChunkService,
 ) -> Result<Value, CoreError> {
     match method {
         "entry.create" => {
@@ -367,22 +308,6 @@ fn dispatch_in_tx(
             let p: IdParams = serde_json::from_value(params)
                 .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
             entries.delete_in_tx(conn, p.id)?;
-            Ok(json!({"deleted": true}))
-        }
-        "chunk.create" => {
-            let p: CreateChunk = serde_json::from_value(params)
-                .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
-            let chunk = chunks.create_in_tx(conn, p)?;
-            serde_json::to_value(&chunk).map_err(|e| CoreError::Config(format!("serialize: {e}")))
-        }
-        "chunk.delete" => {
-            #[derive(Deserialize)]
-            struct IdParams {
-                id: ulid::Ulid,
-            }
-            let p: IdParams = serde_json::from_value(params)
-                .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
-            chunks.delete_in_tx(conn, p.id)?;
             Ok(json!({"deleted": true}))
         }
         "link.create" => {
@@ -414,54 +339,6 @@ fn dispatch_in_tx(
             method
         ))),
     }
-}
-
-/// Batch embed all queued texts in a single API call, then write each embedding.
-///
-/// Called after COMMIT (Mutex released). Collects all entry/chunk texts, calls
-/// `embedder.embed` once with the full array (EmbeddingProvider trait supports
-/// batch), then writes each embedding via the appropriate service. Embed
-/// failure bubbles up as `CoreError::Provider` — same weak-consistency model
-/// as single-op path (entries persisted, vec missing).
-async fn run_embed_queue(daemon: &Daemon, queue: Vec<EmbedTask>) -> Result<(), CoreError> {
-    if queue.is_empty() {
-        return Ok(());
-    }
-
-    let texts: Vec<&str> = queue.iter().map(|t| t.text.as_str()).collect();
-    let embeddings = daemon.cache.embed(&texts).await?;
-
-    for (task, emb) in queue.into_iter().zip(embeddings) {
-        match task.target {
-            EmbedTarget::Entry => {
-                let entries = daemon.entries.clone();
-                let id = task.id;
-                let emb = emb.clone();
-                crate::handlers::entry::blocking(move || entries.write_embedding(id, &emb))
-                    .await??;
-            }
-            EmbedTarget::Chunk => {
-                let chunks = daemon.chunks.clone();
-                let id = task.id;
-                let emb = emb.clone();
-                crate::handlers::entry::blocking(move || chunks.write_embedding(id, &emb))
-                    .await??;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// EmbedTask: queued for post-commit batch embedding.
-pub(crate) struct EmbedTask {
-    pub id: ulid::Ulid,
-    pub text: String,
-    pub target: EmbedTarget,
-}
-
-pub(crate) enum EmbedTarget {
-    Entry,
-    Chunk,
 }
 
 /// Convert CoreError to a JSON-RPC error object (for results array entries).

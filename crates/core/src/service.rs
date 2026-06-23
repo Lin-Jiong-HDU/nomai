@@ -40,28 +40,6 @@ pub struct UpdateEntry {
     pub source: Option<Option<String>>,
 }
 
-/// Compute the "derived body" of an entry from its blocks. Used as the FTS5
-/// index source, chunk derivation source, and embedding input. The join
-/// separator is "\n\n" (paragraph break). Block order matters.
-///
-/// Plan 4 will replace this with per-block FTS + per-block chunks.
-fn derived_body_from_blocks(blocks: &[crate::block_model::Block]) -> String {
-    blocks
-        .iter()
-        .map(|b| b.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-/// Same shape but takes parser-layer BlockInput (entry.create input path).
-fn derived_body_from_inputs(blocks: &[crate::block_model::BlockInput]) -> String {
-    blocks
-        .iter()
-        .map(|b| b.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
 /// Parse a block-type string (from BlockInput) into the parser-layer enum.
 /// Unknown strings return CoreError::Validation so the caller can surface a
 /// 400-style error rather than a storage failure.
@@ -90,6 +68,11 @@ pub struct EntryListQuery {
     pub offset: u32,
     #[serde(default)]
     pub order: ListOrder,
+    /// When `Some(true)`, populate `blocks` on each returned entry. Default
+    /// `None` (skip) for cheap list queries; set `Some(true)` when callers
+    /// need block content without N+1 follow-up `entry.get` calls.
+    #[serde(default)]
+    pub include_blocks: Option<bool>,
 }
 
 fn default_limit() -> u32 {
@@ -103,6 +86,7 @@ impl Default for EntryListQuery {
             limit: default_limit(),
             offset: 0,
             order: ListOrder::default(),
+            include_blocks: None,
         }
     }
 }
@@ -115,12 +99,6 @@ pub struct EntryListResult {
 
 #[derive(Debug)]
 pub struct FulltextSearchResult {
-    pub entry: Entry,
-    pub score: f32,
-}
-
-#[derive(Debug)]
-pub struct SemanticSearchResult {
     pub entry: Entry,
     pub score: f32,
 }
@@ -140,17 +118,6 @@ impl EntryService {
                 .pragma_update(None, "foreign_keys", "ON")
                 .map_err(CoreError::Storage)?;
             storage::run_migrations(&mut guard)?;
-            // V1 created `entries_ai/ad/au` triggers that populate fts_entries
-            // from entries.body on INSERT/UPDATE/DELETE. Plan 3 stops using
-            // entries.body and writes fts_entries directly (derived body from
-            // blocks). Drop the triggers idempotently to avoid duplicate FTS
-            // rows. V7 migration will also drop them; this covers the window
-            // between Task 2 and Task 3.
-            let _ = guard.execute_batch(
-                "DROP TRIGGER IF EXISTS entries_ai;\
-                 DROP TRIGGER IF EXISTS entries_ad;\
-                 DROP TRIGGER IF EXISTS entries_au;",
-            );
         }
         let block_service = Arc::new(crate::block_service::BlockService::new(conn.clone())?);
         Ok(Self {
@@ -229,11 +196,9 @@ impl EntryService {
         };
         self.content_store.write_entry(id, &doc)?;
 
-        // Pre-compute derived body for FTS5. entries.body was dropped in V7;
-        // the canonical "body" is derived from blocks at write time.
-        let body = derived_body_from_inputs(&params.blocks);
-
-        // 2. INSERT entry row (body column dropped in V7).
+        // 2. INSERT entry row (body column dropped in V7; fts_blocks is
+        //    populated by the `blocks_ai` trigger when blocks are inserted
+        //    in the next step, so no direct FTS write here).
         conn.execute(
             "INSERT INTO entries
                (id, title, tags, attrs, source, created_at, updated_at)
@@ -249,7 +214,9 @@ impl EntryService {
             ],
         )?;
 
-        // 3. Create each block via BlockService (same conn — no nested tx).
+        // 3. Create each block via BlockService. The `blocks_ai` trigger
+        //    auto-inserts fts_blocks rows; BlockService::create_in_tx
+        //    auto-derives chunks via the chunking module.
         let mut stored_blocks: Vec<crate::block_model::Block> =
             Vec::with_capacity(params.blocks.len());
         for (ordinal, block_input) in params.blocks.into_iter().enumerate() {
@@ -264,14 +231,7 @@ impl EntryService {
             stored_blocks.push(block);
         }
 
-        // 4. Populate fts_entries directly. V1 triggers were dropped in new()
-        //    so this is the sole source of FTS5 rows.
-        conn.execute(
-            "INSERT INTO fts_entries (entry_id, title, body) VALUES (?1, ?2, ?3)",
-            params![id.to_string(), &doc.title, &body],
-        )?;
-
-        // 5. Emit entry.created event with full snapshot (blocks included).
+        // 4. Emit entry.created event with full snapshot (blocks included).
         let entry_snapshot = Entry {
             id,
             title: doc.title,
@@ -393,11 +353,6 @@ impl EntryService {
         };
         let updated_at = Utc::now();
 
-        // Derived body is computed from blocks (which didn't change in this
-        // update path). entries.body was dropped in V7; the derived body is
-        // used only to keep the FTS5 index in sync.
-        let body = derived_body_from_blocks(&existing.blocks);
-
         let updated_entry = Entry {
             id,
             title: new_title.clone(),
@@ -420,17 +375,6 @@ impl EntryService {
                 updated_at.to_rfc3339(),
                 id.to_string(),
             ],
-        )?;
-
-        // FTS5: title may have changed; body is derived from blocks which
-        // didn't change here. Rewrite the row.
-        conn.execute(
-            "DELETE FROM fts_entries WHERE entry_id = ?1",
-            params![id.to_string()],
-        )?;
-        conn.execute(
-            "INSERT INTO fts_entries (entry_id, title, body) VALUES (?1, ?2, ?3)",
-            params![id.to_string(), &new_title, &body],
         )?;
 
         let event_id = Ulid::new();
@@ -502,15 +446,9 @@ impl EntryService {
         before_entry.blocks = blocks;
 
         conn.execute("DELETE FROM entries WHERE id=?1", params![id.to_string()])?;
-        // CASCADE handles blocks, chunks, links, vec_embeddings (via delete_embedding
-        // at higher layer), fts_entries (manual cleanup below — no trigger in V6).
-
-        // fts_entries cleanup (V1 triggers dropped; no CASCADE since FTS5 is a
-        // separate virtual table).
-        conn.execute(
-            "DELETE FROM fts_entries WHERE entry_id = ?1",
-            params![id.to_string()],
-        )?;
+        // CASCADE handles blocks (→ chunks via block_id FK + fts_blocks via
+        // the `blocks_ad` trigger), chunk embeddings (caller-side cleanup),
+        // and links. No manual fts_entries cleanup needed in V8+.
 
         let event_id = Ulid::new();
         let event_payload = serde_json::to_value(&before_entry).expect("entry serialize");
@@ -578,152 +516,102 @@ impl EntryService {
                 row.get::<_, i64>(0)
             })? as u64
         };
+        drop(conn);
+
+        let mut items = items;
+        if query.include_blocks.unwrap_or(false) {
+            // Populate blocks per entry via BlockService. Done outside the
+            // list lock above so each block query takes its own lock.
+            for entry in &mut items {
+                let blocks = self.block_service.list(entry.id)?;
+                entry.blocks = blocks.items;
+            }
+        }
 
         Ok(EntryListResult { items, total })
     }
 
+    /// Fulltext search over `fts_blocks` (per-block FTS5). Optional
+    /// `block_type` filter narrows matches to a single block type. Results
+    /// are deduplicated to entries (an entry with multiple matching blocks
+    /// appears once).
     pub fn fulltext_search(
         &self,
         query: &str,
         limit: u32,
+        block_type: Option<&str>,
     ) -> Result<Vec<FulltextSearchResult>, CoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT e.id, e.title, e.tags, e.attrs, e.source, e.created_at, e.updated_at,
-                    bm25(fts_entries) AS rank
-             FROM fts_entries
-             JOIN entries e ON e.id = fts_entries.entry_id
-             WHERE fts_entries MATCH ?1
-             ORDER BY rank
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![query, limit], |row| {
-            let entry = row_to_entry(row, 0)?;
-            // bm25 returns negative scores (closer to 0 = better match).
-            let rank: f64 = row.get(7)?;
-            Ok(FulltextSearchResult {
+        // Strategy: FTS5's bm25() refuses to evaluate inside aggregates /
+        // subqueries in some SQLite builds ("unable to use function bm25 in
+        // the requested context"). Pull all matching (entry_id, bm25) pairs
+        // via direct FTS5 query, dedupe in Rust keeping the best rank per
+        // entry, then fetch the entry rows.
+        let sql = match block_type {
+            Some(_) => {
+                "SELECT fts_blocks.entry_id, bm25(fts_blocks) AS rank
+                 FROM fts_blocks
+                 WHERE fts_blocks MATCH ?1 AND fts_blocks.type = ?2
+                 ORDER BY rank"
+            }
+            None => {
+                "SELECT fts_blocks.entry_id, bm25(fts_blocks) AS rank
+                 FROM fts_blocks
+                 WHERE fts_blocks MATCH ?1
+                 ORDER BY rank"
+            }
+        };
+        let mut stmt = conn.prepare(sql)?;
+        // Gather (entry_id, rank) pairs; keep first (best) per entry_id.
+        let mut seen: std::collections::HashSet<Ulid> = std::collections::HashSet::new();
+        let mut ordered_ids: Vec<(Ulid, f64)> = Vec::new();
+        let process_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, f64)> {
+            let id_str: String = row.get(0)?;
+            let rank: f64 = row.get(1)?;
+            Ok((id_str, rank))
+        };
+        let pairs: Vec<(String, f64)> = match block_type {
+            Some(t) => stmt
+                .query_map(params![query, t], process_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+            None => stmt
+                .query_map(params![query], process_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        };
+        for (id_str, rank) in pairs {
+            let id: Ulid = id_str.parse().map_err(|e: ulid::DecodeError| {
+                CoreError::Storage(rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                ))
+            })?;
+            if seen.insert(id) {
+                ordered_ids.push((id, rank));
+                if ordered_ids.len() >= limit as usize {
+                    break;
+                }
+            }
+        }
+        if ordered_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Fetch the entries in rank order.
+        let mut results: Vec<FulltextSearchResult> = Vec::with_capacity(ordered_ids.len());
+        for (id, rank) in ordered_ids {
+            let entry = match conn.query_row(
+                "SELECT id, title, tags, attrs, source, created_at, updated_at
+                 FROM entries WHERE id = ?1",
+                params![id.to_string()],
+                |row| row_to_entry(row, 0),
+            ) {
+                Ok(e) => e,
+                Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                Err(e) => return Err(CoreError::Storage(e)),
+            };
+            results.push(FulltextSearchResult {
                 entry,
                 score: rank.abs() as f32,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(CoreError::Storage)
-    }
-
-    pub fn ensure_vec_embeddings(&self, dim: usize) -> Result<(), CoreError> {
-        let conn = self.conn.lock().unwrap();
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS (
-                SELECT 1 FROM sqlite_master
-                WHERE type='table' AND name='vec_embeddings'
-            )",
-            [],
-            |row| row.get(0),
-        )?;
-        if exists {
-            return Ok(());
-        }
-        let sql = format!(
-            "CREATE VIRTUAL TABLE vec_embeddings USING vec0(
-                entry_id TEXT PRIMARY KEY,
-                embedding float[{dim}] distance_metric=cosine
-            )"
-        );
-        conn.execute_batch(&sql)?;
-        Ok(())
-    }
-
-    /// Delete the stored embedding for an entry, if any.
-    ///
-    /// Used when an entry's body is cleared (set to empty) so the previous
-    /// embedding no longer matches semantic searches. Returns `Ok(())` whether
-    /// or not a row existed (delete-by-id is idempotent at the call site).
-    pub fn delete_embedding(&self, id: Ulid) -> Result<(), CoreError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM vec_embeddings WHERE entry_id = ?1",
-            params![id.to_string()],
-        )?;
-        Ok(())
-    }
-
-    pub fn write_embedding(&self, id: Ulid, embedding: &[f32]) -> Result<(), CoreError> {
-        let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let id_str = id.to_string();
-        let conn = self.conn.lock().unwrap();
-        // sqlite-vec's vec0 virtual table does not support INSERT OR REPLACE
-        // (see https://github.com/asg017/sqlite-vec/issues/259). Emulate the
-        // upsert with a DELETE-then-INSERT inside a transaction so the
-        // operation is atomic and re-inserting the same id replaces the row.
-        conn.execute_batch("BEGIN")?;
-        let result = (|| -> rusqlite::Result<()> {
-            conn.execute(
-                "DELETE FROM vec_embeddings WHERE entry_id = ?1",
-                params![&id_str],
-            )?;
-            conn.execute(
-                "INSERT INTO vec_embeddings (entry_id, embedding) VALUES (?1, ?2)",
-                params![&id_str, &bytes],
-            )?;
-            Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-                Ok(())
-            }
-            Err(e) => {
-                // Best-effort rollback; ignore rollback failure to surface the
-                // original error.
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(CoreError::Storage(e))
-            }
-        }
-    }
-
-    pub fn semantic_search(
-        &self,
-        query: &[f32],
-        limit: u32,
-    ) -> Result<Vec<SemanticSearchResult>, CoreError> {
-        let bytes: Vec<u8> = query.iter().flat_map(|f| f.to_le_bytes()).collect();
-        // Phase 1: collect (entry_id, distance) pairs under the lock.
-        let pairs: Vec<(Ulid, f64)> = {
-            let conn = self.conn.lock().unwrap();
-            let mut stmt = conn.prepare(
-                "SELECT v.entry_id, v.distance
-                 FROM vec_embeddings v
-                 JOIN entries e ON e.id = v.entry_id
-                 WHERE v.embedding MATCH ?1
-                   AND k = ?2
-                 ORDER BY v.distance",
-            )?;
-            let rows = stmt.query_map(params![bytes, limit], |row| {
-                let id_str: String = row.get(0)?;
-                let distance: f64 = row.get(1)?;
-                Ok((id_str, distance))
-            })?;
-            let mut out: Vec<(Ulid, f64)> = Vec::new();
-            for r in rows {
-                let (id_str, distance) = r?;
-                let id: Ulid = id_str.parse().map_err(|e: ulid::DecodeError| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?;
-                out.push((id, distance));
-            }
-            out
-        };
-        // Phase 2: populate entry (with blocks) per id via self.get().
-        let mut results = Vec::with_capacity(pairs.len());
-        for (entry_id, distance) in pairs {
-            let entry = self.get(entry_id)?;
-            results.push(SemanticSearchResult {
-                entry,
-                score: (1.0 - distance) as f32,
             });
         }
         Ok(results)
@@ -823,9 +711,9 @@ mod tests {
             .unwrap();
         assert_eq!(n, 0);
 
-        // fts_entries virtual table exists
+        // fts_blocks virtual table exists (per-block FTS, V8).
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM fts_entries", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM fts_blocks", [], |row| row.get(0))
             .unwrap();
         assert_eq!(n, 0);
     }
@@ -1084,6 +972,7 @@ mod tests {
                 limit: 2,
                 offset: 0,
                 order: ListOrder::CreatedAsc,
+                include_blocks: None,
             })
             .unwrap();
         assert_eq!(page1.items.len(), 2);
@@ -1095,6 +984,7 @@ mod tests {
                 limit: 2,
                 offset: 2,
                 order: ListOrder::CreatedAsc,
+                include_blocks: None,
             })
             .unwrap();
         assert_eq!(page2.items.len(), 2);
@@ -1113,6 +1003,7 @@ mod tests {
                 limit: 50,
                 offset: 0,
                 order: ListOrder::CreatedAsc,
+                include_blocks: None,
             })
             .unwrap();
         assert_eq!(result.items.len(), 2);
@@ -1143,7 +1034,7 @@ mod tests {
         })
         .unwrap();
 
-        let hits = svc.fulltext_search("rust", 10).unwrap();
+        let hits = svc.fulltext_search("rust", 10, None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].entry.title, "Rust guide");
         assert!(hits[0].score > 0.0);
@@ -1153,7 +1044,9 @@ mod tests {
     fn fulltext_returns_empty_when_no_match() {
         let svc = EntryService::for_test().unwrap();
         seed(&svc, "t", vec![]);
-        let hits = svc.fulltext_search("nonexistentterm12345", 10).unwrap();
+        let hits = svc
+            .fulltext_search("nonexistentterm12345", 10, None)
+            .unwrap();
         assert!(hits.is_empty());
     }
 
@@ -1174,7 +1067,7 @@ mod tests {
         svc.delete(id).unwrap();
         assert!(svc.get(id).is_err());
 
-        let hits = svc.fulltext_search("needle", 10).unwrap();
+        let hits = svc.fulltext_search("needle", 10, None).unwrap();
         assert!(hits.iter().all(|h| h.entry.id != id));
     }
 
@@ -1182,117 +1075,92 @@ mod tests {
     // in-memory connection is opened. `for_test()` does not do this itself.
 
     #[test]
-    fn ensure_vec_embeddings_is_idempotent() {
-        storage::init_sqlite_extensions();
+    fn fulltext_search_uses_fts_blocks_with_type_filter() {
+        // Index an entry with both a claim + note block; filter to claim only.
         let svc = EntryService::for_test().unwrap();
-        svc.ensure_vec_embeddings(4).unwrap();
-        svc.ensure_vec_embeddings(4).unwrap();
-        // Sanity: insert should work.
-        let entry = svc
-            .create(CreateEntry {
-                title: "t".into(),
-                blocks: vec![note_block("b")],
-                tags: None,
-                attrs: None,
-                source: None,
-            })
-            .unwrap();
-        svc.write_embedding(entry.id, &[0.1, 0.2, 0.3, 0.4])
-            .unwrap();
-    }
+        svc.create(CreateEntry {
+            title: "mixed".into(),
+            blocks: vec![
+                crate::block_model::BlockInput {
+                    r#type: "claim".into(),
+                    text: "Earth orbits the sun".into(),
+                    attrs: None,
+                },
+                crate::block_model::BlockInput {
+                    r#type: "note".into(),
+                    text: "remember to orbit".into(),
+                    attrs: None,
+                },
+            ],
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
 
-    #[test]
-    fn write_embedding_upserts() {
-        storage::init_sqlite_extensions();
-        let svc = EntryService::for_test().unwrap();
-        svc.ensure_vec_embeddings(2).unwrap();
-        let e = svc
-            .create(CreateEntry {
-                title: "t".into(),
-                blocks: vec![note_block("b")],
-                tags: None,
-                attrs: None,
-                source: None,
-            })
-            .unwrap();
-        svc.write_embedding(e.id, &[1.0, 0.0]).unwrap();
-        // Second write replaces, not duplicates.
-        svc.write_embedding(e.id, &[0.0, 1.0]).unwrap();
-
-        let hits = svc.semantic_search(&[0.0, 1.0], 10).unwrap();
+        // Unfiltered: matches the entry.
+        let hits = svc.fulltext_search("orbit", 10, None).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].entry.id, e.id);
+
+        // Filter to note only: still matches the entry (note block contains "orbit").
+        let hits_note = svc.fulltext_search("orbit", 10, Some("note")).unwrap();
+        assert_eq!(hits_note.len(), 1);
+
+        // Filter to claim only: no match — claim text "Earth orbits the sun"
+        // uses "orbits" (stemmed differently; the literal token "orbit" only
+        // appears in the note block).
+        let hits_claim = svc.fulltext_search("orbit", 10, Some("claim")).unwrap();
+        assert!(hits_claim.is_empty());
+
+        // Filter to evidence: no match.
+        let hits_none = svc.fulltext_search("orbit", 10, Some("evidence")).unwrap();
+        assert!(hits_none.is_empty());
     }
 
     #[test]
-    fn semantic_search_ranks_by_cosine_similarity() {
-        storage::init_sqlite_extensions();
+    fn list_with_include_blocks_populates_blocks() {
         let svc = EntryService::for_test().unwrap();
-        svc.ensure_vec_embeddings(3).unwrap();
+        svc.create(CreateEntry {
+            title: "t".into(),
+            blocks: vec![
+                crate::block_model::BlockInput {
+                    r#type: "note".into(),
+                    text: "first".into(),
+                    attrs: None,
+                },
+                crate::block_model::BlockInput {
+                    r#type: "claim".into(),
+                    text: "second".into(),
+                    attrs: None,
+                },
+            ],
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
 
-        let a = svc
-            .create(CreateEntry {
-                title: "a".into(),
-                blocks: vec![note_block("near")],
-                tags: None,
-                attrs: None,
-                source: None,
+        // Default: blocks empty.
+        let result = svc
+            .list(EntryListQuery {
+                include_blocks: None,
+                ..Default::default()
             })
             .unwrap();
-        let b = svc
-            .create(CreateEntry {
-                title: "b".into(),
-                blocks: vec![note_block("far")],
-                tags: None,
-                attrs: None,
-                source: None,
+        assert_eq!(result.items.len(), 1);
+        assert!(result.items[0].blocks.is_empty());
+
+        // With include_blocks=true: blocks populated.
+        let result = svc
+            .list(EntryListQuery {
+                include_blocks: Some(true),
+                ..Default::default()
             })
             .unwrap();
-        svc.write_embedding(a.id, &[1.0, 0.0, 0.0]).unwrap();
-        svc.write_embedding(b.id, &[0.0, 0.0, 1.0]).unwrap();
-
-        // Query close to A.
-        let hits = svc.semantic_search(&[0.9, 0.1, 0.0], 10).unwrap();
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].entry.id, a.id, "a should rank first");
-        assert!(hits[0].score > hits[1].score);
-    }
-
-    #[test]
-    fn semantic_search_returns_empty_when_no_embeddings() {
-        storage::init_sqlite_extensions();
-        let svc = EntryService::for_test().unwrap();
-        svc.ensure_vec_embeddings(2).unwrap();
-        let hits = svc.semantic_search(&[1.0, 0.0], 10).unwrap();
-        assert!(hits.is_empty());
-    }
-
-    #[test]
-    fn delete_embedding_removes_row() {
-        storage::init_sqlite_extensions();
-        let svc = EntryService::for_test().unwrap();
-        svc.ensure_vec_embeddings(2).unwrap();
-
-        let e = svc
-            .create(CreateEntry {
-                title: "t".into(),
-                blocks: vec![note_block("b")],
-                tags: None,
-                attrs: None,
-                source: None,
-            })
-            .unwrap();
-        svc.write_embedding(e.id, &[1.0, 0.0]).unwrap();
-
-        // Precondition: search finds the row.
-        let hits = svc.semantic_search(&[1.0, 0.0], 10).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].entry.id, e.id);
-
-        // Delete, then search returns empty.
-        svc.delete_embedding(e.id).unwrap();
-        let hits = svc.semantic_search(&[1.0, 0.0], 10).unwrap();
-        assert!(hits.is_empty());
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].blocks.len(), 2);
+        assert_eq!(result.items[0].blocks[0].text, "first");
+        assert_eq!(result.items[0].blocks[1].text, "second");
     }
 
     #[test]

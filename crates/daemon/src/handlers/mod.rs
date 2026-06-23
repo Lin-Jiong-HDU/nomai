@@ -49,12 +49,9 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     let h = link::Neighbors;
     m.insert(h.method(), Arc::new(h));
 
-    // chunk.*
-    let h = chunk::Create;
-    m.insert(h.method(), Arc::new(h));
+    // chunk.* (Plan 4: only Get + List; Create/Update/Delete removed because
+    // chunks are auto-derived from blocks.)
     let h = chunk::Get;
-    m.insert(h.method(), Arc::new(h));
-    let h = chunk::Delete;
     m.insert(h.method(), Arc::new(h));
     let h = chunk::List;
     m.insert(h.method(), Arc::new(h));
@@ -112,7 +109,8 @@ mod tests {
 
     async fn setup_daemon(server: &MockServer) -> Daemon {
         let entries = Arc::new(EntryService::for_test().unwrap());
-        entries.ensure_vec_embeddings(DIM).unwrap();
+        // Plan 4: entry-level embeddings retired; only chunk-level vec0
+        // table remains, created via ensure_vec_chunk_embeddings below.
         let embedder: Arc<dyn nomai_providers::EmbeddingProvider> =
             Arc::new(nomai_providers::OpenAiCompatibleEmbed::new(
                 server.uri(),
@@ -182,14 +180,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_create_triggers_embedding_http_call() {
+    async fn entry_create_does_not_trigger_embedding_call() {
+        // Plan 4: entry.create no longer triggers entry-level embedding work.
+        // A separate background chunk embedder (Plan 5) will handle chunks.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/embeddings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": [{"index": 0, "embedding": vec![0.0_f32; DIM]}]
             })))
-            .expect(1)
+            .expect(0) // ← zero embedding calls expected
             .mount(&server)
             .await;
 
@@ -203,19 +203,21 @@ mod tests {
                 }),
             ))
             .await;
-        // Mock's expect(1) verifies on drop that the embedding call was made.
+        // Mock's expect(0) verifies on drop that no embedding call was made.
     }
 
     #[tokio::test]
     async fn search_semantic_ranks_by_similarity() {
         let server = MockServer::start().await;
 
-        // Seed two entries with known embeddings, then answer the query
-        // embedding deterministically.
+        // Seed two entries with known chunk embeddings, then answer the query
+        // embedding deterministically. Plan 4: semantic search runs over
+        // chunk embeddings (auto-derived from block text).
         let daemon = setup_daemon(&server).await;
 
         // Create entries — the mock returns a zero vector each time; we then
-        // overwrite the embedding directly via EntryService for deterministic ranking.
+        // overwrite the chunk embedding directly via ChunkService for
+        // deterministic ranking.
         let entries = daemon.entries.clone();
         let a = entries
             .create(nomai_core::CreateEntry {
@@ -243,11 +245,19 @@ mod tests {
                 source: None,
             })
             .unwrap();
-        entries
-            .write_embedding(a.id, &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+        // Each block auto-derives one chunk (text < 1024 chars). Find it
+        // via ChunkService::list and overwrite its embedding.
+        let chunks = daemon.chunks.clone();
+        let a_block_id = a.blocks[0].id;
+        let b_block_id = b.blocks[0].id;
+        let a_chunk_id = chunks.list(a_block_id).unwrap().items[0].id;
+        let b_chunk_id = chunks.list(b_block_id).unwrap().items[0].id;
+        chunks
+            .write_embedding(a_chunk_id, &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
             .unwrap();
-        entries
-            .write_embedding(b.id, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+        chunks
+            .write_embedding(b_chunk_id, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
             .unwrap();
 
         // search.semantic will issue an embedding request for the query.
@@ -271,7 +281,18 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let items = resp.result.unwrap()["items"].as_array().unwrap().clone();
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0]["entry"]["title"], "a");
+        // Chunk "a" (cos=1.0) ranks above chunk "b" (cos=0.0). Resolve
+        // entry title via JOIN for the assertion.
+        let top_chunk_block_id = items[0]["chunk"]["block_id"].as_str().unwrap();
+        let top_title: String = {
+            let conn = daemon.entries.conn_for_test();
+            conn.lock().unwrap().query_row(
+                "SELECT e.title FROM blocks b JOIN entries e ON e.id = b.entry_id WHERE b.id = ?1",
+                rusqlite::params![top_chunk_block_id],
+                |row| row.get::<_, String>(0),
+            ).unwrap()
+        };
+        assert_eq!(top_title, "a");
     }
 
     #[tokio::test]
@@ -768,63 +789,110 @@ mod tests {
         assert_eq!(items[0]["payload"]["relation"], "r");
     }
 
-    // ----- chunk.* + search.semantic granularity + entry.delete cleanup e2e (Plan 2 Task 4) -----
+    // ----- chunk.* + search.semantic + entry.delete cleanup e2e (Plan 4) -----
+    //
+    // Plan 4 changes:
+    //   - chunk.create / chunk.delete RPCs removed (return -32601); chunks
+    //     are auto-derived from block text via BlockService::create_in_tx.
+    //   - chunk.list takes `block_id` (was `entry_id`); chunk.get unchanged.
+    //   - search.semantic no longer accepts `granularity`; it always searches
+    //     chunk embeddings (entry-level embeddings retired).
+    //   - chunk.created events are gone (no chunk.create RPC).
 
     #[tokio::test]
-    async fn chunk_create_round_trips_via_get() {
+    async fn chunk_create_returns_method_not_found() {
+        // Plan 4: chunk.create is gone — chunks are auto-derived from blocks.
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "chunk.create",
+                json!({"entry_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "ordinal": 0, "text": "x"}),
+            ))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32601);
+    }
+
+    #[tokio::test]
+    async fn chunk_delete_returns_method_not_found() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "chunk.delete",
+                json!({"id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"}),
+            ))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32601);
+    }
+
+    #[tokio::test]
+    async fn chunk_list_returns_auto_derived_chunks_for_block() {
+        // Plan 4: chunks are auto-derived from block text on entry.create.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
 
-        // Create an entry first.
         let entry_resp = daemon
             .dispatch(req(
                 "entry.create",
-                json!({"title":"doc","blocks":[{"type":"note","text":"x"}]}),
+                json!({"title":"d","blocks":[{"type":"note","text":"hello world"}]}),
             ))
             .await;
-        let entry_id = entry_resp.result.unwrap()["id"]
+        let entry_json = entry_resp.result.unwrap();
+        let block_id = entry_json["blocks"][0]["id"].as_str().unwrap().to_string();
+
+        let list_resp = daemon
+            .dispatch(req("chunk.list", json!({"block_id": block_id})))
+            .await;
+        assert!(list_resp.error.is_none(), "{:?}", list_resp.error);
+        let result = list_resp.result.unwrap();
+        // short text → exactly one chunk
+        assert_eq!(result["total"], 1);
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items[0]["text"], "hello world");
+        assert_eq!(items[0]["block_id"], block_id);
+        assert_eq!(items[0]["attrs"]["parent_block_type"], "note");
+    }
+
+    #[tokio::test]
+    async fn chunk_get_retrieves_auto_derived_chunk() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let entry_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"d","blocks":[{"type":"note","text":"body"}]}),
+            ))
+            .await;
+        let entry_json = entry_resp.result.unwrap();
+        let block_id = entry_json["blocks"][0]["id"].as_str().unwrap().to_string();
+
+        // Resolve chunk id via chunk.list, then chunk.get.
+        let list = daemon
+            .dispatch(req("chunk.list", json!({"block_id": block_id})))
+            .await;
+        let chunk_id = list.result.unwrap()["items"][0]["id"]
             .as_str()
             .unwrap()
             .to_string();
-
-        // Create a chunk (will fire embedding HTTP call for chunk text).
-        let create_resp = daemon
-            .dispatch(req(
-                "chunk.create",
-                json!({"entry_id": entry_id, "ordinal": 0, "text":"first chunk"}),
-            ))
-            .await;
-        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
-        let chunk = create_resp.result.unwrap();
-        let chunk_id = chunk["id"].as_str().unwrap().to_string();
-        assert_eq!(chunk["ordinal"], 0);
 
         let get_resp = daemon
             .dispatch(req("chunk.get", json!({"id": chunk_id})))
             .await;
         assert!(get_resp.error.is_none());
-        assert_eq!(get_resp.result.unwrap()["text"], "first chunk");
+        assert_eq!(get_resp.result.unwrap()["text"], "body");
     }
 
     #[tokio::test]
-    async fn chunk_create_returns_validation_for_missing_entry() {
-        let server = MockServer::start().await;
-        let daemon = setup_daemon(&server).await;
-        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
-
-        let resp = daemon
-            .dispatch(req(
-                "chunk.create",
-                json!({"entry_id": phantom, "ordinal": 0, "text":"x"}),
-            ))
-            .await;
-        let err = resp.error.unwrap();
-        assert_eq!(err.code, 1003);
-    }
-
-    #[tokio::test]
-    async fn chunk_list_returns_chunks_sorted_by_ordinal() {
+    async fn search_semantic_returns_chunks() {
+        // Plan 4: search.semantic always returns chunks (entry-level retired).
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -832,117 +900,22 @@ mod tests {
         let entry_resp = daemon
             .dispatch(req(
                 "entry.create",
-                json!({"title":"d","blocks":[{"type":"note","text":"x"}]}),
+                json!({"title":"d","blocks":[{"type":"note","text":"chunk content"}]}),
             ))
             .await;
-        let entry_id = entry_resp.result.unwrap()["id"]
-            .as_str()
+        let entry_json = entry_resp.result.unwrap();
+        let block_id = entry_json["blocks"][0]["id"].as_str().unwrap().to_string();
+
+        // Write a chunk embedding so semantic search has a hit (Plan 4: no
+        // background embedder yet; tests must populate embeddings directly).
+        let chunks = daemon.chunks.clone();
+        let chunk_id = chunks
+            .list(ulid::Ulid::from_string(&block_id).unwrap())
             .unwrap()
-            .to_string();
+            .items[0]
+            .id;
+        chunks.write_embedding(chunk_id, &[1.0_f32; DIM]).unwrap();
 
-        // Create chunks out of order.
-        for ord in [2, 0, 1] {
-            daemon
-                .dispatch(req(
-                    "chunk.create",
-                    json!({"entry_id": entry_id, "ordinal": ord, "text": format!("c{ord}")}),
-                ))
-                .await;
-        }
-
-        let list_resp = daemon
-            .dispatch(req("chunk.list", json!({"entry_id": entry_id})))
-            .await;
-        let result = list_resp.result.unwrap();
-        assert_eq!(result["total"], 3);
-        let items = result["items"].as_array().unwrap();
-        assert_eq!(items[0]["ordinal"], 0);
-        assert_eq!(items[1]["ordinal"], 1);
-        assert_eq!(items[2]["ordinal"], 2);
-    }
-
-    #[tokio::test]
-    async fn chunk_delete_removes_chunk_and_embedding() {
-        let server = MockServer::start().await;
-        mount_embedding_mock(&server).await;
-        let daemon = setup_daemon(&server).await;
-
-        let entry_resp = daemon
-            .dispatch(req(
-                "entry.create",
-                json!({"title":"d","blocks":[{"type":"note","text":"x"}]}),
-            ))
-            .await;
-        let entry_id = entry_resp.result.unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let create_resp = daemon
-            .dispatch(req(
-                "chunk.create",
-                json!({"entry_id": entry_id, "ordinal": 0, "text":"x"}),
-            ))
-            .await;
-        let chunk_id = create_resp.result.unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        // Verify semantic search finds the chunk.
-        let search_resp = daemon
-            .dispatch(req(
-                "search.semantic",
-                json!({"query":"anything","granularity":"chunk","limit":10}),
-            ))
-            .await;
-        let result = search_resp.result.unwrap();
-        let items = result["items"].as_array().unwrap();
-        assert_eq!(items.len(), 1);
-
-        // Delete the chunk.
-        let del_resp = daemon
-            .dispatch(req("chunk.delete", json!({"id": chunk_id})))
-            .await;
-        assert_eq!(del_resp.result.unwrap()["deleted"], true);
-
-        // Semantic search should now return empty.
-        let search_resp2 = daemon
-            .dispatch(req(
-                "search.semantic",
-                json!({"query":"anything","granularity":"chunk","limit":10}),
-            ))
-            .await;
-        let result2 = search_resp2.result.unwrap();
-        let items2 = result2["items"].as_array().unwrap();
-        assert!(items2.is_empty());
-    }
-
-    #[tokio::test]
-    async fn search_semantic_granularity_defaults_to_entry() {
-        let server = MockServer::start().await;
-        mount_embedding_mock(&server).await;
-        let daemon = setup_daemon(&server).await;
-
-        let entry_resp = daemon
-            .dispatch(req(
-                "entry.create",
-                json!({"title":"d","blocks":[{"type":"note","text":"x"}]}),
-            ))
-            .await;
-        let entry_id = entry_resp.result.unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        // Create a chunk.
-        daemon
-            .dispatch(req(
-                "chunk.create",
-                json!({"entry_id": entry_id, "ordinal": 0, "text":"chunk text"}),
-            ))
-            .await;
-
-        // Default granularity should be "entry" — items have "entry" field, not "chunk".
         let resp = daemon
             .dispatch(req(
                 "search.semantic",
@@ -951,45 +924,9 @@ mod tests {
             .await;
         let result = resp.result.unwrap();
         let items = result["items"].as_array().unwrap();
-        // Should have entry-level results (entry body was embedded), not chunk-level.
-        assert!(items.iter().all(|i| i["entry"].is_object()));
-    }
-
-    #[tokio::test]
-    async fn search_semantic_granularity_chunk_returns_chunks() {
-        let server = MockServer::start().await;
-        mount_embedding_mock(&server).await;
-        let daemon = setup_daemon(&server).await;
-
-        let entry_resp = daemon
-            .dispatch(req(
-                "entry.create",
-                json!({"title":"d","blocks":[{"type":"note","text":"x"}]}),
-            ))
-            .await;
-        let entry_id = entry_resp.result.unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        daemon
-            .dispatch(req(
-                "chunk.create",
-                json!({"entry_id": entry_id, "ordinal": 0, "text":"chunk content"}),
-            ))
-            .await;
-
-        let resp = daemon
-            .dispatch(req(
-                "search.semantic",
-                json!({"query":"anything","granularity":"chunk","limit":10}),
-            ))
-            .await;
-        let result = resp.result.unwrap();
-        let items = result["items"].as_array().unwrap();
         assert!(!items.is_empty());
         assert!(items.iter().all(|i| i["chunk"].is_object()));
-        assert_eq!(items[0]["chunk"]["entry_id"], entry_id);
+        assert_eq!(items[0]["chunk"]["block_id"], block_id);
     }
 
     #[tokio::test]
@@ -998,33 +935,31 @@ mod tests {
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
 
+        // Create entry with 2 blocks → 2 auto-derived chunks.
         let entry_resp = daemon
             .dispatch(req(
                 "entry.create",
-                json!({"title":"d","blocks":[{"type":"note","text":"x"}]}),
+                json!({"title":"d","blocks":[
+                    {"type":"note","text":"first block"},
+                    {"type":"note","text":"second block"}
+                ]}),
             ))
             .await;
-        let entry_id = entry_resp.result.unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let entry_json = entry_resp.result.unwrap();
+        let entry_id = entry_json["id"].as_str().unwrap().to_string();
 
-        // Create 2 chunks.
-        for ord in 0..2 {
-            daemon
-                .dispatch(req(
-                    "chunk.create",
-                    json!({"entry_id": entry_id, "ordinal": ord, "text": format!("c{ord}")}),
-                ))
-                .await;
+        // Write chunk embeddings so semantic search finds them.
+        let chunks = daemon.chunks.clone();
+        for block in entry_json["blocks"].as_array().unwrap() {
+            let block_id: ulid::Ulid = block["id"].as_str().unwrap().parse().unwrap();
+            for chunk in chunks.list(block_id).unwrap().items {
+                chunks.write_embedding(chunk.id, &[1.0_f32; DIM]).unwrap();
+            }
         }
 
         // Precondition: chunk search finds 2.
         let pre = daemon
-            .dispatch(req(
-                "search.semantic",
-                json!({"query":"x","granularity":"chunk","limit":10}),
-            ))
+            .dispatch(req("search.semantic", json!({"query":"x","limit":10})))
             .await;
         assert_eq!(pre.result.unwrap()["items"].as_array().unwrap().len(), 2);
 
@@ -1033,12 +968,10 @@ mod tests {
             .dispatch(req("entry.delete", json!({"id": entry_id})))
             .await;
 
-        // After: chunk search returns 0 (CASCADE removed chunks, cleanup removed embeddings).
+        // After: chunk search returns 0 (CASCADE removed chunks; entry.delete
+        // handler cleaned up vec_chunk_embeddings rows).
         let post = daemon
-            .dispatch(req(
-                "search.semantic",
-                json!({"query":"x","granularity":"chunk","limit":10}),
-            ))
+            .dispatch(req("search.semantic", json!({"query":"x","limit":10})))
             .await;
         assert_eq!(post.result.unwrap()["items"].as_array().unwrap().len(), 0);
 
@@ -1052,36 +985,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chunk_create_emits_event_visible_via_events_list() {
+    async fn search_semantic_with_block_type_filter() {
+        // Plan 4: block_type filter is the successor to the old granularity.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
 
-        let entry_resp = daemon
+        // Two entries: one note, one claim.
+        let note_resp = daemon
             .dispatch(req(
                 "entry.create",
-                json!({"title":"d","blocks":[{"type":"note","text":"x"}]}),
+                json!({"title":"n","blocks":[{"type":"note","text":"note body"}]}),
             ))
             .await;
-        let entry_id = entry_resp.result.unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        daemon
+        let claim_resp = daemon
             .dispatch(req(
-                "chunk.create",
-                json!({"entry_id": entry_id, "ordinal": 0, "text":"x"}),
+                "entry.create",
+                json!({"title":"c","blocks":[{"type":"claim","text":"claim body"}]}),
             ))
             .await;
 
-        let list_resp = daemon
-            .dispatch(req("events.list", json!({"type":"chunk.created"})))
+        // Write embeddings for both chunks.
+        let chunks = daemon.chunks.clone();
+        for resp in [note_resp, claim_resp] {
+            let block_id: ulid::Ulid = resp.result.unwrap()["blocks"][0]["id"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            for chunk in chunks.list(block_id).unwrap().items {
+                chunks.write_embedding(chunk.id, &[1.0_f32; DIM]).unwrap();
+            }
+        }
+
+        // Filter to claims only.
+        let resp = daemon
+            .dispatch(req(
+                "search.semantic",
+                json!({"query":"anything","limit":10,"block_type":"claim"}),
+            ))
             .await;
-        let result = list_resp.result.unwrap();
-        let items = result["items"].as_array().unwrap();
+        let items = resp.result.unwrap()["items"].as_array().unwrap().clone();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["payload"]["entry_id"], entry_id);
+        // All hits should be from a claim block.
+        assert_eq!(items[0]["chunk"]["attrs"]["parent_block_type"], "claim");
     }
 
     // ----- MCP lifecycle + plugin registration e2e (Plan KS1-T5) -----
@@ -1113,9 +1060,9 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 23 built-in non-MCP handlers (entry:5, link:5, chunk:4, events:3,
+        // 21 built-in non-MCP handlers (entry:5, link:5, chunk:2, events:3,
         // search:2, provider:1, cache:2, batch:1).
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 21);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1125,7 +1072,10 @@ mod tests {
         assert!(names.contains(&"entry.create"));
         assert!(names.contains(&"link.neighbors"));
         assert!(names.contains(&"events.list"));
-        assert!(names.contains(&"chunk.create"));
+        // Plan 4: chunk.create / chunk.delete are gone.
+        assert!(!names.contains(&"chunk.create"));
+        assert!(!names.contains(&"chunk.delete"));
+        assert!(names.contains(&"chunk.get"));
         assert!(names.contains(&"search.semantic"));
         assert!(names.contains(&"provider.list"));
         // MCP meta-methods are not callable tools.
@@ -1240,13 +1190,14 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 24); // 23 built-in + custom.echo
+        assert_eq!(tools.len(), 22); // 21 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
 
     #[tokio::test]
-    async fn batch_all_success_creates_entry_and_chunks() {
+    async fn batch_all_success_creates_entries_and_link() {
+        // Plan 4: chunk.create is gone from batch; entries auto-derive chunks.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -1258,11 +1209,6 @@ mod tests {
                     "ops": [
                         {"id": "e1", "method": "entry.create", "params": {"title": "doc", "blocks":[{"type":"note","text":"body text"}]}},
                         {"id": "e2", "method": "entry.create", "params": {"title": "target", "blocks":[{"type":"note","text":"target body"}]}},
-                        {"id": "c1", "method": "chunk.create", "params": {
-                            "entry_id": {"$ref": "e1.id"},
-                            "ordinal": 0,
-                            "text": "chunk text"
-                        }},
                         {"method": "link.create", "params": {
                             "source_id": {"$ref": "e1.id"},
                             "target_id": {"$ref": "e2.id"},
@@ -1277,20 +1223,30 @@ mod tests {
         let result = resp.result.unwrap();
         assert_eq!(result["rolled_back"], false);
         let results = result["results"].as_array().unwrap();
-        assert_eq!(results.len(), 4);
+        assert_eq!(results.len(), 3);
         assert!(results.iter().all(|r| r["ok"] == true));
 
         // Verify $ref resolved correctly
         let entry_id = results[0]["result"]["id"].as_str().unwrap();
         let target_id = results[1]["result"]["id"].as_str().unwrap();
-        let chunk_entry_id = results[2]["result"]["entry_id"].as_str().unwrap();
-        assert_eq!(chunk_entry_id, entry_id, "chunk entry_id should match $ref");
-        let link_source_id = results[3]["result"]["source_id"].as_str().unwrap();
-        let link_target_id = results[3]["result"]["target_id"].as_str().unwrap();
+        let link_source_id = results[2]["result"]["source_id"].as_str().unwrap();
+        let link_target_id = results[2]["result"]["target_id"].as_str().unwrap();
         assert_eq!(link_source_id, entry_id, "link source_id should match $ref");
         assert_eq!(
             link_target_id, target_id,
             "link target_id should match $ref"
+        );
+
+        // Plan 4 bonus: chunks auto-derived for each entry.
+        let e1_block: ulid::Ulid = results[0]["result"]["blocks"][0]["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            daemon.chunks.list(e1_block).unwrap().items.len(),
+            1,
+            "entry.create should auto-derive one chunk for the block"
         );
     }
 
@@ -1306,10 +1262,11 @@ mod tests {
                 json!({
                     "ops": [
                         {"id": "e1", "method": "entry.create", "params": {"title": "will rollback", "blocks":[{"type":"note","text":"x"}]}},
-                        {"method": "chunk.create", "params": {
-                            "entry_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",  // phantom entry → FK violation
-                            "ordinal": 0,
-                            "text": "orphan chunk"
+                        // link.create with phantom source → FK violation
+                        {"method": "link.create", "params": {
+                            "source_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                            "target_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+                            "relation": "references"
                         }}
                     ]
                 }),
@@ -1367,9 +1324,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_ref_unknown_op_id_fails() {
+    async fn batch_rejects_chunk_create() {
+        // Plan 4: chunk.create is no longer an allowed batch method.
         let server = MockServer::start().await;
-        mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
 
         let resp = daemon
@@ -1378,7 +1335,7 @@ mod tests {
                 json!({
                     "ops": [
                         {"method": "chunk.create", "params": {
-                            "entry_id": {"$ref": "nonexistent.id"},
+                            "entry_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
                             "ordinal": 0,
                             "text": "x"
                         }}
@@ -1392,19 +1349,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_batch_embedding_calls_embedder_once() {
+    async fn batch_ref_unknown_op_id_fails() {
         let server = MockServer::start().await;
-        // Mock expects exactly 1 embedding call (batch), not 3 (individual)
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "batch",
+                json!({
+                    "ops": [
+                        // link.create with $ref to nonexistent op id
+                        {"method": "link.create", "params": {
+                            "source_id": {"$ref": "nonexistent.id"},
+                            "target_id": {"$ref": "nonexistent.id"},
+                            "relation": "r"
+                        }}
+                    ]
+                }),
+            ))
+            .await;
+
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1003);
+    }
+
+    #[tokio::test]
+    async fn batch_does_not_call_embedder() {
+        // Plan 4: entry.create no longer triggers embedding work (Plan 5
+        // will add a separate background chunk embedder). batch of N
+        // entry.create ops must therefore issue zero embedding calls.
+        let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/embeddings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [
-                    {"index": 0, "embedding": vec![1.0_f32; DIM]},
-                    {"index": 1, "embedding": vec![1.0_f32; DIM]},
-                    {"index": 2, "embedding": vec![1.0_f32; DIM]}
-                ]
+                "data": [{"index": 0, "embedding": vec![1.0_f32; DIM]}]
             })))
-            .expect(1) // ← exactly 1 call (batch embed), not 3
+            .expect(0) // ← zero embedding calls
             .mount(&server)
             .await;
 
@@ -1423,7 +1404,7 @@ mod tests {
             ))
             .await;
 
-        // Mock's expect(1) verifies on drop that exactly 1 embedding call was made.
+        // Mock's expect(0) verifies on drop that no embedding call was made.
     }
 
     #[tokio::test]
@@ -1438,16 +1419,12 @@ mod tests {
                 json!({
                     "ops": [
                         {"id": "e1", "method": "entry.create", "params": {"title": "doc", "blocks":[{"type":"note","text":"x"}]}},
-                        {"id": "c1", "method": "chunk.create", "params": {
-                            "entry_id": {"$ref": "e1.id"},
-                            "ordinal": 0,
-                            "text": "chunk"
-                        }},
-                        // Link references chunk's id
+                        // Self-link: source_id and target_id both reference e1.
+                        // Exercises both top-level ($ref) and field-only (.id) access.
                         {"method": "link.create", "params": {
                             "source_id": {"$ref": "e1.id"},
-                            "target_id": {"$ref": "c1.entry_id"},
-                            "relation": "has_chunk"
+                            "target_id": {"$ref": "e1.id"},
+                            "relation": "self"
                         }}
                     ]
                 }),
@@ -1458,11 +1435,11 @@ mod tests {
         let result = resp.result.unwrap();
         let results = result["results"].as_array().unwrap();
 
-        // Verify nested ref: link target_id == chunk's entry_id == entry's id
+        // Verify nested ref: link target_id == entry_id == source_id
         let entry_id = results[0]["result"]["id"].as_str().unwrap();
-        let chunk_entry_id = results[1]["result"]["entry_id"].as_str().unwrap();
-        let link_target = results[2]["result"]["target_id"].as_str().unwrap();
-        assert_eq!(chunk_entry_id, entry_id);
+        let link_source = results[1]["result"]["source_id"].as_str().unwrap();
+        let link_target = results[1]["result"]["target_id"].as_str().unwrap();
+        assert_eq!(link_source, entry_id);
         assert_eq!(link_target, entry_id);
     }
 
@@ -1502,41 +1479,50 @@ mod tests {
     #[tokio::test]
     async fn cache_clear_returns_by_model_breakdown() {
         let server = MockServer::start().await;
-        mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
 
-        // Create two entries (each triggers embedding → 2 rows in emb_cache
-        // under "test-model" — one per body hash; same body → 1 row).
-        daemon
-            .dispatch(req(
-                "entry.create",
-                json!({"title":"a","blocks":[{"type":"note","text":"x"}]}),
-            ))
-            .await;
-        daemon
-            .dispatch(req(
-                "entry.create",
-                json!({"title":"b","blocks":[{"type":"note","text":"y"}]}),
-            ))
-            .await;
-
-        // Inject a row under a different model directly so by_model has 2 keys.
+        // Plan 4: entry.create no longer auto-populates emb_cache; inject
+        // rows directly. Two distinct body hashes under "test-model" plus
+        // one under "other-model" so by_model has two keys.
         {
             let conn = daemon.entries.conn_for_test();
-            conn.lock()
-                .unwrap()
-                .execute(
-                    "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at)
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                    rusqlite::params![
-                        "other-model",
-                        vec![9u8; 32],
-                        DIM,
-                        vec![0u8; DIM * 4],
-                        "2026-01-01T00:00:00Z"
-                    ],
-                )
-                .unwrap();
+                rusqlite::params![
+                    "test-model",
+                    vec![1u8; 32],
+                    DIM,
+                    vec![0u8; DIM * 4],
+                    "2026-01-01T00:00:00Z"
+                ],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    "test-model",
+                    vec![2u8; 32],
+                    DIM,
+                    vec![0u8; DIM * 4],
+                    "2026-01-02T00:00:00Z"
+                ],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    "other-model",
+                    vec![9u8; 32],
+                    DIM,
+                    vec![0u8; DIM * 4],
+                    "2026-01-01T00:00:00Z"
+                ],
+            )
+            .unwrap();
         }
 
         let resp = daemon.dispatch(req("cache.clear", json!({}))).await;

@@ -101,7 +101,36 @@ impl BlockService {
                 block.updated_at.to_rfc3339(),
             ],
         )
-        .map_err(map_constraint_violation)?;
+        .map_err(crate::storage::map_constraint_violation)?;
+
+        // Derive chunks from block text (Spec §10). One chunk per output of
+        // `chunking::chunk_text`. `attrs` inherits `block.attrs` plus the
+        // `parent_block_type` marker used by downstream search filters.
+        let chunk_texts = crate::chunking::chunk_text(&block.text, 1024);
+        let mut chunk_attrs = block.attrs.clone();
+        if let Some(obj) = chunk_attrs.as_object_mut() {
+            obj.insert(
+                "parent_block_type".into(),
+                serde_json::Value::String(block.r#type.clone()),
+            );
+        }
+        for (chunk_ordinal, chunk_text) in chunk_texts.into_iter().enumerate() {
+            let chunk_id = Ulid::new();
+            conn.execute(
+                "INSERT INTO chunks (id, block_id, ordinal, text, attrs, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    chunk_id.to_string(),
+                    block.id.to_string(),
+                    chunk_ordinal as u32,
+                    &chunk_text,
+                    chunk_attrs.to_string(),
+                    block.created_at.to_rfc3339(),
+                    block.updated_at.to_rfc3339(),
+                ],
+            )
+            .map_err(crate::storage::map_constraint_violation)?;
+        }
 
         let event_id = Ulid::new();
         let event_payload = serde_json::to_value(&block).expect("block serializes");
@@ -117,7 +146,7 @@ impl BlockService {
                 Utc::now().to_rfc3339(),
             ],
         )
-        .map_err(map_constraint_violation)?;
+        .map_err(crate::storage::map_constraint_violation)?;
 
         Ok(block)
     }
@@ -211,18 +240,6 @@ impl BlockService {
     }
 }
 
-/// Map SQLite ConstraintViolation (FK or UNIQUE) to `CoreError::Validation`.
-/// Other storage errors pass through as `CoreError::Storage`.
-fn map_constraint_violation(e: rusqlite::Error) -> CoreError {
-    use rusqlite::ffi::ErrorCode;
-    match e {
-        rusqlite::Error::SqliteFailure(err, _) if err.code == ErrorCode::ConstraintViolation => {
-            CoreError::Validation(format!("constraint violation: {e}"))
-        }
-        other => CoreError::Storage(other),
-    }
-}
-
 /// Map a SQLite row to a `Block`. Expects columns in the canonical order:
 /// id, entry_id, ordinal, type, text, attrs, created_at, updated_at.
 ///
@@ -289,14 +306,6 @@ mod tests {
                 now.to_rfc3339(),
                 now.to_rfc3339(),
             ],
-        )
-        .unwrap();
-        // Also seed fts_entries so V1 trigger absence doesn't break fulltext
-        // cleanup tests. The block_service tests don't exercise FTS directly
-        // but keeping fts in sync is consistent with the production path.
-        conn.execute(
-            "INSERT INTO fts_entries (entry_id, title, body) VALUES (?1, ?2, ?3)",
-            rusqlite::params![id.to_string(), "seed", ""],
         )
         .unwrap();
         id
