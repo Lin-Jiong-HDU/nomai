@@ -2,6 +2,7 @@
 
 pub mod block_model;
 pub mod chunk_model;
+pub mod content_store;
 pub mod chunk_service;
 pub mod error;
 pub mod event_model;
