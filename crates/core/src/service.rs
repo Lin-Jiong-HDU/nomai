@@ -644,6 +644,22 @@ impl EntryService {
     pub fn conn_for_test(&self) -> Arc<Mutex<Connection>> {
         self.conn.clone()
     }
+
+    /// Access the owned `BlockService`. Plan 5 surface: block-level RPCs
+    /// (`block.append`, future `block.update`/`block.delete`) live in the
+    /// daemon layer and need a handle to call `BlockService::append` /
+    /// `create_in_tx` directly. The block service shares the same SQLite
+    /// connection (FK target is `entries.id`).
+    pub fn block_service(&self) -> &Arc<crate::block_service::BlockService> {
+        &self.block_service
+    }
+
+    /// Access the owned FS-backed `ContentStore`. Plan 5 surface: block-level
+    /// mutations need to re-render the entry's `.nomai` file; that requires
+    /// the same store that owns the file path layout (`<root>/entries/<id>/`).
+    pub fn content_store(&self) -> &Arc<crate::content_store::ContentStore> {
+        &self.content_store
+    }
 }
 
 pub(crate) fn row_to_entry(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Entry> {

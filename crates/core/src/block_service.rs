@@ -154,6 +154,81 @@ impl BlockService {
         Ok(block)
     }
 
+    /// Append a block to an entry. Computes `ordinal = max(existing) + 1`
+    /// (0 when the entry has no blocks). Auto-chunks via the same path as
+    /// `create_in_tx`. Emits `block.created`. Returns NotFound if the entry
+    /// does not exist.
+    pub fn append(
+        &self,
+        entry_id: Ulid,
+        r#type: String,
+        text: String,
+        attrs: Option<serde_json::Value>,
+    ) -> Result<Block, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN")?;
+        let result = self.append_in_tx(&conn, entry_id, r#type, text, attrs);
+        match result {
+            Ok(block) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(block)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Append within an existing transaction. Caller controls BEGIN/COMMIT.
+    /// Computes ordinal = MAX(ordinal) + 1 over existing blocks for the entry
+    /// (0 if the entry has no blocks yet). Returns NotFound if the entry does
+    /// not exist; Validation on unknown block type via create_in_tx.
+    pub fn append_in_tx(
+        &self,
+        conn: &Connection,
+        entry_id: Ulid,
+        r#type: String,
+        text: String,
+        attrs: Option<serde_json::Value>,
+    ) -> Result<Block, CoreError> {
+        // Verify entry exists. The FK on blocks.entry_id would catch this
+        // anyway, but a NotFound error is more informative than the mapped
+        // constraint violation.
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries WHERE id = ?1",
+                params![entry_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(CoreError::Storage)?;
+        if exists == 0 {
+            return Err(CoreError::NotFound(entry_id));
+        }
+
+        // Compute next ordinal. MAX returns NULL when there are no rows; map
+        // that to 0.
+        let max_ordinal: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(ordinal) FROM blocks WHERE entry_id = ?1",
+                params![entry_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(CoreError::Storage)?;
+        let ordinal = max_ordinal.map(|m| (m + 1) as u32).unwrap_or(0);
+
+        self.create_in_tx(
+            conn,
+            CreateBlock {
+                entry_id,
+                ordinal,
+                r#type,
+                text,
+                attrs,
+            },
+        )
+    }
+
     /// List all blocks for an entry, ordered by ordinal. Empty result if
     /// the entry has no blocks or doesn't exist (callers can distinguish
     /// via EntryService::get if needed).
@@ -581,6 +656,61 @@ mod tests {
         let fake_id = Ulid::new();
         let err = svc.delete(fake_id).unwrap_err();
         assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn append_adds_block_at_end() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        // Seed one block at ordinal 0
+        svc.create(CreateBlock {
+            entry_id,
+            ordinal: 0,
+            r#type: "note".into(),
+            text: "first".into(),
+            attrs: None,
+        })
+        .unwrap();
+
+        let appended = svc
+            .append(entry_id, "claim".into(), "appended".into(), None)
+            .unwrap();
+        assert_eq!(appended.entry_id, entry_id);
+        assert_eq!(appended.ordinal, 1, "append should use max ordinal + 1");
+        assert_eq!(appended.r#type, "claim");
+
+        let list = svc.list(entry_id).unwrap();
+        assert_eq!(list.total, 2);
+        assert_eq!(list.items[1].id, appended.id);
+    }
+
+    #[test]
+    fn append_to_empty_entry_uses_ordinal_zero() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        let appended = svc
+            .append(entry_id, "note".into(), "first".into(), None)
+            .unwrap();
+        assert_eq!(appended.ordinal, 0);
+    }
+
+    #[test]
+    fn append_emits_block_created_event() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        let block = svc
+            .append(entry_id, "note".into(), "x".into(), None)
+            .unwrap();
+
+        let guard = svc.conn.lock().unwrap();
+        let event_type: String = guard
+            .query_row(
+                "SELECT type FROM events WHERE target_id = ?1 AND type = 'block.created'",
+                params![block.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_type, "block.created");
     }
 
     #[test]

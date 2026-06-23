@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::rpc::RpcHandler;
 
 pub mod batch;
+pub mod block;
 pub mod cache;
 pub mod chunk;
 pub mod entry;
@@ -54,6 +55,10 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     let h = chunk::Get;
     m.insert(h.method(), Arc::new(h));
     let h = chunk::List;
+    m.insert(h.method(), Arc::new(h));
+
+    // block.* (Plan 5: block-level RPCs on top of Plan 3 blocks storage.)
+    let h = block::Append;
     m.insert(h.method(), Arc::new(h));
 
     // events.*
@@ -1074,9 +1079,9 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 21 built-in non-MCP handlers (entry:5, link:5, chunk:2, events:3,
-        // search:2, provider:1, cache:2, batch:1).
-        assert_eq!(tools.len(), 21);
+        // 22 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:1,
+        // events:3, search:2, provider:1, cache:2, batch:1).
+        assert_eq!(tools.len(), 22);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1204,7 +1209,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 22); // 21 built-in + custom.echo
+        assert_eq!(tools.len(), 23); // 22 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
@@ -1635,5 +1640,83 @@ mod tests {
 
         let stats = daemon.dispatch(req("cache.stats", json!({}))).await;
         assert_eq!(stats.result.unwrap()["embeddings"]["rows"], 1);
+    }
+
+    // ----- block.append e2e test (Plan 5 Task 2) -----
+
+    #[tokio::test]
+    async fn block_append_adds_block_and_rerenders_nomai() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create entry with one initial block at ordinal 0.
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"T","blocks":[{"type":"note","text":"first"}]}),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+        let entry_json = create_resp.result.unwrap();
+        let entry_id = entry_json["id"].as_str().unwrap().to_string();
+        let entry_ulid: ulid::Ulid = entry_id.parse().unwrap();
+
+        // Append a second block of a different type.
+        let append_resp = daemon
+            .dispatch(req(
+                "block.append",
+                json!({
+                    "entry_id": entry_id,
+                    "type": "question",
+                    "text": "Why?",
+                    "attrs": {"priority": "high"},
+                }),
+            ))
+            .await;
+        assert!(append_resp.error.is_none(), "{:?}", append_resp.error);
+        let appended = append_resp.result.unwrap();
+        assert_eq!(appended["entry_id"], entry_id);
+        assert_eq!(appended["ordinal"], 1, "append should pick max ordinal + 1");
+        assert_eq!(appended["type"], "question");
+        assert_eq!(appended["text"], "Why?");
+        assert_eq!(appended["attrs"]["priority"], "high");
+
+        // entry.get reflects 2 blocks.
+        let get_resp = daemon
+            .dispatch(req("entry.get", json!({"id": entry_id})))
+            .await;
+        let blocks = get_resp.result.unwrap()["blocks"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[1]["type"], "question");
+
+        // The .nomai file on disk was rewritten and round-trips.
+        let doc = daemon
+            .entries
+            .content_store()
+            .read_entry(entry_ulid)
+            .expect("rerendered .nomai must be readable");
+        assert_eq!(doc.title, "T");
+        assert_eq!(doc.blocks.len(), 2);
+        assert_eq!(doc.blocks[1].r#type.as_str(), "question");
+    }
+
+    #[tokio::test]
+    async fn block_append_to_unknown_entry_returns_not_found() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req(
+                "block.append",
+                json!({"entry_id": phantom, "type": "note", "text": "x"}),
+            ))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1001); // NotFound
     }
 }

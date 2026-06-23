@@ -48,6 +48,12 @@ pub mod chunk {
     pub const LIST: &str = "chunk.list";
 }
 
+pub mod block {
+    /// Plan 5: append a block to an entry. Computes ordinal = max(existing)+1
+    /// and re-renders the entry's `.nomai` file.
+    pub const APPEND: &str = "block.append";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +102,10 @@ mod tests {
         assert_eq!(chunk::GET, "chunk.get");
         assert_eq!(chunk::DELETE, "chunk.delete");
         assert_eq!(chunk::LIST, "chunk.list");
+    }
+
+    #[test]
+    fn block_namespace_methods() {
+        assert_eq!(block::APPEND, "block.append");
     }
 }
