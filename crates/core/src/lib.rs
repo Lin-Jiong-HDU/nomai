@@ -23,7 +23,7 @@ pub use link_model::{
 pub use link_service::LinkService;
 pub use model::Entry;
 pub use nomai_format::{
-    parse as parse_nomai, render as render_nomai, Block, BlockType, NomaiDoc, ParseError,
+    Block, BlockType, NomaiDoc, ParseError, parse as parse_nomai, render as render_nomai,
 };
 pub use service::{
     CreateEntry, EntryListQuery, EntryListResult, EntryService, FulltextSearchResult,

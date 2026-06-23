@@ -75,13 +75,14 @@ fn main() {
 
     // Hub: ids[0] references ids[1..20]
     for i in 1..20 {
-        links.create(CreateLink {
-            source_id: ids[0],
-            target_id: ids[i],
-            relation: "references".into(),
-            attrs: None,
-        })
-        .unwrap();
+        links
+            .create(CreateLink {
+                source_id: ids[0],
+                target_id: ids[i],
+                relation: "references".into(),
+                attrs: None,
+            })
+            .unwrap();
     }
     // Chain: each entry references the previous one
     for i in 1..1000 {
@@ -153,33 +154,69 @@ fn main() {
     });
 
     println!("\n=== Per-operation mean cost ===\n");
-    println!("  entry.get (unique)        {:>7.2}µs", t_get_unique.as_secs_f64() * 1e6);
-    println!("  entry.get (repeat hub)    {:>7.2}µs", t_get_repeat.as_secs_f64() * 1e6);
-    println!("  entry.list (50 items)     {:>7.2}µs", t_list.as_secs_f64() * 1e6);
-    println!("  link.neighbors            {:>7.2}µs", t_neighbors.as_secs_f64() * 1e6);
-    println!("  fulltext_search           {:>7.2}µs", t_fts.as_secs_f64() * 1e6);
-    println!("  semantic_search           {:>7.2}µs", t_semantic.as_secs_f64() * 1e6);
+    println!(
+        "  entry.get (unique)        {:>7.2}µs",
+        t_get_unique.as_secs_f64() * 1e6
+    );
+    println!(
+        "  entry.get (repeat hub)    {:>7.2}µs",
+        t_get_repeat.as_secs_f64() * 1e6
+    );
+    println!(
+        "  entry.list (50 items)     {:>7.2}µs",
+        t_list.as_secs_f64() * 1e6
+    );
+    println!(
+        "  link.neighbors            {:>7.2}µs",
+        t_neighbors.as_secs_f64() * 1e6
+    );
+    println!(
+        "  fulltext_search           {:>7.2}µs",
+        t_fts.as_secs_f64() * 1e6
+    );
+    println!(
+        "  semantic_search           {:>7.2}µs",
+        t_semantic.as_secs_f64() * 1e6
+    );
 
     println!("\n=== GraphRAG pattern breakdown ===\n");
     println!("  Pattern: search.semantic(top-3) + 3 × link.neighbors(limit=5)");
     println!("  Note: link.neighbors returns full Entry objects via JOIN,");
     println!("        so GraphRAG does NOT issue separate entry.get calls.\n");
     let graph_rag = t_semantic + t_neighbors * 3;
-    println!("  Estimated total:          {:>7.2}µs", graph_rag.as_secs_f64() * 1e6);
-    println!("  - search.semantic share:  {:>6.1}%", 100.0 * t_semantic.as_secs_f64() / graph_rag.as_secs_f64());
-    println!("  - 3 × neighbors share:    {:>6.1}%", 100.0 * 3.0 * t_neighbors.as_secs_f64() / graph_rag.as_secs_f64());
+    println!(
+        "  Estimated total:          {:>7.2}µs",
+        graph_rag.as_secs_f64() * 1e6
+    );
+    println!(
+        "  - search.semantic share:  {:>6.1}%",
+        100.0 * t_semantic.as_secs_f64() / graph_rag.as_secs_f64()
+    );
+    println!(
+        "  - 3 × neighbors share:    {:>6.1}%",
+        100.0 * 3.0 * t_neighbors.as_secs_f64() / graph_rag.as_secs_f64()
+    );
 
     println!("\n=== Object cache potential benefit ===\n");
     let cache_hit_estimate = Duration::from_nanos(500); // ~Arc clone + HashMap lookup
     let unique_us = t_get_unique.as_secs_f64() * 1e6;
     let cached_us = cache_hit_estimate.as_secs_f64() * 1e6;
     println!("  entry.get SQLite path:    {:>7.2}µs", unique_us);
-    println!("  entry.get cache hit est:  {:>7.2}µs  (Arc clone + HashMap lookup)", cached_us);
-    println!("  Speedup if cache hit:     {:>7.1}x", unique_us / cached_us);
+    println!(
+        "  entry.get cache hit est:  {:>7.2}µs  (Arc clone + HashMap lookup)",
+        cached_us
+    );
+    println!(
+        "  Speedup if cache hit:     {:>7.1}x",
+        unique_us / cached_us
+    );
     println!();
     println!("  But: GraphRAG doesn't call entry.get separately (neighbors JOIN).");
     println!("       entry.list / search already deserialize their own result rows.");
     println!("       The only real beneficiary is the rare 'get same id N times' pattern.");
     println!();
-    println!("  Verdict: weigh the {:>6.1}x hit-path speedup against invalidation cost.", unique_us / cached_us);
+    println!(
+        "  Verdict: weigh the {:>6.1}x hit-path speedup against invalidation cost.",
+        unique_us / cached_us
+    );
 }
