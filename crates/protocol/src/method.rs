@@ -52,6 +52,10 @@ pub mod block {
     /// Plan 5: append a block to an entry. Computes ordinal = max(existing)+1
     /// and re-renders the entry's `.nomai` file.
     pub const APPEND: &str = "block.append";
+    /// Plan 5: update a block's type/text/attrs. Re-chunks when text changes
+    /// (chunks_ad trigger cleans vec_chunk_embeddings) and re-renders the
+    /// entry's `.nomai` file.
+    pub const UPDATE: &str = "block.update";
 }
 
 #[cfg(test)]
@@ -107,5 +111,6 @@ mod tests {
     #[test]
     fn block_namespace_methods() {
         assert_eq!(block::APPEND, "block.append");
+        assert_eq!(block::UPDATE, "block.update");
     }
 }

@@ -19,6 +19,7 @@ use crate::daemon::Daemon;
 use crate::handlers::entry::blocking;
 use crate::rpc::RpcHandler;
 use nomai_protocol::method::block::APPEND as BLOCK_APPEND;
+use nomai_protocol::method::block::UPDATE as BLOCK_UPDATE;
 
 pub struct Append;
 
@@ -52,6 +53,45 @@ impl RpcHandler for Append {
         // Re-render the entry's .nomai (block list changed). Runs in the same
         // spawn_blocking pattern as the rest of this handler family.
         rerender_entry_nomai(&entries, entry_id).await?;
+
+        serde_json::to_value(&block).map_err(|e| CoreError::Config(format!("serialize: {e}")))
+    }
+}
+
+pub struct Update;
+
+#[async_trait]
+impl RpcHandler for Update {
+    fn method(&self) -> &'static str {
+        BLOCK_UPDATE
+    }
+    async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
+        #[derive(Deserialize)]
+        struct Params {
+            id: ulid::Ulid,
+            #[serde(default)]
+            r#type: Option<String>,
+            #[serde(default)]
+            text: Option<String>,
+            #[serde(default)]
+            attrs: Option<Value>,
+        }
+        let p: Params = serde_json::from_value(params)
+            .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+
+        let entries: Arc<EntryService> = daemon.entries.clone();
+        let id = p.id;
+        let ty = p.r#type;
+        let text = p.text;
+        let attrs = p.attrs;
+        let block = {
+            let entries = entries.clone();
+            blocking(move || entries.block_service().update(id, ty, text, attrs)).await??
+        };
+
+        // Re-render the entry's .nomai (block text/type/attrs may have
+        // changed). Runs in the same spawn_blocking pattern as Append.
+        rerender_entry_nomai(&entries, block.entry_id).await?;
 
         serde_json::to_value(&block).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }

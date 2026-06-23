@@ -60,6 +60,8 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     // block.* (Plan 5: block-level RPCs on top of Plan 3 blocks storage.)
     let h = block::Append;
     m.insert(h.method(), Arc::new(h));
+    let h = block::Update;
+    m.insert(h.method(), Arc::new(h));
 
     // events.*
     let h = events::List;
@@ -1079,9 +1081,9 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 22 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:1,
+        // 23 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:2,
         // events:3, search:2, provider:1, cache:2, batch:1).
-        assert_eq!(tools.len(), 22);
+        assert_eq!(tools.len(), 23);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1209,7 +1211,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 23); // 22 built-in + custom.echo
+        assert_eq!(tools.len(), 24); // 23 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
@@ -1715,6 +1717,114 @@ mod tests {
                 "block.append",
                 json!({"entry_id": phantom, "type": "note", "text": "x"}),
             ))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1001); // NotFound
+    }
+
+    // ----- block.update e2e tests (Plan 5 Task 3) -----
+
+    #[tokio::test]
+    async fn block_update_changes_text_and_rerenders_nomai() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create entry with a single block.
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"T","blocks":[{"type":"note","text":"original"}]}),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+        let entry_json = create_resp.result.unwrap();
+        let entry_id = entry_json["id"].as_str().unwrap().to_string();
+        let entry_ulid: ulid::Ulid = entry_id.parse().unwrap();
+        let block_id = entry_json["blocks"][0]["id"].as_str().unwrap().to_string();
+
+        // Update the block: new text + type, leaving attrs untouched.
+        let update_resp = daemon
+            .dispatch(req(
+                "block.update",
+                json!({
+                    "id": block_id,
+                    "type": "claim",
+                    "text": "rewritten",
+                }),
+            ))
+            .await;
+        assert!(update_resp.error.is_none(), "{:?}", update_resp.error);
+        let updated = update_resp.result.unwrap();
+        assert_eq!(updated["text"], "rewritten");
+        assert_eq!(updated["type"], "claim");
+
+        // entry.get reflects the mutation.
+        let get_resp = daemon
+            .dispatch(req("entry.get", json!({"id": entry_id})))
+            .await;
+        let blocks = get_resp.result.unwrap()["blocks"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "claim");
+        assert_eq!(blocks[0]["text"], "rewritten");
+
+        // The .nomai file on disk was rewritten and round-trips.
+        let doc = daemon
+            .entries
+            .content_store()
+            .read_entry(entry_ulid)
+            .expect("rerendered .nomai must be readable");
+        assert_eq!(doc.blocks.len(), 1);
+        assert_eq!(doc.blocks[0].r#type.as_str(), "claim");
+        assert_eq!(doc.blocks[0].text.trim(), "rewritten");
+    }
+
+    #[tokio::test]
+    async fn block_update_re_chunks_on_text_change() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create entry whose block has text spanning multiple chunks.
+        let long_text = "para.\n\n".repeat(200);
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"T","blocks":[{"type":"note","text":long_text}]}),
+            ))
+            .await;
+        let entry_json = create_resp.result.unwrap();
+        let block_id: ulid::Ulid = entry_json["blocks"][0]["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let before = daemon.chunks.list(block_id).unwrap().total;
+        assert!(before > 1);
+
+        // Shrink the text → re-chunk should produce exactly one chunk.
+        daemon
+            .dispatch(req(
+                "block.update",
+                json!({"id": block_id.to_string(), "text": "short"}),
+            ))
+            .await;
+        let after = daemon.chunks.list(block_id).unwrap().total;
+        assert_eq!(after, 1);
+    }
+
+    #[tokio::test]
+    async fn block_update_to_unknown_block_returns_not_found() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req("block.update", json!({"id": phantom, "text": "x"})))
             .await;
         let err = resp.error.unwrap();
         assert_eq!(err.code, 1001); // NotFound
