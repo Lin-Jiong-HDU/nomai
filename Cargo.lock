@@ -955,6 +955,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sqlite-vec",
+ "tempfile",
  "thiserror",
  "ulid",
 ]

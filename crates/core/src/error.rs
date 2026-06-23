@@ -20,6 +20,12 @@ pub enum CoreError {
     #[error("migration error: {0}")]
     Migration(String),
 
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("nomai format error: {0}")]
+    NomaiFormat(#[from] crate::nomai_format::ParseError),
+
     #[error("config error: {0}")]
     Config(String),
 }
@@ -51,5 +57,21 @@ mod tests {
         let core: CoreError = p.into();
         assert!(matches!(core, CoreError::Provider(_)));
         assert!(core.to_string().contains("bad key"));
+    }
+
+    #[test]
+    fn io_variant_via_from() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let core: CoreError = io_err.into();
+        assert!(matches!(core, CoreError::Io(_)));
+        assert!(core.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn nomai_format_variant_via_from() {
+        let parse_err = crate::nomai_format::ParseError::EmptyInput;
+        let core: CoreError = parse_err.into();
+        assert!(matches!(core, CoreError::NomaiFormat(_)));
+        assert!(core.to_string().contains("empty input"));
     }
 }

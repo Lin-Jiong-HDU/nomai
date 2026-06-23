@@ -449,13 +449,16 @@ pub(crate) enum EmbedTarget {
 /// `core_error_to_rpc` in `crate::rpc`.
 fn error_to_rpc(err: &CoreError) -> Value {
     use nomai_protocol::error::{
-        CONFIG_ERROR, ENTRY_NOT_FOUND, INTERNAL_ERROR, PROVIDER_ERROR, VALIDATION_ERROR,
+        CONFIG_ERROR, ENTRY_NOT_FOUND, FS_ERROR, INTERNAL_ERROR, NOMAI_FORMAT_ERROR,
+        PROVIDER_ERROR, VALIDATION_ERROR,
     };
     let (code, message) = match err {
         CoreError::NotFound(_) => (ENTRY_NOT_FOUND, "entry not found".to_string()),
         CoreError::Validation(msg) => (VALIDATION_ERROR, msg.clone()),
         CoreError::Provider(p) => (PROVIDER_ERROR, p.message.clone()),
         CoreError::Config(msg) => (CONFIG_ERROR, msg.clone()),
+        CoreError::Io(e) => (FS_ERROR, format!("io error: {e}")),
+        CoreError::NomaiFormat(pe) => (NOMAI_FORMAT_ERROR, format!("nomai format error: {pe}")),
         CoreError::Storage(e) => (INTERNAL_ERROR, format!("storage error: {e}")),
         CoreError::Migration(msg) => (INTERNAL_ERROR, format!("migration error: {msg}")),
     };

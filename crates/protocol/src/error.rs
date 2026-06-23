@@ -6,6 +6,8 @@
 //!   1002             provider error (error.data contains `kind`)
 //!   1003             validation error
 //!   1004             config error
+//!   1005             filesystem error
+//!   1006             .nomai parse error
 
 // JSON-RPC 2.0 reserved range.
 pub const PARSE_ERROR: i32 = -32700;
@@ -19,6 +21,8 @@ pub const ENTRY_NOT_FOUND: i32 = 1001;
 pub const PROVIDER_ERROR: i32 = 1002;
 pub const VALIDATION_ERROR: i32 = 1003;
 pub const CONFIG_ERROR: i32 = 1004;
+pub const FS_ERROR: i32 = 1005;
+pub const NOMAI_FORMAT_ERROR: i32 = 1006;
 
 /// Canonical messages for the JSON-RPC reserved range. Business errors
 /// carry their own messages and do not have constants here.
