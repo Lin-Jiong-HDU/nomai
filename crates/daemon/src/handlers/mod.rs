@@ -19,6 +19,7 @@ pub mod link;
 pub mod mcp;
 pub mod provider;
 pub mod search;
+pub mod system;
 
 /// Build the default method → handler registry for the daemon.
 ///
@@ -70,6 +71,10 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     let h = index::Sync;
     m.insert(h.method(), Arc::new(h));
     let h = index::Rebuild;
+    m.insert(h.method(), Arc::new(h));
+
+    // system.* (Plan 6: Spec §12 migration utilities.)
+    let h = system::ExportToFs;
     m.insert(h.method(), Arc::new(h));
 
     // events.*
@@ -1119,9 +1124,10 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 26 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
-        // events:3, search:2, provider:1, cache:2, batch:1, index:2).
-        assert_eq!(tools.len(), 26);
+        // 27 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
+        // events:3, search:2, provider:1, cache:2, batch:1, index:2,
+        // system:1).
+        assert_eq!(tools.len(), 27);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1139,6 +1145,7 @@ mod tests {
         assert!(names.contains(&"provider.list"));
         assert!(names.contains(&"index.sync"));
         assert!(names.contains(&"index.rebuild"));
+        assert!(names.contains(&"system.export_to_fs"));
         // MCP meta-methods are not callable tools.
         assert!(!names.contains(&"initialize"));
         assert!(!names.contains(&"tools/list"));
@@ -1251,7 +1258,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 27); // 26 built-in + custom.echo
+        assert_eq!(tools.len(), 28); // 27 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
@@ -2097,8 +2104,90 @@ mod tests {
         assert_eq!(err.code, 1001); // NotFound
     }
 
-    // ----- index.sync e2e test (Plan 5 Task 6) -----
+    // ----- system.export_to_fs e2e test (Plan 6 Task 3) -----
 
+    #[tokio::test]
+    async fn system_export_to_fs_rpc_generates_missing_nomai() {
+        // Spec §12: walk every entry row and render .nomai for any that lack
+        // one. Entries created via entry.create already have .nomai; orphan
+        // rows (created via direct DB manipulation) do not.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create one entry normally (writes .nomai).
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"Has File","blocks":[{"type":"note","text":"x"}]}),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+        let indexed_id = create_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .parse::<ulid::Ulid>()
+            .unwrap();
+
+        // Manually insert an orphan entry directly in the DB, bypassing the
+        // service so no .nomai file is written. Daemon startup has already
+        // run its sync pass, so this row will not be cleaned up on boot.
+        let orphan_id = ulid::Ulid::new();
+        {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .execute(
+                    "INSERT INTO entries (id, title, tags, attrs, source, fs_path, fs_mtime, created_at, updated_at)
+                     VALUES (?1, 'orphan', '[]', '{}', NULL, NULL, NULL, '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+                    rusqlite::params![orphan_id.to_string()],
+                )
+                .unwrap();
+            let block_id = ulid::Ulid::new().to_string();
+            guard
+                .execute(
+                    "INSERT INTO blocks (id, entry_id, ordinal, type, text, attrs, created_at, updated_at)
+                     VALUES (?1, ?2, 0, 'note', 'orphan content', '{}', '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+                    rusqlite::params![block_id, orphan_id.to_string()],
+                )
+                .unwrap();
+        }
+
+        // Precondition: orphan has no .nomai file; indexed entry does.
+        let cs = daemon.entries.content_store().clone();
+        assert!(!cs.entry_file(orphan_id).exists());
+        assert!(cs.entry_file(indexed_id).exists());
+
+        // Call system.export_to_fs.
+        let resp = daemon.dispatch(req("system.export_to_fs", json!({}))).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["exported"], 1, "orphan should be exported");
+        assert_eq!(result["skipped"], 1, "indexed entry should be skipped");
+        assert!(result["errors"].as_array().unwrap().is_empty());
+
+        // Verify orphan now has a .nomai file on disk and fs_path populated.
+        assert!(cs.entry_file(orphan_id).exists());
+        let fs_path: String = {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .query_row(
+                    "SELECT fs_path FROM entries WHERE id = ?1",
+                    rusqlite::params![orphan_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert!(!fs_path.is_empty());
+
+        // The orphan's .nomai round-trips via the content store.
+        let doc = cs.read_entry(orphan_id).unwrap();
+        assert_eq!(doc.title, "orphan");
+        assert_eq!(doc.blocks[0].text, "orphan content\n");
+    }
+
+    // ----- index.sync e2e test (Plan 5 Task 6) -----
     #[tokio::test]
     async fn index_sync_picks_up_external_file_and_reports_counts() {
         // Spec §7.1: FS is source-of-truth; index.sync reconciles. Drop a

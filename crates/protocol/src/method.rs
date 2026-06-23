@@ -75,6 +75,15 @@ pub mod index {
     pub const REBUILD: &str = "index.rebuild";
 }
 
+pub mod system {
+    /// Plan 6: walk every entry row and render `.nomai` for any that lacks
+    /// one. Spec §12 migration utility — post-Plan-3 entries created via
+    /// `entry.create` already have `.nomai` and are skipped; this is for
+    /// rows created via direct DB manipulation. Returns
+    /// `{ exported, skipped, errors }`.
+    pub const EXPORT_TO_FS: &str = "system.export_to_fs";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +145,10 @@ mod tests {
     fn index_namespace_methods() {
         assert_eq!(index::SYNC, "index.sync");
         assert_eq!(index::REBUILD, "index.rebuild");
+    }
+
+    #[test]
+    fn system_namespace_methods() {
+        assert_eq!(system::EXPORT_TO_FS, "system.export_to_fs");
     }
 }

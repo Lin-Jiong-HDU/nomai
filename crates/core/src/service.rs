@@ -40,6 +40,25 @@ pub struct RebuildResult {
     pub errors: Vec<String>,
 }
 
+/// Result of `EntryService::export_to_fs`: walks every entry row and
+/// generates the `.nomai` file on disk for those that lack one. Spec §12
+/// utility — post-Plan-3 entries created via `EntryService::create` already
+/// have their `.nomai` and are skipped; this is for legacy rows or entries
+/// created via direct DB manipulation. `exported` counts entries that got a
+/// fresh `.nomai` (and had their `fs_path`/`fs_mtime` populated); `skipped`
+/// counts entries whose `.nomai` already exists; `errors` collects
+/// per-entry failure messages without aborting the pass.
+#[derive(Debug, Default, Serialize)]
+pub struct ExportResult {
+    /// Entries that received a freshly-rendered `.nomai` file.
+    pub exported: u64,
+    /// Entries whose `.nomai` already existed on disk (no-op).
+    pub skipped: u64,
+    /// Per-entry error messages (render/write/update failures). The pass
+    /// skips failures and continues to the next entry.
+    pub errors: Vec<String>,
+}
+
 pub struct EntryService {
     conn: Arc<Mutex<Connection>>,
     content_store: Arc<crate::content_store::ContentStore>,
@@ -756,6 +775,117 @@ impl EntryService {
             }
         }
         Ok(RebuildResult { reindexed, errors })
+    }
+
+    /// Walk every entry row and render the `.nomai` file for any that lacks
+    /// one. Spec §12 migration utility: post-Plan-3 entries created via
+    /// `EntryService::create` already have their `.nomai` and are skipped;
+    /// this is for legacy rows or entries created via direct DB manipulation
+    /// (e.g. an import path that bypasses the service layer).
+    ///
+    /// Per-entry logic:
+    /// - `fs_path` set AND file exists → skip.
+    /// - Otherwise → render `.nomai` from current entry+blocks state via
+    ///   `ContentStore::write_entry`, then UPDATE `fs_path` + `fs_mtime` so
+    ///   the next `sync_from_fs` treats the entry as indexed.
+    ///
+    /// Per-entry failures are collected into `errors` and the pass continues;
+    /// only an unrecoverable error from the initial row scan aborts the call.
+    pub fn export_to_fs(&self) -> Result<ExportResult, CoreError> {
+        // Snapshot the row list under one short lock; release before per-entry
+        // work so each get/write/update can take its own lock without deadlock.
+        let rows: Vec<(Ulid, Option<String>)> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id, fs_path FROM entries")?;
+            let mapped = stmt.query_map([], |row| {
+                let id_str: String = row.get(0)?;
+                let fs_path: Option<String> = row.get(1)?;
+                // Index invariant: ids are ULID strings. A parse failure here
+                // indicates index corruption; surface as a storage error.
+                let id = id_str.parse::<Ulid>().map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                Ok((id, fs_path))
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut exported = 0u64;
+        let mut skipped = 0u64;
+        let mut errors: Vec<String> = Vec::new();
+
+        for (entry_id, fs_path) in rows {
+            // Skip if fs_path is set AND the .nomai file actually exists.
+            if let Some(p) = &fs_path {
+                if !p.is_empty() && self.content_store.entry_file(entry_id).exists() {
+                    skipped += 1;
+                    continue;
+                }
+            }
+
+            // Need to export — fetch entry + blocks.
+            let entry = match self.get(entry_id) {
+                Ok(e) => e,
+                Err(e) => {
+                    errors.push(format!("entry {entry_id}: get failed: {e}"));
+                    continue;
+                }
+            };
+
+            // Render .nomai from the storage-layer blocks.
+            let parser_blocks: Vec<crate::nomai_format::Block> = entry
+                .blocks
+                .iter()
+                .map(crate::nomai_format_util::storage_block_to_parser_block)
+                .collect();
+            let doc = crate::nomai_format::NomaiDoc {
+                format_version: 1,
+                id: entry.id,
+                title: entry.title.clone(),
+                tags: entry.tags.clone(),
+                attrs: entry.attrs.as_object().cloned().unwrap_or_default(),
+                source: entry.source.clone(),
+                created_at: entry.created_at,
+                updated_at: entry.updated_at,
+                blocks: parser_blocks,
+            };
+
+            // Write the .nomai file via the content store.
+            if let Err(e) = self.content_store.write_entry(entry_id, &doc) {
+                errors.push(format!("entry {entry_id}: write failed: {e}"));
+                continue;
+            }
+
+            // Refresh fs_path + fs_mtime so the next sync_from_fs treats the
+            // entry as indexed.
+            let fs_path = format!("entries/{entry_id}/entry.nomai");
+            let fs_mtime = self
+                .content_store
+                .entry_mtime(entry_id)
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_default();
+            let conn = self.conn.lock().unwrap();
+            if let Err(e) = conn.execute(
+                "UPDATE entries SET fs_path = ?1, fs_mtime = ?2 WHERE id = ?3",
+                params![&fs_path, &fs_mtime, entry_id.to_string()],
+            ) {
+                errors.push(format!("entry {entry_id}: fs_path update failed: {e}"));
+                continue;
+            }
+            drop(conn);
+
+            exported += 1;
+        }
+
+        Ok(ExportResult {
+            exported,
+            skipped,
+            errors,
+        })
     }
 
     pub fn list(&self, query: EntryListQuery) -> Result<EntryListResult, CoreError> {
@@ -1957,5 +2087,75 @@ mod tests {
         // The good entry still round-trips cleanly.
         let fetched = svc.get(good.id).unwrap();
         assert!(!fetched.blocks.is_empty());
+    }
+
+    // ----- export_to_fs tests (Plan 6 Task 3) -----
+
+    #[test]
+    fn export_to_fs_generates_nomai_for_missing_files() {
+        let svc = EntryService::for_test().unwrap();
+        // Create an entry normally (this writes .nomai).
+        let _entry = svc
+            .create(CreateEntry {
+                title: "Has File".into(),
+                blocks: vec![BlockInput {
+                    r#type: "note".into(),
+                    text: "x".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+
+        // Manually insert an orphan entry directly in the DB, bypassing the
+        // service so no .nomai file is written. Spec §12 scenario: rows
+        // created via direct DB manipulation (e.g. legacy import path).
+        let orphan_id = Ulid::new();
+        {
+            let conn = svc.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .execute(
+                    "INSERT INTO entries (id, title, tags, attrs, source, fs_path, fs_mtime, created_at, updated_at)
+                     VALUES (?1, 'Orphan', '[]', '{}', NULL, NULL, NULL, '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+                    params![orphan_id.to_string()],
+                )
+                .unwrap();
+            // Add a block so the rendered .nomai has content.
+            let block_id = Ulid::new().to_string();
+            guard
+                .execute(
+                    "INSERT INTO blocks (id, entry_id, ordinal, type, text, attrs, created_at, updated_at)
+                     VALUES (?1, ?2, 0, 'note', 'orphan content', '{}', '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+                    params![block_id, orphan_id.to_string()],
+                )
+                .unwrap();
+        }
+
+        // Precondition: orphan has no .nomai file.
+        let cs = svc.content_store();
+        assert!(!cs.entry_file(orphan_id).exists());
+
+        let result = svc.export_to_fs().unwrap();
+        assert_eq!(result.exported, 1, "orphan should be exported");
+        assert_eq!(result.skipped, 1, "entry-with-file should be skipped");
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        // Verify .nomai now exists for orphan.
+        assert!(cs.entry_file(orphan_id).exists());
+
+        // Verify orphan entry's fs_path is now populated.
+        let conn = svc.conn_for_test();
+        let guard = conn.lock().unwrap();
+        let fs_path: String = guard
+            .query_row(
+                "SELECT fs_path FROM entries WHERE id = ?1",
+                params![orphan_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!fs_path.is_empty());
     }
 }
