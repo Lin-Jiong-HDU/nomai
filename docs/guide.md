@@ -7,13 +7,17 @@ For project overview and install, see the [README](../README.md) first.
 ## Table of contents
 
 - [Transport: how to talk to the daemon](#transport)
-- [The four primitives](#the-four-primitives)
+- [The five primitives](#the-five-primitives)
   - [Entry](#entry)
+  - [Block](#block)
   - [Links](#links)
   - [Events](#events)
   - [Chunks](#chunks)
+- [Storage layer separation (lib-mode users)](#storage-layer-separation-lib-mode-users)
 - [RPC reference](#rpc-reference)
   - [entry.\*](#entry)
+  - [block.\*](#block)
+  - [index.\* / system.\*](#index--system)
   - [link.\*](#link)
   - [events.\*](#events)
   - [chunk.\*](#chunk)
@@ -44,7 +48,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"entry.list","params":{}}' \
 Multiple requests can be piped at once — daemon processes them sequentially and writes one response line per request.
 
 ```fish
-echo '{"jsonrpc":"2.0","id":1,"method":"entry.create","params":{"title":"a","body":"x"}}
+echo '{"jsonrpc":"2.0","id":1,"method":"entry.create","params":{"title":"a","blocks":[{"type":"note","text":"x"}]}}
 {"jsonrpc":"2.0","id":2,"method":"entry.list","params":{}}' \
   | ./target/release/nomai-daemon
 ```
@@ -55,9 +59,9 @@ For long-lived clients, open the daemon as a subprocess and keep stdin/stdout pi
 
 ---
 
-## The four primitives
+## The five primitives
 
-nomai provides four orthogonal building blocks. You can use any subset; they don't depend on each other at the API level.
+nomai provides five orthogonal building blocks. You can use any subset; they don't depend on each other at the API level.
 
 ### Entry
 
@@ -67,7 +71,9 @@ The atomic unit of knowledge. A markdown note with structured metadata.
 {
   "id": "01KVM7KFNT82JWCEM31FESCEXP", // ULID, time-sortable
   "title": "Rust 入门",
-  "body": "Rust 是一门系统编程语言...", // markdown
+  "blocks": [
+    { "type": "note", "text": "Rust 是一门系统编程语言..." } // markdown
+  ],
   "tags": ["rust", "programming"],
   "attrs": { "difficulty": "beginner" }, // free-form JSON object
   "source": null,
@@ -77,12 +83,20 @@ The atomic unit of knowledge. A markdown note with structured metadata.
 ```
 
 - `id` is a ULID (26 chars, time-ordered, URL-safe).
-- `body` is markdown text. Core does not parse markdown — full text is FTS-indexed and embedded as a single vector.
+- `blocks` is an ordered list of typed blocks. Block text is markdown; core does not parse markdown — each block's text is FTS-indexed (`fts_blocks`) and chunked for vector retrieval.
 - `tags` is a JSON array of strings, queryable via `entry.list`.
 - `attrs` is a free-form JSON object. Core validates it's an object but does not enforce schema. (Filtering by attrs is not yet implemented.)
 - `source` is an optional provenance string (URL, filename, etc.).
 
-**Creating an entry auto-embeds the body**: daemon calls the embedding provider and writes the vector to `vec_embeddings`. The entry is then retrievable via `search.semantic` (entry-level granularity).
+**Creating an entry auto-embeds the blocks**: daemon chunks each block's text, calls the embedding provider, and writes the per-chunk vectors to `vec_chunk_embeddings`. The entry is then retrievable via `search.semantic` (chunk-level granularity, with entry-level rollup).
+
+### Block
+
+A typed semantic block within an entry. Each entry is composed of an ordered list of blocks. Block types: `claim` (assertion), `evidence` (supporting material), `question` (open question), `source` (citation pointer), `note` (freeform text), `connection` (typed link to another entry — populates the `links` table).
+
+Blocks are the structural unit of an entry. `block.append` / `update` / `delete` mutate the entry's block list; each mutation rewrites the entry's `.nomai` file (see [Storage layer separation](#storage-layer-separation-lib-mode-users) for lib-mode caveats).
+
+Chunks are derived from block text via the [chunking algorithm](#) — see §10 of the spec for the paragraph→sentence→hard-cut cascade.
 
 ### Links
 
@@ -162,6 +176,18 @@ An entry can be split into N chunks, each embedded independently. This unlocks f
 
 ---
 
+## Storage layer separation (lib-mode users)
+
+`BlockService` (and `EntryService`) mutate the SQLite index and chunks/embeddings, but **do NOT touch the `.nomai` file**. The daemon's RPC handlers wrap each mutation with `rerender_entry_nomai` so the FS file stays consistent.
+
+If you embed `nomai-core` directly (lib mode, no daemon) and call `BlockService::append` / `update` / `delete` yourself, **you must rerender the `.nomai` file yourself**, or accept DB/FS drift until the next `index.sync`.
+
+See `crates/daemon/examples/block_lifecycle.rs` for a lib-mode example that does the right thing, and `crates/daemon/src/handlers/block.rs::rerender_entry_nomai` for the production wrapper.
+
+The drift is self-healing: on the next daemon boot (or explicit `index.sync`), the FS file's mtime will mismatch the `entries.fs_mtime` row, triggering `reindex_one` which overwrites the DB state from the (older) file. So if you mutate via lib-mode WITHOUT rerendering, your block mutation may be lost on the next sync.
+
+---
+
 ## RPC reference
 
 All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, data?}`. See [error codes](#error-codes).
@@ -170,11 +196,40 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 
 | Method         | Params                                                | Returns             | Notes                                                                             |
 | -------------- | ----------------------------------------------------- | ------------------- | --------------------------------------------------------------------------------- |
-| `entry.create` | `title`, `body`, `tags?`, `attrs?`, `source?`         | `Entry`             | Auto-embeds body if non-empty                                                     |
+| `entry.create` | `title`, `blocks: [{type, text, attrs?}]`, `tags?`, `attrs?`, `source?` | `Entry` | Auto-embeds block texts if non-empty                                              |
 | `entry.get`    | `id`                                                  | `Entry`             | 1001 if not found                                                                 |
-| `entry.update` | `id`, `title?`, `body?`, `tags?`, `attrs?`, `source?` | `Entry`             | Re-embeds if body changes; clears embedding if body becomes empty                 |
+| `entry.update` | `id`, `title?`, `blocks?`, `tags?`, `attrs?`, `source?` | `Entry`           | Re-embeds if blocks change; clears embedding if blocks become empty               |
 | `entry.delete` | `id`                                                  | `{"deleted": true}` | Cascades to links + chunks + chunk embeddings                                     |
 | `entry.list`   | `tag?`, `limit?`(50), `offset?`(0), `order?`          | `{items, total}`    | `order`: `created_desc`(default) / `created_asc` / `updated_desc` / `updated_asc` |
+
+**Block input shape**: `BlockInput` is `{ type: String, text: String, attrs?: Value }`. Valid types: `claim`, `evidence`, `question`, `source`, `note`, `connection` (the `@connection` type requires `target` and `relation` attrs).
+
+### block.{#block-methods}
+
+| Method         | Params                                  | Returns             | Notes                                         |
+| -------------- | --------------------------------------- | ------------------- | --------------------------------------------- |
+| `block.append` | `entry_id`, `type`, `text`, `attrs?`    | `Block`             | Auto-assigned `ordinal = max(ordinal)+1`      |
+| `block.update` | `id`, `type?`, `text?`, `attrs?`        | `Block`             | Re-chunks if text changed                     |
+| `block.delete` | `id`                                    | `{"deleted": true}` | 1001 if not found                             |
+| `block.get`    | `id`                                    | `Block`             | 1001 if not found                             |
+| `block.list`   | `entry_id`                              | `{items, total}`    | Sorted by `ordinal` ascending                 |
+
+Each mutation rewrites the parent entry's `.nomai` file automatically (no separate RPC needed). Chunk re-derivation is automatic on `text` change.
+
+**`@connection` blocks**: setting `type: "connection"` requires `attrs: { target: "<entry_id>", relation: "<string>" }`. These blocks also populate the `links` table — `link.neighbors` will see the typed edge.
+
+### index.* / system.*{#index--system}
+
+| Method              | Params | Returns                                           | Notes                                         |
+| ------------------- | ------ | ------------------------------------------------- | --------------------------------------------- |
+| `index.verify`      | `{}`   | `{fs_only, db_only, stale_mtime, consistent}`     | Read-only drift report                        |
+| `index.sync`        | `{}`   | `{added, updated, removed, unchanged}`            | Reconcile FS → index (incremental, mtime-diff) |
+| `index.rebuild`     | `{}`   | `{reindexed, errors}`                             | Wipe derived tables + reindex every FS entry  |
+| `system.export_to_fs` | `{}` | `{exported, skipped, errors}`                   | Generate missing `.nomai` files from DB state |
+
+`index.verify` is read-only. `index.sync` is incremental (diffs FS vs DB mtime). `index.rebuild` is destructive but doesn't touch `events` (daemon history) or `emb_cache` (deterministic, reusable).
+
+Daemon runs `index.sync` automatically at boot. If FS differs from the index (e.g. user manually dropped a `.nomai` file in `entries/`), the daemon picks it up.
 
 ### link.{#link-methods}
 
@@ -207,9 +262,11 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 
 | Method            | Params                                                          | Returns                     | Notes                                          |
 | ----------------- | --------------------------------------------------------------- | --------------------------- | ---------------------------------------------- |
-| `search.fulltext` | `query`, `limit?`(10)                                           | `{items: [{entry, score}]}` | FTS5 bm25 ranking                              |
-| `search.semantic` | `query`, `limit?`(10), `granularity?`("entry"=default\|"chunk") | `{items}`                   | Items shape depends on granularity (see below) |
+| `search.fulltext` | `query`, `limit?`(10), `block_type?`                            | `{items: [{entry, score}]}` | Match against `fts_blocks`; optional `block_type` filter |
+| `search.semantic` | `query`, `limit?`(10), `granularity?`("entry"=default\|"chunk"), `block_type?` | `{items}`        | Chunk-level KNN via `vec_chunk_embeddings`; optional `block_type` filter |
 | `search.hybrid`   | —                                                               | —                           | **Reserved**: returns -32601                   |
+
+**Block type filter**: `block_type` accepts one of `claim` / `evidence` / `question` / `source` / `note` / `connection`. Omit for all types. Example: `search.fulltext` with `block_type: "claim"` returns only matches in claim blocks.
 
 **`search.semantic` return shapes**:
 
@@ -239,7 +296,7 @@ Each `BatchOp` has `{id?: string, method: string, params: object}`. The `id` fie
     {
       "id": "e1",
       "method": "entry.create",
-      "params": { "title": "doc", "body": "..." }
+      "params": { "title": "doc", "blocks": [{ "type": "note", "text": "..." }] }
     },
     {
       "method": "chunk.create",
@@ -403,7 +460,7 @@ Every embedding API call is cached transparently in the `emb_cache` SQLite table
 
 **Where it applies** — every `embed()` call in the daemon:
 
-- `entry.create` / `entry.update` with non-empty body
+- `entry.create` / `entry.update` with non-empty block text
 - `chunk.create` with text
 - `search.semantic` (the query is embedded before KNN)
 - `batch` (commit-time batch embed of all queued texts)
@@ -461,7 +518,7 @@ nomai-core = { path = "..." }
 ```
 
 ```rust
-use nomai_core::{EntryService, LinkService, EventService, ChunkService};
+use nomai_core::{EntryService, LinkService, EventService, ChunkService, BlockInput};
 
 let conn = std::sync::Arc::new(std::sync::Mutex::new(
     rusqlite::Connection::open("db.sqlite")?
@@ -473,7 +530,11 @@ let chunks = std::sync::Arc::new(ChunkService::new(conn.clone())?);
 
 let entry = entries.create(nomai_core::CreateEntry {
     title: "Hello".into(),
-    body: "world".into(),
+    blocks: vec![BlockInput {
+        r#type: "note".into(),
+        text: "world".into(),
+        attrs: None,
+    }],
     tags: None,
     attrs: None,
     source: None,

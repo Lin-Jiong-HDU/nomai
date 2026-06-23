@@ -16,11 +16,17 @@
 -- when the trigger fires (Plan 5 final review C1 empirically confirmed
 -- the original "lazy creation" plan did not work — the trigger errored
 -- "no such table" on first chunk DELETE because the table didn't exist
--- yet). Plan 5 final review C1 fix: the dim now matches the daemon
--- default config (crates/daemon/src/config.rs:175 → dim = 1536 for
--- text-embedding-3-small). Users overriding config.embedding.dim must
--- DROP vec_chunk_embeddings + run ChunkService::ensure_vec_chunk_embeddings
--- with their dim before writing embeddings.
+-- yet).
+--
+-- Dimension 1536 matches the daemon default
+-- (`config.embedding.dim` in `crates/daemon/src/config.rs`, currently
+-- text-embedding-3-small). Dim reconciliation is automatic at daemon
+-- boot: `ChunkService::ensure_vec_chunk_embeddings(dim)` parses the
+-- actual dim from this CREATE TABLE SQL, and if it mismatches the
+-- configured dim, it DROPs + recreates the table with the right dim.
+-- Existing chunk embeddings are lost, but `emb_cache` (keyed by content
+-- hash) absorbs the re-embed cost on the next `search.semantic`. No
+-- manual DROP required.
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunk_embeddings USING vec0(
     chunk_id TEXT PRIMARY KEY,
     embedding FLOAT[1536] distance_metric=cosine
