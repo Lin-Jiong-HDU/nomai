@@ -1,5 +1,6 @@
 //! Core service layer, data model, and storage for nomai.
 
+pub mod block_model;
 pub mod chunk_model;
 pub mod chunk_service;
 pub mod error;
