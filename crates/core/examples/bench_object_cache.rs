@@ -102,9 +102,16 @@ fn main() {
             .unwrap();
     }
 
-    // Seed embeddings (deterministic vectors) so semantic_search runs end-to-end.
-    entries.ensure_vec_embeddings(8).unwrap();
+    // Seed chunk embeddings (deterministic vectors) so semantic_search runs
+    // end-to-end. Plan 4: semantic search is chunk-level via ChunkService.
+    let chunks = Arc::new(nomai_core::ChunkService::new(conn.clone()).unwrap());
+    chunks.ensure_vec_chunk_embeddings(8).unwrap();
     for (i, id) in ids.iter().enumerate() {
+        // Each entry has one block; list its chunks and write an embedding.
+        let blocks_svc = Arc::new(nomai_core::BlockService::new(conn.clone()).unwrap());
+        let block_list = blocks_svc.list(*id).unwrap();
+        let chunk_list = chunks.list(block_list.items[0].id).unwrap();
+        let chunk_id = chunk_list.items[0].id;
         let v = [
             ((i as f32) / 1000.0),
             ((i as f32) % 7.0) / 7.0,
@@ -115,7 +122,7 @@ fn main() {
             ((i as f32) % 29.0) / 29.0,
             ((i as f32) % 31.0) / 31.0,
         ];
-        entries.write_embedding(*id, &v).unwrap();
+        chunks.write_embedding(chunk_id, &v).unwrap();
     }
 
     let hub = ids[0];
@@ -152,11 +159,11 @@ fn main() {
     });
 
     let t_fts = bench("fulltext_search (top 10)", 1000, 100, || {
-        let _ = entries.fulltext_search("entry topic", 10);
+        let _ = entries.fulltext_search("entry topic", 10, None);
     });
 
     let t_semantic = bench("semantic_search (top 10)", 1000, 100, || {
-        let _ = entries.semantic_search(&[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], 10);
+        let _ = chunks.semantic_search(&[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], 10, None);
     });
 
     println!("\n=== Per-operation mean cost ===\n");

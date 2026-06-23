@@ -53,13 +53,14 @@ impl Daemon {
         )?;
         let content_store = Arc::new(ContentStore::new(knowledge_root));
 
-        // Run migrations + ensure vec_embeddings / vec_chunk_embeddings exist.
+        // Run migrations + ensure vec_chunk_embeddings exist (Plan 4:
+        // entry-level vec_embeddings was dropped in V8; chunk-level is the
+        // sole embedding surface).
         let entries = Arc::new(EntryService::new(conn.clone(), content_store)?);
         let links = Arc::new(LinkService::new(conn.clone())?);
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
         chunks.ensure_vec_chunk_embeddings(config.embedding.dim)?;
-        entries.ensure_vec_embeddings(config.embedding.dim)?;
 
         // Read API keys (config.validate already checked env var presence).
         let embedding_key = std::env::var(&config.embedding.api_key_env).map_err(|_| {
@@ -209,7 +210,6 @@ impl Daemon {
         let links = Arc::new(LinkService::new(conn.clone())?);
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
-        entries.ensure_vec_embeddings(embedding_dim)?;
         chunks.ensure_vec_chunk_embeddings(embedding_dim)?;
         let cache = Arc::new(CachedEmbedder::new(embedder, conn, cache_model, warn_rows));
         let handlers = crate::handlers::registry();

@@ -1,28 +1,28 @@
-//! ChunkService: storage and retrieval of entry chunks.
+//! ChunkService: read-only access to chunks (auto-derived from blocks).
 //!
-//! Each chunk is an independently embeddable piece of an entry. Chunks are
-//! immutable (no update); re-chunking is delete + create. Emission follows
-//! the Phase 2 Events pattern (chunk.created / chunk.deleted).
+//! Plan 4: chunks are no longer user-managed. `BlockService::create_in_tx`
+//! runs the chunking algorithm (Spec §10) and INSERTs derived chunks.
+//! CASCADE on `chunks.block_id` removes them when the parent block is
+//! deleted.
+//!
+//! This service exposes read-only access (list/get) + embedding helpers
+//! (`vec_chunk_embeddings`) used by `semantic_search`.
 
 use std::sync::{Arc, Mutex};
 
-use chrono::Utc;
 use rusqlite::{Connection, params};
 use ulid::Ulid;
 
-use crate::chunk_model::{Chunk, ChunkListResult, ChunkSearchResult, CreateChunk};
+use crate::chunk_model::{Chunk, ChunkListResult, ChunkSearchResult};
 use crate::error::CoreError;
 use crate::storage;
 
 pub struct ChunkService {
-    // Consumed by CRUD + vec methods + semantic_search (Tasks 2-6).
     conn: Arc<Mutex<Connection>>,
 }
 
 impl ChunkService {
     pub fn new(conn: Arc<Mutex<Connection>>) -> Result<Self, CoreError> {
-        // Defensive: ensure migrations applied (idempotent). EntryService::new
-        // also does this.
         {
             let mut guard = conn.lock().unwrap();
             guard
@@ -37,224 +37,61 @@ impl ChunkService {
     pub fn for_test() -> Result<Self, CoreError> {
         crate::storage::init_sqlite_extensions();
         let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
-        // Run migrations via EntryService so all tables exist.
-        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", ulid::Ulid::new()));
+        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", Ulid::new()));
         let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
         crate::EntryService::new(conn.clone(), content_store)?;
         Self::new(conn)
     }
 
-    pub fn create(&self, params: CreateChunk) -> Result<Chunk, CoreError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute_batch("BEGIN")?;
-        let result = self.create_in_tx(&conn, params);
-        match result {
-            Ok(chunk) => {
-                conn.execute_batch("COMMIT")?;
-                Ok(chunk)
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(e)
-            }
-        }
-    }
-
-    /// Execute create within an existing transaction. Caller controls BEGIN/COMMIT.
-    /// Does NOT lock self.conn (caller already holds the lock).
-    /// Does NOT call self.get() or other self methods that lock conn.
-    ///
-    /// FK + UNIQUE ConstraintViolation → `CoreError::Validation` per spec.
-    pub fn create_in_tx(&self, conn: &Connection, params: CreateChunk) -> Result<Chunk, CoreError> {
-        let attrs = params
-            .attrs
-            .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-        if !attrs.is_object() {
-            return Err(CoreError::Validation("attrs must be a JSON object".into()));
-        }
-
-        let now = Utc::now();
-        let chunk = Chunk {
-            id: Ulid::new(),
-            entry_id: params.entry_id,
-            ordinal: params.ordinal,
-            text: params.text,
-            attrs,
-            created_at: now,
-            updated_at: now,
-        };
-
-        match conn.execute(
-            "INSERT INTO chunks (id, entry_id, ordinal, text, attrs, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                chunk.id.to_string(),
-                chunk.entry_id.to_string(),
-                chunk.ordinal as i64,
-                &chunk.text,
-                chunk.attrs.to_string(),
-                chunk.created_at.to_rfc3339(),
-                chunk.updated_at.to_rfc3339(),
-            ],
-        ) {
-            Ok(_) => {}
-            Err(e) => {
-                // Map FK + UNIQUE constraint violations to Validation.
-                if let rusqlite::Error::SqliteFailure(ref fe, _) = e {
-                    if fe.code == rusqlite::ErrorCode::ConstraintViolation {
-                        return Err(CoreError::Validation(format!(
-                            "chunk constraint violation: {e}"
-                        )));
-                    }
-                }
-                return Err(CoreError::Storage(e));
-            }
-        }
-
-        let event_id = Ulid::new();
-        let event_payload = serde_json::to_value(&chunk).expect("chunk serialize");
-        conn.execute(
-            "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                event_id.to_string(),
-                "chunk.created",
-                "chunk",
-                chunk.id.to_string(),
-                event_payload.to_string(),
-                Utc::now().to_rfc3339(),
-            ],
-        )?;
-
-        Ok(chunk)
-    }
-
+    /// Fetch a single chunk by id.
     pub fn get(&self, id: Ulid) -> Result<Chunk, CoreError> {
         let conn = self.conn.lock().unwrap();
         match conn.query_row(
-            "SELECT id, entry_id, ordinal, text, attrs, created_at, updated_at
+            "SELECT id, block_id, ordinal, text, attrs, created_at, updated_at
              FROM chunks WHERE id = ?1",
             params![id.to_string()],
-            row_to_chunk,
+            |row| row_to_chunk(row, 0),
         ) {
-            Ok(chunk) => Ok(chunk),
+            Ok(c) => Ok(c),
             Err(rusqlite::Error::QueryReturnedNoRows) => Err(CoreError::NotFound(id)),
             Err(e) => Err(CoreError::Storage(e)),
         }
     }
 
-    pub fn list(
-        &self,
-        entry_id: Ulid,
-        limit: u32,
-        offset: u32,
-    ) -> Result<ChunkListResult, CoreError> {
+    /// List chunks for a block, ordered by ordinal.
+    pub fn list(&self, block_id: Ulid) -> Result<ChunkListResult, CoreError> {
         let conn = self.conn.lock().unwrap();
-
-        let total: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM chunks WHERE entry_id = ?1",
-            params![entry_id.to_string()],
-            |row| row.get(0),
-        )?;
-
         let mut stmt = conn.prepare(
-            "SELECT id, entry_id, ordinal, text, attrs, created_at, updated_at
-             FROM chunks WHERE entry_id = ?1
-             ORDER BY ordinal ASC
-             LIMIT ?2 OFFSET ?3",
+            "SELECT id, block_id, ordinal, text, attrs, created_at, updated_at
+             FROM chunks WHERE block_id = ?1 ORDER BY ordinal ASC",
         )?;
-        let rows = stmt.query_map(
-            params![entry_id.to_string(), limit as i64, offset as i64],
-            row_to_chunk,
-        )?;
-        let items: Vec<Chunk> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-
-        Ok(ChunkListResult {
-            items,
-            total: total as u64,
-        })
+        let items: Result<Vec<Chunk>, _> = stmt
+            .query_map(params![block_id.to_string()], |row| row_to_chunk(row, 0))?
+            .collect();
+        let items = items?;
+        let total = items.len() as u64;
+        Ok(ChunkListResult { items, total })
     }
 
-    pub fn delete(&self, id: Ulid) -> Result<(), CoreError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute_batch("BEGIN")?;
-        let result = self.delete_in_tx(&conn, id);
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(e)
-            }
-        }
-    }
-
-    /// Execute delete within an existing transaction. Caller controls BEGIN/COMMIT.
-    /// SELECT before-snapshot, DELETE, INSERT event — all via passed conn.
-    pub fn delete_in_tx(&self, conn: &Connection, id: Ulid) -> Result<(), CoreError> {
-        let before_chunk = match conn.query_row(
-            "SELECT id, entry_id, ordinal, text, attrs, created_at, updated_at
-             FROM chunks WHERE id = ?1",
-            params![id.to_string()],
-            row_to_chunk,
-        ) {
-            Ok(c) => c,
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(CoreError::NotFound(id)),
-            Err(e) => return Err(CoreError::Storage(e)),
-        };
-
-        conn.execute("DELETE FROM chunks WHERE id = ?1", params![id.to_string()])?;
-
-        let event_id = Ulid::new();
-        let event_payload = serde_json::to_value(&before_chunk).expect("chunk serialize");
-        conn.execute(
-            "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                event_id.to_string(),
-                "chunk.deleted",
-                "chunk",
-                id.to_string(),
-                event_payload.to_string(),
-                Utc::now().to_rfc3339(),
-            ],
-        )?;
-
-        Ok(())
-    }
-
+    /// Ensure `vec_chunk_embeddings` virtual table exists. Idempotent.
     pub fn ensure_vec_chunk_embeddings(&self, dim: usize) -> Result<(), CoreError> {
         let conn = self.conn.lock().unwrap();
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS (
-                SELECT 1 FROM sqlite_master
-                WHERE type='table' AND name='vec_chunk_embeddings'
-            )",
-            [],
-            |row| row.get(0),
-        )?;
-        if exists {
-            return Ok(());
-        }
-        let sql = format!(
-            "CREATE VIRTUAL TABLE vec_chunk_embeddings USING vec0(
+        conn.execute_batch(&format!(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunk_embeddings USING vec0(
                 chunk_id TEXT PRIMARY KEY,
-                embedding float[{dim}] distance_metric=cosine
+                embedding FLOAT[{dim}] distance_metric=cosine
             )"
-        );
-        conn.execute_batch(&sql)?;
+        ))
+        .map_err(CoreError::Storage)?;
         Ok(())
     }
 
-    pub fn write_embedding(&self, id: Ulid, embedding: &[f32]) -> Result<(), CoreError> {
+    /// Upsert a chunk embedding. vec0 doesn't support `INSERT OR REPLACE`,
+    /// so we DELETE-then-INSERT inside a transaction.
+    pub fn write_embedding(&self, chunk_id: Ulid, embedding: &[f32]) -> Result<(), CoreError> {
         let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let id_str = id.to_string();
+        let id_str = chunk_id.to_string();
         let conn = self.conn.lock().unwrap();
-        // sqlite-vec's vec0 virtual table does not support INSERT OR REPLACE.
-        // Emulate the upsert with a DELETE-then-INSERT inside a transaction so
-        // the operation is atomic and re-inserting the same id replaces the row.
         conn.execute_batch("BEGIN")?;
         let result = (|| -> rusqlite::Result<()> {
             conn.execute(
@@ -279,104 +116,123 @@ impl ChunkService {
         }
     }
 
-    pub fn delete_embedding(&self, id: Ulid) -> Result<(), CoreError> {
+    pub fn delete_embedding(&self, chunk_id: Ulid) -> Result<(), CoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "DELETE FROM vec_chunk_embeddings WHERE chunk_id = ?1",
-            params![id.to_string()],
+            params![chunk_id.to_string()],
         )?;
         Ok(())
     }
 
+    /// KNN search over chunk embeddings. Returns top-K chunks.
+    /// `block_type` filter (Plan 4): when supplied, JOIN `blocks` to filter.
     pub fn semantic_search(
         &self,
-        query: &[f32],
-        limit: u32,
+        query_embedding: &[f32],
+        limit: usize,
+        block_type: Option<&str>,
     ) -> Result<Vec<ChunkSearchResult>, CoreError> {
-        let bytes: Vec<u8> = query.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let query_bytes: Vec<u8> = query_embedding
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT c.id, c.entry_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
-                    v.distance
-             FROM vec_chunk_embeddings v
-             JOIN chunks c ON c.id = v.chunk_id
-             WHERE v.embedding MATCH ?1
-               AND k = ?2
-             ORDER BY v.distance",
-        )?;
-        let rows = stmt.query_map(params![bytes, limit], |row| {
-            let chunk = row_to_chunk(row)?;
-            let distance: f64 = row.get(7)?;
-            Ok(ChunkSearchResult {
-                chunk,
-                score: (1.0 - distance) as f32,
-            })
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(CoreError::Storage)
+        let sql = match block_type {
+            Some(_) => {
+                "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
+                        vec.distance
+                 FROM vec_chunk_embeddings vec
+                 JOIN chunks c ON c.id = vec.chunk_id
+                 JOIN blocks b ON b.id = c.block_id
+                 WHERE vec.embedding MATCH ?1 AND k = ?2 AND b.type = ?3
+                 ORDER BY vec.distance"
+            }
+            None => {
+                "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
+                        vec.distance
+                 FROM vec_chunk_embeddings vec
+                 JOIN chunks c ON c.id = vec.chunk_id
+                 WHERE vec.embedding MATCH ?1 AND k = ?2
+                 ORDER BY vec.distance"
+            }
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = match block_type {
+            Some(t) => stmt
+                .query_map(params![&query_bytes, limit as i64, t], |row| {
+                    let chunk = row_to_chunk(row, 0)?;
+                    let distance: f64 = row.get(7)?;
+                    Ok(ChunkSearchResult {
+                        chunk,
+                        score: (1.0 - distance) as f32,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?,
+            None => stmt
+                .query_map(params![&query_bytes, limit as i64], |row| {
+                    let chunk = row_to_chunk(row, 0)?;
+                    let distance: f64 = row.get(7)?;
+                    Ok(ChunkSearchResult {
+                        chunk,
+                        score: (1.0 - distance) as f32,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        Ok(rows)
     }
 }
 
-fn row_to_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chunk> {
-    let id_str: String = row.get(0)?;
-    let entry_id_str: String = row.get(1)?;
-    let ordinal_i64: i64 = row.get(2)?;
-    let text: String = row.get(3)?;
-    let attrs_json: String = row.get(4)?;
-    let created_at_str: String = row.get(5)?;
-    let updated_at_str: String = row.get(6)?;
+fn row_to_chunk(row: &rusqlite::Row<'_>, _offset: usize) -> rusqlite::Result<Chunk> {
+    use chrono::{DateTime, Utc};
 
-    let id = from_text(0, &id_str, Ulid::from_string)?;
-    let entry_id = from_text(1, &entry_id_str, Ulid::from_string)?;
-    let attrs: serde_json::Value = from_text(4, &attrs_json, |s| serde_json::from_str(s))?;
-    let created_at =
-        from_text(5, &created_at_str, chrono::DateTime::parse_from_rfc3339)?.with_timezone(&Utc);
-    let updated_at =
-        from_text(6, &updated_at_str, chrono::DateTime::parse_from_rfc3339)?.with_timezone(&Utc);
+    let id_str: String = row.get(0)?;
+    let block_id_str: String = row.get(1)?;
+    let ordinal: u32 = row.get(2)?;
+    let text: String = row.get(3)?;
+    let attrs_str: String = row.get(4)?;
+    let created_str: String = row.get(5)?;
+    let updated_str: String = row.get(6)?;
+
+    let attrs: serde_json::Value = serde_json::from_str(&attrs_str)
+        .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
 
     Ok(Chunk {
-        id,
-        entry_id,
-        ordinal: ordinal_i64 as u32,
+        id: id_str.parse().expect("ULID stored in DB is always valid"),
+        block_id: block_id_str
+            .parse()
+            .expect("ULID stored in DB is always valid"),
+        ordinal,
         text,
         attrs,
-        created_at,
-        updated_at,
-    })
-}
-
-fn from_text<T, E>(
-    idx: usize,
-    s: &str,
-    f: impl for<'a> FnOnce(&'a str) -> Result<T, E>,
-) -> rusqlite::Result<T>
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    f(s).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, Box::new(e))
+        created_at: DateTime::parse_from_rfc3339(&created_str)
+            .expect("RFC3339 stored in DB is always valid")
+            .with_timezone(&Utc),
+        updated_at: DateTime::parse_from_rfc3339(&updated_str)
+            .expect("RFC3339 stored in DB is always valid")
+            .with_timezone(&Utc),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk_model::CreateChunk;
-    use crate::event_service::EventService;
-    use crate::{CreateEntry, EntryService, ListEventsQuery};
     use serde_json::json;
     use ulid::Ulid;
 
-    fn setup_with_entry() -> (EntryService, ChunkService, Ulid) {
-        let entries = EntryService::for_test().unwrap();
+    /// Seed an entry with a single note block; return (entry_id, block_id, conn).
+    /// BlockService::create_in_tx auto-derives chunks (Plan 4 Task 5), so the
+    /// block will have 1 chunk under it after this.
+    fn seed_entry_and_block() -> (Ulid, Ulid, Arc<Mutex<Connection>>) {
+        let entries = crate::EntryService::for_test().unwrap();
         let conn = entries.conn_for_test();
-        let chunks = ChunkService::new(conn).unwrap();
-        let e = entries
-            .create(CreateEntry {
-                title: "container".into(),
-                blocks: vec![crate::block_model::BlockInput {
+        let entry = entries
+            .create(crate::CreateEntry {
+                title: "t".into(),
+                blocks: vec![crate::BlockInput {
                     r#type: "note".into(),
-                    text: "body".into(),
+                    text: "block body".into(),
                     attrs: None,
                 }],
                 tags: None,
@@ -384,7 +240,38 @@ mod tests {
                 source: None,
             })
             .unwrap();
-        (entries, chunks, e.id)
+        let blocks = crate::BlockService::new(conn.clone()).unwrap();
+        let block_list = blocks.list(entry.id).unwrap();
+        (entry.id, block_list.items[0].id, conn)
+    }
+
+    /// Insert a chunk directly via SQL (test helper for cases that need
+    /// multiple chunks per block without going through chunking).
+    fn insert_chunk_sql(
+        conn: &Arc<Mutex<Connection>>,
+        block_id: Ulid,
+        ordinal: u32,
+        text: &str,
+        attrs: serde_json::Value,
+    ) -> Ulid {
+        let id = Ulid::new();
+        let now = chrono::Utc::now();
+        let c = conn.lock().unwrap();
+        c.execute(
+            "INSERT INTO chunks (id, block_id, ordinal, text, attrs, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id.to_string(),
+                block_id.to_string(),
+                ordinal,
+                text,
+                attrs.to_string(),
+                now.to_rfc3339(),
+                now.to_rfc3339(),
+            ],
+        )
+        .unwrap();
+        id
     }
 
     #[test]
@@ -398,180 +285,106 @@ mod tests {
     }
 
     #[test]
-    fn create_returns_chunk_with_generated_id_and_default_attrs() {
-        let (_, chunks, entry_id) = setup_with_entry();
-        let chunk = chunks
-            .create(CreateChunk {
-                entry_id,
-                ordinal: 0,
-                text: "first chunk".into(),
-                attrs: None,
-            })
-            .unwrap();
-        assert_eq!(chunk.entry_id, entry_id);
-        assert_eq!(chunk.ordinal, 0);
-        assert_eq!(chunk.text, "first chunk");
-        assert_eq!(chunk.attrs, json!({}));
-        assert!(chunk.created_at <= chrono::Utc::now());
-    }
-
-    #[test]
-    fn create_persists_chunk_retrievable_via_list_later() {
-        // list is implemented in Task 3; for now use direct SQL to verify persistence.
-        let (_, chunks, entry_id) = setup_with_entry();
-        let chunk = chunks
-            .create(CreateChunk {
-                entry_id,
-                ordinal: 5,
-                text: "persisted".into(),
-                attrs: Some(json!({"section": "intro"})),
-            })
-            .unwrap();
-
-        let conn = chunks.conn.lock().unwrap();
-        let (eid, ord, text, attrs_json): (String, i64, String, String) = conn
-            .query_row(
-                "SELECT entry_id, ordinal, text, attrs FROM chunks WHERE id = ?1",
-                rusqlite::params![chunk.id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    fn list_returns_empty_for_block_with_no_chunks() {
+        // Seed an entry+block; chunking auto-derives a chunk for "block body"
+        // (one chunk because text ≤ 1024 chars). For an explicit no-chunks
+        // case we insert a block by direct SQL with empty body — but
+        // BlockService::create_in_tx is the only entry path and it always
+        // chunks. Instead: query a freshly-seeded block whose chunks we then
+        // delete directly.
+        let (_entry_id, block_id, conn) = seed_entry_and_block();
+        // Wipe chunks for this block; then list should be empty.
+        {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "DELETE FROM chunks WHERE block_id = ?1",
+                params![block_id.to_string()],
             )
             .unwrap();
-        assert_eq!(eid, entry_id.to_string());
-        assert_eq!(ord, 5);
-        assert_eq!(text, "persisted");
-        assert_eq!(attrs_json, r#"{"section":"intro"}"#);
+        }
+        let chunks = ChunkService::new(conn).unwrap();
+        let result = chunks.list(block_id).unwrap();
+        assert_eq!(result.total, 0);
+        assert!(result.items.is_empty());
     }
 
     #[test]
-    fn create_rejects_non_object_attrs() {
-        let (_, chunks, entry_id) = setup_with_entry();
-        let err = chunks
-            .create(CreateChunk {
-                entry_id,
-                ordinal: 0,
-                text: "x".into(),
-                attrs: Some(json!([1, 2, 3])),
-            })
-            .unwrap_err();
-        assert!(matches!(err, CoreError::Validation(_)));
+    fn list_returns_chunks_for_block_sorted_by_ordinal() {
+        let (_entry_id, block_id, conn) = seed_entry_and_block();
+        // Wipe auto-derived chunks; insert 3 out of order via SQL.
+        {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "DELETE FROM chunks WHERE block_id = ?1",
+                params![block_id.to_string()],
+            )
+            .unwrap();
+        }
+        insert_chunk_sql(&conn, block_id, 2, "two", json!({}));
+        insert_chunk_sql(&conn, block_id, 0, "zero", json!({}));
+        insert_chunk_sql(&conn, block_id, 1, "one", json!({}));
+
+        let chunks = ChunkService::new(conn).unwrap();
+        let result = chunks.list(block_id).unwrap();
+        assert_eq!(result.total, 3);
+        assert_eq!(result.items[0].ordinal, 0);
+        assert_eq!(result.items[0].text, "zero");
+        assert_eq!(result.items[1].ordinal, 1);
+        assert_eq!(result.items[2].ordinal, 2);
     }
 
     #[test]
-    fn create_returns_validation_when_entry_does_not_exist() {
-        // FK violation. With PRAGMA foreign_keys = ON, SQLite returns
-        // SQLITE_CONSTRAINT ForeignKey.
-        let chunks = ChunkService::for_test().unwrap();
-        let phantom: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
-        let err = chunks
-            .create(CreateChunk {
-                entry_id: phantom,
-                ordinal: 0,
-                text: "x".into(),
+    fn list_only_returns_chunks_for_target_block() {
+        let entries = crate::EntryService::for_test().unwrap();
+        let conn = entries.conn_for_test();
+        let a = entries
+            .create(crate::CreateEntry {
+                title: "a".into(),
+                blocks: vec![crate::BlockInput {
+                    r#type: "note".into(),
+                    text: "block a body".into(),
+                    attrs: None,
+                }],
+                tags: None,
                 attrs: None,
-            })
-            .unwrap_err();
-        assert!(matches!(err, CoreError::Validation(_)));
-    }
-
-    #[test]
-    fn create_returns_validation_on_duplicate_entry_ordinal() {
-        let (_, chunks, entry_id) = setup_with_entry();
-        chunks
-            .create(CreateChunk {
-                entry_id,
-                ordinal: 0,
-                text: "first".into(),
-                attrs: None,
+                source: None,
             })
             .unwrap();
-        let err = chunks
-            .create(CreateChunk {
-                entry_id,
-                ordinal: 0, // duplicate
-                text: "second".into(),
+        let b = entries
+            .create(crate::CreateEntry {
+                title: "b".into(),
+                blocks: vec![crate::BlockInput {
+                    r#type: "note".into(),
+                    text: "block b body".into(),
+                    attrs: None,
+                }],
+                tags: None,
                 attrs: None,
+                source: None,
             })
-            .unwrap_err();
-        assert!(matches!(err, CoreError::Validation(_)));
+            .unwrap();
+        let blocks = crate::BlockService::new(conn.clone()).unwrap();
+        let block_a = blocks.list(a.id).unwrap().items[0].id;
+        let block_b = blocks.list(b.id).unwrap().items[0].id;
+
+        let chunks = ChunkService::new(conn).unwrap();
+        let result_a = chunks.list(block_a).unwrap();
+        assert_eq!(result_a.total, 1);
+        assert_eq!(result_a.items[0].text, "block a body");
+
+        let result_b = chunks.list(block_b).unwrap();
+        assert_eq!(result_b.total, 1);
+        assert_eq!(result_b.items[0].text, "block b body");
     }
 
     #[test]
-    fn create_allows_same_entry_different_ordinal() {
-        let (_, chunks, entry_id) = setup_with_entry();
-        chunks
-            .create(CreateChunk {
-                entry_id,
-                ordinal: 0,
-                text: "first".into(),
-                attrs: None,
-            })
-            .unwrap();
-        // Different ordinal: should succeed.
-        chunks
-            .create(CreateChunk {
-                entry_id,
-                ordinal: 1,
-                text: "second".into(),
-                attrs: None,
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn create_emits_chunk_created_event_with_full_snapshot() {
-        let (entries, chunks, entry_id) = setup_with_entry();
-        let events = EventService::for_test_shared_with_entries(&entries);
-
-        let chunk = chunks
-            .create(CreateChunk {
-                entry_id,
-                ordinal: 0,
-                text: "snippet".into(),
-                attrs: None,
-            })
-            .unwrap();
-
-        let result = events.list(ListEventsQuery::default()).unwrap();
-        // 2 events: 1x entry.created (from setup) + 1x chunk.created
-        let chunk_events: Vec<_> = result
-            .items
-            .iter()
-            .filter(|e| e.type_ == "chunk.created")
-            .collect();
-        assert_eq!(chunk_events.len(), 1);
-        let event = chunk_events[0];
-        assert_eq!(event.target_type, "chunk");
-        assert_eq!(event.target_id, chunk.id);
-        assert_eq!(event.payload["ordinal"], 0);
-        assert_eq!(event.payload["text"], "snippet");
-        assert_eq!(event.payload["entry_id"], entry_id.to_string());
-    }
-
-    fn seed_chunk(chunks: &ChunkService, entry_id: Ulid, ordinal: u32, text: &str) -> Ulid {
-        chunks
-            .create(CreateChunk {
-                entry_id,
-                ordinal,
-                text: text.into(),
-                attrs: None,
-            })
-            .unwrap()
-            .id
-    }
-
-    #[test]
-    fn get_returns_chunk_created_by_create() {
-        let (_, chunks, entry_id) = setup_with_entry();
-        let created = chunks
-            .create(CreateChunk {
-                entry_id,
-                ordinal: 0,
-                text: "x".into(),
-                attrs: None,
-            })
-            .unwrap();
-        let fetched = chunks.get(created.id).unwrap();
-        assert_eq!(created, fetched);
+    fn get_returns_chunk_by_id() {
+        let (_entry_id, block_id, conn) = seed_entry_and_block();
+        let chunks = ChunkService::new(conn.clone()).unwrap();
+        let listed = chunks.list(block_id).unwrap();
+        assert_eq!(listed.total, 1);
+        let fetched = chunks.get(listed.items[0].id).unwrap();
+        assert_eq!(listed.items[0], fetched);
     }
 
     #[test]
@@ -583,57 +396,108 @@ mod tests {
     }
 
     #[test]
-    fn list_returns_chunks_for_entry_sorted_by_ordinal() {
-        let (_, chunks, entry_id) = setup_with_entry();
-        // Insert out of order — list should sort by ordinal ascending.
-        seed_chunk(&chunks, entry_id, 2, "two");
-        seed_chunk(&chunks, entry_id, 0, "zero");
-        seed_chunk(&chunks, entry_id, 1, "one");
-
-        let result = chunks.list(entry_id, 100, 0).unwrap();
-        assert_eq!(result.total, 3);
-        assert_eq!(result.items.len(), 3);
-        assert_eq!(result.items[0].ordinal, 0);
-        assert_eq!(result.items[0].text, "zero");
-        assert_eq!(result.items[1].ordinal, 1);
-        assert_eq!(result.items[2].ordinal, 2);
-    }
-
-    #[test]
-    fn list_paginates_with_limit_and_offset() {
-        let (_, chunks, entry_id) = setup_with_entry();
-        for i in 0..5 {
-            seed_chunk(&chunks, entry_id, i, &format!("c{i}"));
-        }
-        let page1 = chunks.list(entry_id, 2, 0).unwrap();
-        assert_eq!(page1.items.len(), 2);
-        assert_eq!(page1.total, 5);
-        assert_eq!(page1.items[0].ordinal, 0);
-
-        let page2 = chunks.list(entry_id, 2, 2).unwrap();
-        assert_eq!(page2.items.len(), 2);
-        assert_eq!(page2.items[0].ordinal, 2);
-    }
-
-    #[test]
-    fn list_returns_empty_for_entry_with_no_chunks() {
-        let (_, chunks, entry_id) = setup_with_entry();
-        let result = chunks.list(entry_id, 100, 0).unwrap();
-        assert_eq!(result.total, 0);
-        assert!(result.items.is_empty());
-    }
-
-    #[test]
-    fn list_only_returns_chunks_for_specified_entry() {
-        let entries = EntryService::for_test().unwrap();
-        let conn = entries.conn_for_test();
+    fn auto_derived_chunk_has_parent_block_type_attr() {
+        // BlockService::create_in_tx (Plan 4 Task 5) should auto-derive
+        // chunks with `parent_block_type` in attrs.
+        let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn).unwrap();
+        let result = chunks.list(block_id).unwrap();
+        assert_eq!(result.total, 1);
+        assert_eq!(result.items[0].attrs["parent_block_type"], json!("note"));
+    }
+
+    #[test]
+    fn ensure_vec_chunk_embeddings_is_idempotent() {
+        crate::storage::init_sqlite_extensions();
+        let chunks = ChunkService::for_test().unwrap();
+        chunks.ensure_vec_chunk_embeddings(8).unwrap();
+        chunks.ensure_vec_chunk_embeddings(8).unwrap();
+    }
+
+    #[test]
+    fn write_embedding_persists_row_visible_via_direct_sql() {
+        crate::storage::init_sqlite_extensions();
+        let (_entry_id, block_id, conn) = seed_entry_and_block();
+        let chunks = ChunkService::new(conn.clone()).unwrap();
+        chunks.ensure_vec_chunk_embeddings(4).unwrap();
+        let chunk_id = chunks.list(block_id).unwrap().items[0].id;
+
+        chunks
+            .write_embedding(chunk_id, &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+
+        let c = conn.lock().unwrap();
+        let n: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM vec_chunk_embeddings WHERE chunk_id = ?1",
+                params![chunk_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn delete_embedding_removes_row() {
+        crate::storage::init_sqlite_extensions();
+        let (_entry_id, block_id, conn) = seed_entry_and_block();
+        let chunks = ChunkService::new(conn.clone()).unwrap();
+        chunks.ensure_vec_chunk_embeddings(2).unwrap();
+        let chunk_id = chunks.list(block_id).unwrap().items[0].id;
+        chunks.write_embedding(chunk_id, &[1.0, 0.0]).unwrap();
+
+        chunks.delete_embedding(chunk_id).unwrap();
+
+        let c = conn.lock().unwrap();
+        let n: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM vec_chunk_embeddings WHERE chunk_id = ?1",
+                params![chunk_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn semantic_search_ranks_chunks_by_cosine_similarity() {
+        crate::storage::init_sqlite_extensions();
+        let (_entry_id, block_id, conn) = seed_entry_and_block();
+        let chunks = ChunkService::new(conn.clone()).unwrap();
+        chunks.ensure_vec_chunk_embeddings(3).unwrap();
+
+        // Insert two chunks under the same block with known embeddings.
+        {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "DELETE FROM chunks WHERE block_id = ?1",
+                params![block_id.to_string()],
+            )
+            .unwrap();
+        }
+        let near = insert_chunk_sql(&conn, block_id, 0, "near", json!({}));
+        let far = insert_chunk_sql(&conn, block_id, 1, "far", json!({}));
+        chunks.write_embedding(near, &[1.0, 0.0, 0.0]).unwrap();
+        chunks.write_embedding(far, &[0.0, 0.0, 1.0]).unwrap();
+
+        let hits = chunks.semantic_search(&[0.9, 0.1, 0.0], 10, None).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].chunk.id, near, "near should rank first");
+        assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn semantic_search_filters_by_block_type() {
+        crate::storage::init_sqlite_extensions();
+        let entries = crate::EntryService::for_test().unwrap();
+        let conn = entries.conn_for_test();
+        // Create one entry with a claim block + another with a note block.
         let a = entries
-            .create(CreateEntry {
+            .create(crate::CreateEntry {
                 title: "a".into(),
-                blocks: vec![crate::block_model::BlockInput {
-                    r#type: "note".into(),
-                    text: "x".into(),
+                blocks: vec![crate::BlockInput {
+                    r#type: "claim".into(),
+                    text: "claim text".into(),
                     attrs: None,
                 }],
                 tags: None,
@@ -642,11 +506,11 @@ mod tests {
             })
             .unwrap();
         let b = entries
-            .create(CreateEntry {
+            .create(crate::CreateEntry {
                 title: "b".into(),
-                blocks: vec![crate::block_model::BlockInput {
+                blocks: vec![crate::BlockInput {
                     r#type: "note".into(),
-                    text: "y".into(),
+                    text: "note text".into(),
                     attrs: None,
                 }],
                 tags: None,
@@ -654,213 +518,59 @@ mod tests {
                 source: None,
             })
             .unwrap();
-        seed_chunk(&chunks, a.id, 0, "a0");
-        seed_chunk(&chunks, b.id, 0, "b0");
+        let blocks = crate::BlockService::new(conn.clone()).unwrap();
+        let claim_block = blocks.list(a.id).unwrap().items[0].id;
+        let note_block = blocks.list(b.id).unwrap().items[0].id;
 
-        let result_a = chunks.list(a.id, 100, 0).unwrap();
-        assert_eq!(result_a.total, 1);
-        assert_eq!(result_a.items[0].text, "a0");
-
-        let result_b = chunks.list(b.id, 100, 0).unwrap();
-        assert_eq!(result_b.total, 1);
-        assert_eq!(result_b.items[0].text, "b0");
-    }
-
-    #[test]
-    fn delete_removes_chunk() {
-        let (_, chunks, entry_id) = setup_with_entry();
-        let id = seed_chunk(&chunks, entry_id, 0, "x");
-        chunks.delete(id).unwrap();
-        let err = chunks.get(id).unwrap_err();
-        assert!(matches!(err, CoreError::NotFound(_)));
-    }
-
-    #[test]
-    fn chunk_create_in_tx_works_within_external_transaction() {
-        let (_, chunks, entry_id) = setup_with_entry();
-        let conn = chunks.conn.lock().unwrap();
-        conn.execute_batch("BEGIN").unwrap();
-        let chunk = chunks
-            .create_in_tx(
-                &conn,
-                CreateChunk {
-                    entry_id,
-                    ordinal: 0,
-                    text: "in_tx".into(),
-                    attrs: None,
-                },
-            )
-            .unwrap();
-        conn.execute_batch("COMMIT").unwrap();
-        drop(conn);
-
-        let fetched = chunks.get(chunk.id).unwrap();
-        assert_eq!(fetched.text, "in_tx");
-    }
-
-    #[test]
-    fn chunk_delete_in_tx_works_within_external_transaction() {
-        let (_, chunks, entry_id) = setup_with_entry();
-        let id = seed_chunk(&chunks, entry_id, 0, "x");
-
-        let conn = chunks.conn.lock().unwrap();
-        conn.execute_batch("BEGIN").unwrap();
-        chunks.delete_in_tx(&conn, id).unwrap();
-        conn.execute_batch("COMMIT").unwrap();
-        drop(conn);
-
-        let err = chunks.get(id).unwrap_err();
-        assert!(matches!(err, CoreError::NotFound(_)));
-    }
-
-    #[test]
-    fn delete_returns_not_found_for_unknown_id() {
-        let chunks = ChunkService::for_test().unwrap();
-        let phantom: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
-        let err = chunks.delete(phantom).unwrap_err();
-        assert!(matches!(err, CoreError::NotFound(_)));
-    }
-
-    #[test]
-    fn delete_emits_chunk_deleted_event_with_before_snapshot() {
-        let (entries, chunks, entry_id) = setup_with_entry();
-        let events = EventService::for_test_shared_with_entries(&entries);
-        let chunk = chunks
-            .create(CreateChunk {
-                entry_id,
-                ordinal: 0,
-                text: "to be deleted".into(),
-                attrs: None,
-            })
-            .unwrap();
-
-        chunks.delete(chunk.id).unwrap();
-
-        let result = events.list(ListEventsQuery::default()).unwrap();
-        let delete_events: Vec<_> = result
-            .items
-            .iter()
-            .filter(|e| e.type_ == "chunk.deleted")
-            .collect();
-        assert_eq!(delete_events.len(), 1);
-        let event = delete_events[0];
-        assert_eq!(event.target_id, chunk.id);
-        // Payload is BEFORE snapshot (chunk no longer in chunks table but event retains it).
-        assert_eq!(event.payload["text"], "to be deleted");
-        assert_eq!(event.payload["ordinal"], 0);
-    }
-
-    #[test]
-    fn ensure_vec_chunk_embeddings_is_idempotent() {
-        crate::storage::init_sqlite_extensions();
-        let chunks = ChunkService::for_test().unwrap();
-        chunks.ensure_vec_chunk_embeddings(8).unwrap();
-        chunks.ensure_vec_chunk_embeddings(8).unwrap(); // idempotent
-    }
-
-    #[test]
-    fn write_embedding_persists_row_visible_via_direct_sql() {
-        crate::storage::init_sqlite_extensions();
-        let (_, chunks, entry_id) = setup_with_entry();
-        chunks.ensure_vec_chunk_embeddings(4).unwrap();
-        let c = seed_chunk(&chunks, entry_id, 0, "x");
-
-        chunks.write_embedding(c, &[1.0, 0.0, 0.0, 0.0]).unwrap();
-
-        // Verify via direct SQL that the row exists.
-        let conn = chunks.conn.lock().unwrap();
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM vec_chunk_embeddings WHERE chunk_id = ?1",
-                rusqlite::params![c.to_string()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(n, 1);
-    }
-
-    #[test]
-    fn delete_embedding_removes_row_visible_via_direct_sql() {
-        crate::storage::init_sqlite_extensions();
-        let (_, chunks, entry_id) = setup_with_entry();
+        let chunks = ChunkService::new(conn.clone()).unwrap();
         chunks.ensure_vec_chunk_embeddings(2).unwrap();
-        let c = seed_chunk(&chunks, entry_id, 0, "x");
-        chunks.write_embedding(c, &[1.0, 0.0]).unwrap();
+        let claim_chunk = chunks.list(claim_block).unwrap().items[0].id;
+        let note_chunk = chunks.list(note_block).unwrap().items[0].id;
+        chunks.write_embedding(claim_chunk, &[1.0, 0.0]).unwrap();
+        chunks.write_embedding(note_chunk, &[1.0, 0.0]).unwrap();
 
-        chunks.delete_embedding(c).unwrap();
-
-        let conn = chunks.conn.lock().unwrap();
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM vec_chunk_embeddings WHERE chunk_id = ?1",
-                rusqlite::params![c.to_string()],
-                |row| row.get(0),
-            )
+        // Filter by block_type="claim": only the claim chunk matches.
+        let hits = chunks
+            .semantic_search(&[0.9, 0.1], 10, Some("claim"))
             .unwrap();
-        assert_eq!(n, 0);
-    }
-
-    #[test]
-    fn deleting_entry_cascades_to_chunks() {
-        // FK ON DELETE CASCADE: removing entry removes all its chunks.
-        let (entries, chunks, entry_id) = setup_with_entry();
-        let c1 = seed_chunk(&chunks, entry_id, 0, "first");
-        let c2 = seed_chunk(&chunks, entry_id, 1, "second");
-
-        entries.delete(entry_id).unwrap();
-
-        // Both chunks should be gone (CASCADE).
-        assert!(matches!(
-            chunks.get(c1).unwrap_err(),
-            CoreError::NotFound(_)
-        ));
-        assert!(matches!(
-            chunks.get(c2).unwrap_err(),
-            CoreError::NotFound(_)
-        ));
-    }
-
-    #[test]
-    fn semantic_search_ranks_chunks_by_cosine_similarity() {
-        crate::storage::init_sqlite_extensions();
-        let (_, chunks, entry_id) = setup_with_entry();
-        chunks.ensure_vec_chunk_embeddings(3).unwrap();
-
-        let near = seed_chunk(&chunks, entry_id, 0, "near");
-        let far = seed_chunk(&chunks, entry_id, 1, "far");
-        chunks.write_embedding(near, &[1.0, 0.0, 0.0]).unwrap();
-        chunks.write_embedding(far, &[0.0, 0.0, 1.0]).unwrap();
-
-        // Query close to near.
-        let hits = chunks.semantic_search(&[0.9, 0.1, 0.0], 10).unwrap();
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].chunk.id, near, "near should rank first");
-        assert!(hits[0].score > hits[1].score);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.id, claim_chunk);
     }
 
     #[test]
     fn semantic_search_returns_empty_when_no_embeddings() {
         crate::storage::init_sqlite_extensions();
-        let (_, chunks, entry_id) = setup_with_entry();
+        let (_entry_id, block_id, conn) = seed_entry_and_block();
+        let chunks = ChunkService::new(conn).unwrap();
         chunks.ensure_vec_chunk_embeddings(2).unwrap();
-        // Chunk exists but no embedding.
-        seed_chunk(&chunks, entry_id, 0, "x");
+        // Auto-derived chunk exists but no embedding written.
+        assert_eq!(chunks.list(block_id).unwrap().total, 1);
 
-        let hits = chunks.semantic_search(&[1.0, 0.0], 10).unwrap();
+        let hits = chunks.semantic_search(&[1.0, 0.0], 10, None).unwrap();
         assert!(hits.is_empty());
     }
 
     #[test]
     fn semantic_search_respects_limit() {
         crate::storage::init_sqlite_extensions();
-        let (_, chunks, entry_id) = setup_with_entry();
+        let (_entry_id, block_id, conn) = seed_entry_and_block();
+        let chunks = ChunkService::new(conn.clone()).unwrap();
         chunks.ensure_vec_chunk_embeddings(2).unwrap();
+        // Wipe auto-derived; insert 5 chunks with embeddings.
+        {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "DELETE FROM chunks WHERE block_id = ?1",
+                params![block_id.to_string()],
+            )
+            .unwrap();
+        }
         for i in 0..5 {
-            let c = seed_chunk(&chunks, entry_id, i, &format!("c{i}"));
-            chunks.write_embedding(c, &[1.0, 0.0]).unwrap();
+            let cid = insert_chunk_sql(&conn, block_id, i, &format!("c{i}"), json!({}));
+            chunks.write_embedding(cid, &[1.0, 0.0]).unwrap();
         }
 
-        let hits = chunks.semantic_search(&[1.0, 0.0], 3).unwrap();
+        let hits = chunks.semantic_search(&[1.0, 0.0], 3, None).unwrap();
         assert_eq!(hits.len(), 3);
     }
 }

@@ -243,7 +243,9 @@ mod tests {
         use std::sync::Arc;
 
         let entries = Arc::new(nomai_core::EntryService::for_test().unwrap());
-        entries.ensure_vec_embeddings(8).unwrap();
+        // Plan 4: entry-level embeddings retired; only chunk-level vec0 table
+        // remains. Daemon::for_test creates the ChunkService; ensure the
+        // virtual table exists before any test path touches it.
 
         struct NullEmbed;
         #[async_trait::async_trait]
@@ -280,13 +282,15 @@ mod tests {
             }
         }
 
-        Daemon::for_test(
+        let daemon = Daemon::for_test(
             entries,
             Arc::new(NullEmbed),
             Arc::new(NullLlm),
             "test-embed".into(),
             "test-llm".into(),
             8,
-        )
+        );
+        daemon.chunks.ensure_vec_chunk_embeddings(8).unwrap();
+        daemon
     }
 }

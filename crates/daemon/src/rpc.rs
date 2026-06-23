@@ -61,7 +61,10 @@ pub fn core_error_to_rpc(err: CoreError) -> RpcError {
         CoreError::Io(e) => RpcError {
             code: FS_ERROR,
             message: format!("io error: {e}"),
-            data: None,
+            // P2-7: enrich FS_ERROR data with the io::ErrorKind so callers
+            // can distinguish not-found / permission-denied / etc. without
+            // scraping the message string.
+            data: Some(json!({ "kind": format!("{:?}", e.kind()) })),
         },
         CoreError::NomaiFormat(pe) => RpcError {
             code: NOMAI_FORMAT_ERROR,
@@ -122,6 +125,8 @@ mod tests {
         let rpc = core_error_to_rpc(CoreError::Io(io_err));
         assert_eq!(rpc.code, FS_ERROR);
         assert!(rpc.message.contains("file missing"));
+        // P2-7: data field carries the io::ErrorKind for programmatic use.
+        assert_eq!(rpc.data.unwrap()["kind"], "NotFound");
     }
 
     #[test]
