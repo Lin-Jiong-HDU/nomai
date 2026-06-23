@@ -714,8 +714,9 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         // Create 3 entries → 3 entry.created + 3 block.created = 6 events.
-        // Plan 5 Task 8: daemon startup also emits one `index.synced` event,
-        // bringing the total to 7 before any entry.create call.
+        // Plan 6 Task 5: daemon startup emits `index.synced` only when the
+        // boot scan changes something; setup_daemon's empty FS means no
+        // boot event, so the total is 6 before any entry.create call.
         daemon
             .dispatch(req(
                 "entry.create",
@@ -739,14 +740,14 @@ mod tests {
         let list_resp = daemon.dispatch(req("events.list", json!({}))).await;
         let result = list_resp.result.unwrap();
         let items = result["items"].as_array().unwrap();
-        assert_eq!(items.len(), 7);
-        let last_event_id = items[6]["id"].as_str().unwrap().to_string();
+        assert_eq!(items.len(), 6);
+        let last_event_id = items[5]["id"].as_str().unwrap().to_string();
 
         // Purge events with id < last_event_id (exclusive).
         let purge_resp = daemon
             .dispatch(req("events.purge", json!({"before": last_event_id})))
             .await;
-        assert_eq!(purge_resp.result.unwrap()["deleted"], 6);
+        assert_eq!(purge_resp.result.unwrap()["deleted"], 5);
 
         // Verify only 1 event remains.
         let list_resp2 = daemon.dispatch(req("events.list", json!({}))).await;
@@ -762,8 +763,9 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         // Create 3 entries → 6 entry events total (each entry.create emits
-        // entry.created + block.created). Plan 5 Task 8: daemon startup also
-        // emits one `index.synced` event, so the grand total is 7.
+        // entry.created + block.created). Plan 6 Task 5: daemon startup
+        // emits `index.synced` only when the boot scan changes something;
+        // setup_daemon's empty FS means no boot event, so total = 6.
         for i in 0..3 {
             daemon
                 .dispatch(req(
@@ -782,12 +784,12 @@ mod tests {
         assert_eq!(p1_result["has_more"], true);
         let last_id = p1_result["items"][3]["id"].as_str().unwrap().to_string();
 
-        // Page 2: since = last_id from page 1 → 3 remaining events.
+        // Page 2: since = last_id from page 1 → 2 remaining events.
         let p2 = daemon
             .dispatch(req("events.list", json!({"limit": 4, "since": last_id})))
             .await;
         let p2_result = p2.result.unwrap();
-        assert_eq!(p2_result["items"].as_array().unwrap().len(), 3);
+        assert_eq!(p2_result["items"].as_array().unwrap().len(), 2);
         assert_eq!(p2_result["has_more"], false);
     }
 
@@ -2525,5 +2527,33 @@ mod tests {
         assert_eq!(payload["updated"], 0);
         assert_eq!(payload["removed"], 0);
         assert_eq!(payload["unchanged"], 0);
+    }
+
+    // ----- Plan 6 Task 5: quiet boot emits no index.synced event -----
+
+    #[tokio::test]
+    async fn quiet_boot_emits_no_index_synced_event() {
+        // setup_daemon uses EntryService::for_test — empty FS + empty index.
+        // Boot scan sees zero added/updated/removed and must skip the event
+        // so the audit log stays quiet across restarts with no FS changes.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let n: i64 = {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .query_row(
+                    "SELECT COUNT(*) FROM events WHERE type = 'index.synced'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            n, 0,
+            "empty boot should not emit index.synced event (got {n})"
+        );
     }
 }
