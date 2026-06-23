@@ -152,6 +152,61 @@ impl BlockService {
             Err(e) => Err(CoreError::Storage(e)),
         }
     }
+
+    /// Delete a block by id. Returns the pre-deletion snapshot. NotFound if
+    /// the block doesn't exist. Emits `block.deleted` event with snapshot.
+    pub fn delete(&self, id: Ulid) -> Result<Block, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN")?;
+        let result = self.delete_in_tx(&conn, id);
+        match result {
+            Ok(block) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(block)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Execute delete within an existing transaction. Caller controls BEGIN/COMMIT.
+    /// Does NOT lock self.conn. Does NOT call self methods that lock conn.
+    pub fn delete_in_tx(&self, conn: &Connection, id: Ulid) -> Result<Block, CoreError> {
+        use chrono::Utc;
+
+        // Fetch pre-deletion snapshot (for event payload + return value)
+        let block = match conn.query_row(
+            "SELECT id, entry_id, ordinal, type, text, attrs, created_at, updated_at
+             FROM blocks WHERE id = ?1",
+            params![id.to_string()],
+            |row| row_to_block(row, 0),
+        ) {
+            Ok(b) => b,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(CoreError::NotFound(id)),
+            Err(e) => return Err(CoreError::Storage(e)),
+        };
+
+        conn.execute("DELETE FROM blocks WHERE id = ?1", params![id.to_string()])?;
+
+        let event_id = Ulid::new();
+        let event_payload = serde_json::to_value(&block).expect("block serializes");
+        conn.execute(
+            "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event_id.to_string(),
+                "block.deleted",
+                "block",
+                block.id.to_string(),
+                event_payload.to_string(),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(block)
+    }
 }
 
 /// Map SQLite ConstraintViolation (FK or UNIQUE) to `CoreError::Validation`.
@@ -465,5 +520,71 @@ mod tests {
         let fake_id = Ulid::new();
         let err = svc.get(fake_id).unwrap_err();
         assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn delete_removes_block_and_returns_snapshot() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        let created = seed_block(&svc, entry_id, 0, "claim");
+
+        let deleted = svc.delete(created.id).unwrap();
+        assert_eq!(deleted.id, created.id);
+        assert_eq!(deleted.text, created.text);
+
+        // Verify gone
+        let err = svc.get(created.id).unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn delete_emits_block_deleted_event() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        let created = seed_block(&svc, entry_id, 0, "note");
+
+        svc.delete(created.id).unwrap();
+
+        let guard = svc.conn.lock().unwrap();
+        let event_type: String = guard
+            .query_row(
+                "SELECT type FROM events WHERE type = 'block.deleted' AND target_id = ?1",
+                params![created.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_type, "block.deleted");
+    }
+
+    #[test]
+    fn delete_returns_not_found_for_missing_id() {
+        let svc = BlockService::for_test().unwrap();
+        let fake_id = Ulid::new();
+        let err = svc.delete(fake_id).unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn delete_cascades_when_entry_deleted() {
+        // The FK on blocks.entry_id is ON DELETE CASCADE. Verify EntryService::delete
+        // removes the entry's blocks.
+        let svc = BlockService::for_test().unwrap();
+        let entries = EntryService::new(svc.conn.clone()).unwrap();
+        let entry = entries
+            .create(CreateEntry {
+                title: "x".into(),
+                body: "y".into(),
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+        seed_block(&svc, entry.id, 0, "note");
+        seed_block(&svc, entry.id, 1, "note");
+        assert_eq!(svc.list(entry.id).unwrap().total, 2);
+
+        entries.delete(entry.id).unwrap();
+
+        assert_eq!(svc.list(entry.id).unwrap().total, 0);
     }
 }
