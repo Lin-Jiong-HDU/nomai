@@ -136,6 +136,10 @@ impl RpcHandler for Delete {
 /// Called after any block-level mutation (append, update, delete) so the
 /// FS representation stays in sync with SQLite. Uses `EntryService::get`,
 /// which already populates `entry.blocks`.
+///
+/// Plan 5 final review (I1): also refreshes `entries.fs_mtime` to match the
+/// newly-written file. Without this, the next `sync_from_fs` would see a
+/// stale mtime and trigger a full reindex of the entry on every boot.
 pub(crate) async fn rerender_entry_nomai(
     entries: &Arc<EntryService>,
     entry_id: ulid::Ulid,
@@ -167,7 +171,29 @@ pub(crate) async fn rerender_entry_nomai(
             updated_at: entry.updated_at,
             blocks: parser_blocks,
         };
-        entries.content_store().write_entry(entry_id, &doc)
+        entries.content_store().write_entry(entry_id, &doc)?;
+        // Plan 5 final review (I1): refresh entries.fs_mtime to match the
+        // newly-written .nomai file. Without this, the next sync_from_fs
+        // sees a stale mtime and triggers a full reindex of the entry on
+        // every daemon boot, undermining the trigger-based cleanup shipped
+        // in Plan 5 Task 1. We also bump entries.updated_at so the row
+        // reflects the latest mutation.
+        let new_mtime = entries
+            .content_store()
+            .entry_mtime(entry_id)
+            .ok_or_else(|| CoreError::Storage(rusqlite::Error::ExecuteReturnedResults))?;
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .execute(
+                    "UPDATE entries SET fs_mtime = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![new_mtime.to_rfc3339(), &now, entry_id.to_string()],
+                )
+                .map_err(CoreError::Storage)?;
+        }
+        Ok(())
     })
     .await?
 }

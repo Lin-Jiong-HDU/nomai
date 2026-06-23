@@ -121,7 +121,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    const DIM: usize = 2048;
+    const DIM: usize = 1536;
 
     async fn setup_daemon(server: &MockServer) -> Daemon {
         let entries = Arc::new(EntryService::for_test().unwrap());
@@ -161,10 +161,10 @@ mod tests {
         }
     }
 
-    /// Build a 2048-dim embedding (V9 daemon default) from a short prefix,
+    /// Build a 1536-dim embedding (V9 daemon default) from a short prefix,
     /// zero-padding the rest. Used by similarity tests that want unit vectors
     /// along specific axes.
-    fn vec_2048(prefix: &[f32]) -> Vec<f32> {
+    fn vec_1536(prefix: &[f32]) -> Vec<f32> {
         let mut v = vec![0.0_f32; DIM];
         for (i, x) in prefix.iter().enumerate() {
             v[i] = *x;
@@ -281,12 +281,12 @@ mod tests {
         let a_chunk_id = chunks.list(a_block_id).unwrap().items[0].id;
         let b_chunk_id = chunks.list(b_block_id).unwrap().items[0].id;
         chunks
-            .write_embedding(a_chunk_id, &vec_2048(&[1.0]))
+            .write_embedding(a_chunk_id, &vec_1536(&[1.0]))
             .unwrap();
         chunks
             .write_embedding(
                 b_chunk_id,
-                &vec_2048(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
+                &vec_1536(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
             )
             .unwrap();
 
@@ -294,7 +294,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/embeddings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{"index": 0, "embedding": vec_2048(&[1.0])}]
+                "data": [{"index": 0, "embedding": vec_1536(&[1.0])}]
             })))
             .mount(&server)
             .await;
@@ -1744,6 +1744,106 @@ mod tests {
         assert_eq!(doc.title, "T");
         assert_eq!(doc.blocks.len(), 2);
         assert_eq!(doc.blocks[1].r#type.as_str(), "question");
+    }
+
+    #[tokio::test]
+    async fn block_append_updates_fs_mtime_so_sync_skips_reindex() {
+        // Plan 5 final review (I1): rerender_entry_nomai must refresh
+        // entries.fs_mtime so the next sync_from_fs treats the entry as
+        // unchanged. Without the refresh, sync sees a stale mtime and
+        // triggers a full reindex on every boot.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create entry with one block.
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"T","blocks":[{"type":"note","text":"first"}]}),
+            ))
+            .await;
+        let entry_id = create_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let entry_ulid: ulid::Ulid = entry_id.parse().unwrap();
+
+        // Capture fs_mtime right after create.
+        let original_mtime: Option<String> = {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .query_row(
+                    "SELECT fs_mtime FROM entries WHERE id = ?1",
+                    rusqlite::params![entry_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        // entry.create writes the .nomai file via EntryService::create, which
+        // sets fs_mtime. Sanity check it's present.
+        assert!(original_mtime.is_some(), "create should set fs_mtime");
+
+        // Sleep so the file mtime can differ (filesystem mtime resolution).
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Append a block — this rewrites the .nomai file via rerender.
+        let append_resp = daemon
+            .dispatch(req(
+                "block.append",
+                json!({"entry_id": entry_id, "type": "note", "text": "second"}),
+            ))
+            .await;
+        assert!(append_resp.error.is_none(), "{:?}", append_resp.error);
+
+        // fs_mtime should have been refreshed to the new file's mtime.
+        let new_mtime: Option<String> = {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .query_row(
+                    "SELECT fs_mtime FROM entries WHERE id = ?1",
+                    rusqlite::params![entry_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert!(
+            new_mtime.is_some(),
+            "fs_mtime should remain set after append"
+        );
+        assert_ne!(
+            original_mtime, new_mtime,
+            "fs_mtime should refresh after block.append rewrites the .nomai file"
+        );
+
+        // The on-disk mtime must match what we stored — that's the whole
+        // point of the refresh.
+        let on_disk = daemon
+            .entries
+            .content_store()
+            .entry_mtime(entry_ulid)
+            .unwrap()
+            .to_rfc3339();
+        assert_eq!(
+            new_mtime.unwrap(),
+            on_disk,
+            "stored fs_mtime must match on-disk mtime after rerender"
+        );
+
+        // sync_from_fs should treat this entry as unchanged (no reindex).
+        let result = daemon.entries.sync_from_fs().unwrap();
+        assert_eq!(
+            result.updated, 0,
+            "sync should not reindex; fs_mtime is fresh"
+        );
+        assert_eq!(
+            result.unchanged, 1,
+            "sync should report the entry as unchanged"
+        );
+        assert_eq!(result.added, 0);
+        assert_eq!(result.removed, 0);
     }
 
     #[tokio::test]

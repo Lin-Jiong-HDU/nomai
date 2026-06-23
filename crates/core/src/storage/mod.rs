@@ -348,8 +348,8 @@ mod tests {
         crate::storage::init_sqlite_extensions();
         let mut conn = Connection::open_in_memory().unwrap();
         run_migrations(&mut conn).unwrap();
-        // V9 creates vec_chunk_embeddings with dim=2048 (daemon default).
-        // The CREATE here is a no-op (IF NOT EXISTS); embeddings must match 2048.
+        // V9 creates vec_chunk_embeddings with dim=1536 (daemon default).
+        // The CREATE here is a no-op (IF NOT EXISTS); embeddings must match 1536.
         // Insert entry + block + chunk
         conn.execute(
             "INSERT INTO entries (id, title, tags, attrs, source, fs_path, fs_mtime, created_at, updated_at)
@@ -369,8 +369,8 @@ mod tests {
             [],
         )
         .unwrap();
-        // Insert chunk embedding (FLOAT[2048] = 2048 * 4 bytes = 8192 bytes).
-        let emb: Vec<u8> = vec![0u8; 8192];
+        // Insert chunk embedding (FLOAT[1536] = 1536 * 4 bytes = 6144 bytes).
+        let emb: Vec<u8> = vec![0u8; 6144];
         conn.execute(
             "INSERT INTO vec_chunk_embeddings (chunk_id, embedding) VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAC', ?1)",
             [&emb[..]],
@@ -390,5 +390,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 0, "chunks_ad should have removed the embedding");
+    }
+
+    #[test]
+    fn v9_creates_vec_chunk_embeddings_with_daemon_default_dim() {
+        // Plan 5 final review (C1): V9 must create vec_chunk_embeddings with
+        // dim=1536 (matching daemon default config.rs:175) — not 2048. A
+        // mismatch breaks the first embedding write at the vec0 layer with
+        // "Dimension mismatch for inserted vector".
+        crate::storage::init_sqlite_extensions();
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        // Inspect the CREATE VIRTUAL TABLE SQL captured in sqlite_master.
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type='table' AND name='vec_chunk_embeddings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.contains("FLOAT[1536]"),
+            "V9 should create vec_chunk_embeddings with dim=1536 (daemon default), got: {sql}"
+        );
+        assert!(
+            !sql.contains("FLOAT[2048]"),
+            "V9 must not hardcode dim=2048; got: {sql}"
+        );
     }
 }

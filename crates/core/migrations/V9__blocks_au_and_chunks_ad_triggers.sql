@@ -11,15 +11,19 @@
 -- N+1 cleanup loop previously in the entry.delete daemon handler
 -- (Plan 4 Minor #3, Plan 5 design note).
 
--- vec_chunk_embeddings: previously created lazily by ChunkService. Plan 5
--- creates it here so the chunks_ad trigger can reference it unconditionally.
--- Dimension 2048 matches daemon default (config.embedding.dim, GLM embedding-3).
--- If config uses a different dim, the daemon's ensure_vec_chunk_embeddings call
--- will be a no-op (IF NOT EXISTS) — but dim mismatch means re-creation requires
--- manual table drop + ChunkService::ensure call with correct dim.
+-- vec_chunk_embeddings: created here so the chunks_ad trigger can resolve
+-- the table at fire time. SQLite validates trigger-body table references
+-- when the trigger fires (Plan 5 final review C1 empirically confirmed
+-- the original "lazy creation" plan did not work — the trigger errored
+-- "no such table" on first chunk DELETE because the table didn't exist
+-- yet). Plan 5 final review C1 fix: the dim now matches the daemon
+-- default config (crates/daemon/src/config.rs:175 → dim = 1536 for
+-- text-embedding-3-small). Users overriding config.embedding.dim must
+-- DROP vec_chunk_embeddings + run ChunkService::ensure_vec_chunk_embeddings
+-- with their dim before writing embeddings.
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunk_embeddings USING vec0(
     chunk_id TEXT PRIMARY KEY,
-    embedding FLOAT[2048] distance_metric=cosine
+    embedding FLOAT[1536] distance_metric=cosine
 );
 
 -- blocks_au: fts_blocks is a self-stored FTS5 table (no external content),

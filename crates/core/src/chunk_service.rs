@@ -75,13 +75,11 @@ impl ChunkService {
 
     /// Ensure `vec_chunk_embeddings` virtual table exists. Idempotent.
     ///
-    /// Plan 5 Task 1: the V9 migration now creates this table with dim=2048
-    /// (daemon default) so the `chunks_ad` DELETE trigger can reference it
-    /// unconditionally. This call is a true no-op when the table already
-    /// exists — the `dim` parameter is honored only on the very first call
-    /// against a fresh DB that somehow lacks the V9 schema (e.g. legacy
-    /// databases that ran V8 but not V9 yet, which shouldn't happen since
-    /// migrations always run to head).
+    /// V9 creates this table with the daemon default dim (1536) so the
+    /// `chunks_ad` DELETE trigger can resolve it at fire time. This call is
+    /// a true no-op when the V9 table exists with a matching dim. If a
+    /// non-default dim is required, the caller must DROP the V9-created
+    /// table first, then call this with the desired dim.
     pub fn ensure_vec_chunk_embeddings(&self, dim: usize) -> Result<(), CoreError> {
         let conn = self.conn.lock().unwrap();
         let already_exists: i64 = conn
@@ -264,11 +262,12 @@ mod tests {
         (entry.id, block_list.items[0].id, conn)
     }
 
-    /// Build a 2048-dim embedding from a short prefix (rest zero-padded).
-    /// V9 migration creates `vec_chunk_embeddings` with dim=2048 (daemon
-    /// default); tests must match.
-    fn vec_2048(prefix: &[f32]) -> Vec<f32> {
-        let mut v = vec![0.0f32; 2048];
+    /// Build a 1536-dim embedding from a short prefix (rest zero-padded).
+    /// V9 migration creates `vec_chunk_embeddings` with dim=1536 (daemon
+    /// default); tests override to dim=1536 via ensure_vec_chunk_embeddings
+    /// before writing, so 1536 is the effective test dim.
+    fn vec_1536(prefix: &[f32]) -> Vec<f32> {
+        let mut v = vec![0.0f32; 1536];
         for (i, x) in prefix.iter().enumerate() {
             v[i] = *x;
         }
@@ -440,8 +439,9 @@ mod tests {
     fn ensure_vec_chunk_embeddings_is_idempotent() {
         crate::storage::init_sqlite_extensions();
         let chunks = ChunkService::for_test().unwrap();
-        // V9 migration creates vec_chunk_embeddings with dim=2048; the call
-        // is a no-op when the table exists, so any `dim` arg works.
+        // V9 migration creates vec_chunk_embeddings with dim=1536 (daemon
+        // default). The call is a no-op (IF NOT EXISTS) when the table
+        // exists, so any `dim` arg works without error.
         chunks.ensure_vec_chunk_embeddings(8).unwrap();
         chunks.ensure_vec_chunk_embeddings(8).unwrap();
     }
@@ -451,10 +451,10 @@ mod tests {
         crate::storage::init_sqlite_extensions();
         let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn.clone()).unwrap();
-        chunks.ensure_vec_chunk_embeddings(2048).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
         let chunk_id = chunks.list(block_id).unwrap().items[0].id;
 
-        let emb = vec_2048(&[1.0]);
+        let emb = vec_1536(&[1.0]);
         chunks.write_embedding(chunk_id, &emb).unwrap();
 
         let c = conn.lock().unwrap();
@@ -473,9 +473,9 @@ mod tests {
         crate::storage::init_sqlite_extensions();
         let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn.clone()).unwrap();
-        chunks.ensure_vec_chunk_embeddings(2048).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
         let chunk_id = chunks.list(block_id).unwrap().items[0].id;
-        let emb = vec_2048(&[1.0]);
+        let emb = vec_1536(&[1.0]);
         chunks.write_embedding(chunk_id, &emb).unwrap();
 
         chunks.delete_embedding(chunk_id).unwrap();
@@ -496,7 +496,7 @@ mod tests {
         crate::storage::init_sqlite_extensions();
         let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn.clone()).unwrap();
-        chunks.ensure_vec_chunk_embeddings(2048).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
 
         // Insert two chunks under the same block with known embeddings.
         {
@@ -510,14 +510,14 @@ mod tests {
         let near = insert_chunk_sql(&conn, block_id, 0, "near", json!({}));
         let far = insert_chunk_sql(&conn, block_id, 1, "far", json!({}));
         // near aligned with +X axis, far aligned with +Z axis.
-        chunks.write_embedding(near, &vec_2048(&[1.0])).unwrap();
+        chunks.write_embedding(near, &vec_1536(&[1.0])).unwrap();
         chunks
-            .write_embedding(far, &vec_2048(&[0.0, 0.0, 1.0]))
+            .write_embedding(far, &vec_1536(&[0.0, 0.0, 1.0]))
             .unwrap();
 
         // Query slightly off +X: near should rank above far.
         let hits = chunks
-            .semantic_search(&vec_2048(&[0.9, 0.1, 0.0]), 10, None)
+            .semantic_search(&vec_1536(&[0.9, 0.1, 0.0]), 10, None)
             .unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].chunk.id, near, "near should rank first");
@@ -539,7 +539,7 @@ mod tests {
         crate::storage::init_sqlite_extensions();
         let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn.clone()).unwrap();
-        chunks.ensure_vec_chunk_embeddings(2048).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
 
         // Wipe auto-derived chunk; insert two manual chunks for A and B.
         {
@@ -553,9 +553,9 @@ mod tests {
         let chunk_a = insert_chunk_sql(&conn, block_id, 0, "a", json!({}));
         let chunk_b = insert_chunk_sql(&conn, block_id, 1, "b", json!({}));
 
-        let mut a = vec![0.0f32; 2048];
+        let mut a = vec![0.0f32; 1536];
         a[0] = 1.0;
-        let mut b = vec![0.0f32; 2048];
+        let mut b = vec![0.0f32; 1536];
         b[0] = 2.0;
         chunks.write_embedding(chunk_a, &a).unwrap();
         chunks.write_embedding(chunk_b, &b).unwrap();
@@ -612,16 +612,16 @@ mod tests {
         let note_block = blocks.list(b.id).unwrap().items[0].id;
 
         let chunks = ChunkService::new(conn.clone()).unwrap();
-        chunks.ensure_vec_chunk_embeddings(2048).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
         let claim_chunk = chunks.list(claim_block).unwrap().items[0].id;
         let note_chunk = chunks.list(note_block).unwrap().items[0].id;
-        let emb = vec_2048(&[1.0]);
+        let emb = vec_1536(&[1.0]);
         chunks.write_embedding(claim_chunk, &emb).unwrap();
         chunks.write_embedding(note_chunk, &emb).unwrap();
 
         // Filter by block_type="claim": only the claim chunk matches.
         let hits = chunks
-            .semantic_search(&vec_2048(&[0.9, 0.1]), 10, Some("claim"))
+            .semantic_search(&vec_1536(&[0.9, 0.1]), 10, Some("claim"))
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.id, claim_chunk);
@@ -632,11 +632,11 @@ mod tests {
         crate::storage::init_sqlite_extensions();
         let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn).unwrap();
-        chunks.ensure_vec_chunk_embeddings(2048).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
         // Auto-derived chunk exists but no embedding written.
         assert_eq!(chunks.list(block_id).unwrap().total, 1);
 
-        let hits = chunks.semantic_search(&vec_2048(&[1.0]), 10, None).unwrap();
+        let hits = chunks.semantic_search(&vec_1536(&[1.0]), 10, None).unwrap();
         assert!(hits.is_empty());
     }
 
@@ -645,7 +645,7 @@ mod tests {
         crate::storage::init_sqlite_extensions();
         let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn.clone()).unwrap();
-        chunks.ensure_vec_chunk_embeddings(2048).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
         // Wipe auto-derived; insert 5 chunks with embeddings.
         {
             let c = conn.lock().unwrap();
@@ -655,13 +655,13 @@ mod tests {
             )
             .unwrap();
         }
-        let emb = vec_2048(&[1.0]);
+        let emb = vec_1536(&[1.0]);
         for i in 0..5 {
             let cid = insert_chunk_sql(&conn, block_id, i, &format!("c{i}"), json!({}));
             chunks.write_embedding(cid, &emb).unwrap();
         }
 
-        let hits = chunks.semantic_search(&vec_2048(&[1.0]), 3, None).unwrap();
+        let hits = chunks.semantic_search(&vec_1536(&[1.0]), 3, None).unwrap();
         assert_eq!(hits.len(), 3);
     }
 }
