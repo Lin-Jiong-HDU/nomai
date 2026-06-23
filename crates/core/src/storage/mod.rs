@@ -70,4 +70,69 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1, "V5 migration should create emb_cache table");
     }
+
+    #[test]
+    fn v6_migration_creates_blocks_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='blocks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "V6 migration should create blocks table");
+    }
+
+    #[test]
+    fn v6_migration_adds_fs_path_columns_to_entries() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        // PRAGMA table_info lists columns; check fs_path and fs_mtime present.
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(entries)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(cols.contains(&"fs_path".to_string()), "entries should have fs_path");
+        assert!(cols.contains(&"fs_mtime".to_string()), "entries should have fs_mtime");
+    }
+
+    #[test]
+    fn v6_migration_adds_block_id_to_chunks() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(chunks)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(cols.contains(&"block_id".to_string()), "chunks should have block_id");
+    }
+
+    #[test]
+    fn v6_migration_preserves_existing_data() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        // Insert via old schema (no fs_path/block_id) — should succeed.
+        conn.execute(
+            "INSERT INTO entries (id, title, body, tags, attrs, created_at, updated_at)
+             VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAV', 't', 'b', '[]', '{}', '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries WHERE id = '01ARZ3NDEKTSV4RRFFQ69G5FAV'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
 }
