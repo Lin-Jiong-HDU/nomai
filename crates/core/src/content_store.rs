@@ -42,6 +42,19 @@ impl ContentStore {
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// Render `doc` and atomically write to `<root>/entries/<id>/entry.nomai`.
+    /// Creates parent directories. Overwrites existing file.
+    /// Does NOT touch the SQLite index — that's the service layer's job.
+    pub fn write_entry(
+        &self,
+        entry_id: Ulid,
+        doc: &crate::nomai_format::NomaiDoc,
+    ) -> Result<(), CoreError> {
+        let path = self.entry_file(entry_id);
+        let content = crate::nomai_format::render(doc);
+        atomic_write(&path, &content)
+    }
 }
 
 /// Atomically write `content` to `path`. Writes to `<path>.tmp`, fsyncs, then
@@ -49,7 +62,6 @@ impl ContentStore {
 /// partial file.
 ///
 /// Parent directories are created if missing (equivalent to `mkdir -p`).
-#[allow(dead_code)] // used by write_entry in Task 5
 pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), CoreError> {
     use std::fs::{self, File};
     use std::io::Write;
@@ -112,4 +124,45 @@ mod tests {
         let tmp_path = path.with_extension("nomai.tmp");
         assert!(!tmp_path.exists(), "tmp file should be renamed away");
     }
+
+    use crate::nomai_format::{Block, BlockType, NomaiDoc};
+    use serde_json::Map as JsonMap;
+
+    fn sample_doc() -> NomaiDoc {
+        NomaiDoc {
+            format_version: 1,
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            title: "Test".into(),
+            tags: vec![],
+            attrs: JsonMap::new(),
+            source: None,
+            created_at: "2026-06-23T10:00:00Z".parse().unwrap(),
+            updated_at: "2026-06-23T10:00:00Z".parse().unwrap(),
+            blocks: vec![Block {
+                r#type: BlockType::Note,
+                text: "Hello.\n".into(),
+                attrs: JsonMap::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn write_entry_creates_nomai_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let doc = sample_doc();
+
+        store.write_entry(id, &doc).unwrap();
+
+        let file = store.entry_file(id);
+        assert!(file.exists(), "entry.nomai should exist");
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(content.contains("#format_version 1"));
+        assert!(content.contains("#title Test"));
+        assert!(content.contains("@note"));
+        assert!(content.contains("Hello."));
+    }
+
+    // TODO Task 6: write_entry_round_trips_through_read (uncomment after read_entry lands)
 }
