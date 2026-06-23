@@ -303,7 +303,7 @@ impl LinkService {
 
         let sql = format!(
             "SELECT l.id, l.source_id, l.target_id, l.relation, l.attrs, l.created_at,
-                    e.id, e.title, e.body, e.tags, e.attrs, e.source, e.created_at, e.updated_at
+                    e.id, e.title, e.tags, e.attrs, e.source, e.created_at, e.updated_at
              FROM links l
              JOIN entries e ON e.id = CASE WHEN l.source_id = ?1 THEN l.target_id ELSE l.source_id END
              WHERE {direction_filter}{relation_filter}

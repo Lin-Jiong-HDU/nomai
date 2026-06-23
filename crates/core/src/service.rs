@@ -229,20 +229,18 @@ impl EntryService {
         };
         self.content_store.write_entry(id, &doc)?;
 
-        // Pre-compute derived body for FTS5 + entries.body (still NOT NULL in
-        // V6 schema; V7 drops the column). The derived body is the canonical
-        // source of truth — entries.body is a transitional duplicate.
+        // Pre-compute derived body for FTS5. entries.body was dropped in V7;
+        // the canonical "body" is derived from blocks at write time.
         let body = derived_body_from_inputs(&params.blocks);
 
-        // 2. INSERT entry row.
+        // 2. INSERT entry row (body column dropped in V7).
         conn.execute(
             "INSERT INTO entries
-               (id, title, body, tags, attrs, source, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+               (id, title, tags, attrs, source, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 id.to_string(),
                 &params.title,
-                &body,
                 serde_json::to_string(&params.tags.unwrap_or_default()).expect("tags serialize"),
                 attrs.to_string(),
                 &params.source,
@@ -306,7 +304,7 @@ impl EntryService {
         let mut entry = {
             let conn = self.conn.lock().unwrap();
             match conn.query_row(
-                "SELECT id, title, body, tags, attrs, source, created_at, updated_at
+                "SELECT id, title, tags, attrs, source, created_at, updated_at
                  FROM entries WHERE id = ?1",
                 params![id.to_string()],
                 |row| row_to_entry(row, 0),
@@ -352,7 +350,7 @@ impl EntryService {
     ) -> Result<Entry, CoreError> {
         // Inline SELECT existing (same as row_to_entry at offset 0).
         let mut existing = match conn.query_row(
-            "SELECT id, title, body, tags, attrs, source, created_at, updated_at
+            "SELECT id, title, tags, attrs, source, created_at, updated_at
              FROM entries WHERE id = ?1",
             params![id.to_string()],
             |row| row_to_entry(row, 0),
@@ -396,8 +394,8 @@ impl EntryService {
         let updated_at = Utc::now();
 
         // Derived body is computed from blocks (which didn't change in this
-        // update path). Keep entries.body column in sync for V6 schema; V7
-        // drops the column entirely.
+        // update path). entries.body was dropped in V7; the derived body is
+        // used only to keep the FTS5 index in sync.
         let body = derived_body_from_blocks(&existing.blocks);
 
         let updated_entry = Entry {
@@ -412,11 +410,10 @@ impl EntryService {
         };
 
         conn.execute(
-            "UPDATE entries SET title=?1, body=?2, tags=?3, attrs=?4, source=?5, updated_at=?6
-             WHERE id=?7",
+            "UPDATE entries SET title=?1, tags=?2, attrs=?3, source=?4, updated_at=?5
+             WHERE id=?6",
             params![
                 &new_title,
-                &body,
                 serde_json::to_string(&new_tags).expect("tags serialize"),
                 new_attrs.to_string(),
                 &new_source,
@@ -481,7 +478,7 @@ impl EntryService {
     pub fn delete_in_tx(&self, conn: &Connection, id: Ulid) -> Result<(), CoreError> {
         // SELECT before-snapshot (blocks populated for event payload).
         let mut before_entry = match conn.query_row(
-            "SELECT id, title, body, tags, attrs, source, created_at, updated_at
+            "SELECT id, title, tags, attrs, source, created_at, updated_at
              FROM entries WHERE id = ?1",
             params![id.to_string()],
             |row| row_to_entry(row, 0),
@@ -545,7 +542,7 @@ impl EntryService {
 
         let items: Vec<Entry> = if let Some(tag) = &query.tag {
             let sql = format!(
-                "SELECT e.id, e.title, e.body, e.tags, e.attrs, e.source, e.created_at, e.updated_at
+                "SELECT e.id, e.title, e.tags, e.attrs, e.source, e.created_at, e.updated_at
                  FROM entries e, json_each(e.tags) AS t
                  WHERE t.value = ?1
                  ORDER BY e.{order_clause}
@@ -558,7 +555,7 @@ impl EntryService {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             let sql = format!(
-                "SELECT id, title, body, tags, attrs, source, created_at, updated_at
+                "SELECT id, title, tags, attrs, source, created_at, updated_at
                  FROM entries
                  ORDER BY {order_clause}
                  LIMIT ?1 OFFSET ?2"
@@ -592,7 +589,7 @@ impl EntryService {
     ) -> Result<Vec<FulltextSearchResult>, CoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT e.id, e.title, e.body, e.tags, e.attrs, e.source, e.created_at, e.updated_at,
+            "SELECT e.id, e.title, e.tags, e.attrs, e.source, e.created_at, e.updated_at,
                     bm25(fts_entries) AS rank
              FROM fts_entries
              JOIN entries e ON e.id = fts_entries.entry_id
@@ -603,7 +600,7 @@ impl EntryService {
         let rows = stmt.query_map(params![query, limit], |row| {
             let entry = row_to_entry(row, 0)?;
             // bm25 returns negative scores (closer to 0 = better match).
-            let rank: f64 = row.get(8)?;
+            let rank: f64 = row.get(7)?;
             Ok(FulltextSearchResult {
                 entry,
                 score: rank.abs() as f32,
@@ -764,27 +761,23 @@ impl EntryService {
 pub(crate) fn row_to_entry(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Entry> {
     let id_str: String = row.get(offset)?;
     let title: String = row.get(offset + 1)?;
-    // entries.body still exists in V6 schema (NOT NULL) but is unused. We read
-    // it here to advance the column cursor, then discard. V7 drops the column
-    // and this read goes away.
-    let _body: String = row.get(offset + 2)?;
-    let tags_json: String = row.get(offset + 3)?;
-    let attrs_json: String = row.get(offset + 4)?;
-    let source: Option<String> = row.get(offset + 5)?;
-    let created_at_str: String = row.get(offset + 6)?;
-    let updated_at_str: String = row.get(offset + 7)?;
+    let tags_json: String = row.get(offset + 2)?;
+    let attrs_json: String = row.get(offset + 3)?;
+    let source: Option<String> = row.get(offset + 4)?;
+    let created_at_str: String = row.get(offset + 5)?;
+    let updated_at_str: String = row.get(offset + 6)?;
 
     let id = from_text(offset, &id_str, Ulid::from_string)?;
-    let tags: Vec<String> = from_text(offset + 3, &tags_json, |s| serde_json::from_str(s))?;
-    let attrs: Value = from_text(offset + 4, &attrs_json, |s| serde_json::from_str(s))?;
+    let tags: Vec<String> = from_text(offset + 2, &tags_json, |s| serde_json::from_str(s))?;
+    let attrs: Value = from_text(offset + 3, &attrs_json, |s| serde_json::from_str(s))?;
     let created_at = from_text(
-        offset + 6,
+        offset + 5,
         &created_at_str,
         chrono::DateTime::parse_from_rfc3339,
     )?
     .with_timezone(&Utc);
     let updated_at = from_text(
-        offset + 7,
+        offset + 6,
         &updated_at_str,
         chrono::DateTime::parse_from_rfc3339,
     )?

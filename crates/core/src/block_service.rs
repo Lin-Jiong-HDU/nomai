@@ -279,12 +279,11 @@ mod tests {
         let now = chrono::Utc::now();
         let conn = conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO entries (id, title, body, tags, attrs, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO entries (id, title, tags, attrs, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 id.to_string(),
                 "seed",
-                "",
                 "[]",
                 "{}",
                 now.to_rfc3339(),
