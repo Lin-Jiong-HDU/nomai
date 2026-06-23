@@ -48,7 +48,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"entry.list","params":{}}' \
 Multiple requests can be piped at once — daemon processes them sequentially and writes one response line per request.
 
 ```fish
-echo '{"jsonrpc":"2.0","id":1,"method":"entry.create","params":{"title":"a","body":"x"}}
+echo '{"jsonrpc":"2.0","id":1,"method":"entry.create","params":{"title":"a","blocks":[{"type":"note","text":"x"}]}}
 {"jsonrpc":"2.0","id":2,"method":"entry.list","params":{}}' \
   | ./target/release/nomai-daemon
 ```
@@ -71,7 +71,9 @@ The atomic unit of knowledge. A markdown note with structured metadata.
 {
   "id": "01KVM7KFNT82JWCEM31FESCEXP", // ULID, time-sortable
   "title": "Rust 入门",
-  "body": "Rust 是一门系统编程语言...", // markdown
+  "blocks": [
+    { "type": "note", "text": "Rust 是一门系统编程语言..." } // markdown
+  ],
   "tags": ["rust", "programming"],
   "attrs": { "difficulty": "beginner" }, // free-form JSON object
   "source": null,
@@ -81,12 +83,12 @@ The atomic unit of knowledge. A markdown note with structured metadata.
 ```
 
 - `id` is a ULID (26 chars, time-ordered, URL-safe).
-- `body` is markdown text. Core does not parse markdown — full text is FTS-indexed and embedded as a single vector.
+- `blocks` is an ordered list of typed blocks. Block text is markdown; core does not parse markdown — each block's text is FTS-indexed (`fts_blocks`) and chunked for vector retrieval.
 - `tags` is a JSON array of strings, queryable via `entry.list`.
 - `attrs` is a free-form JSON object. Core validates it's an object but does not enforce schema. (Filtering by attrs is not yet implemented.)
 - `source` is an optional provenance string (URL, filename, etc.).
 
-**Creating an entry auto-embeds the body**: daemon calls the embedding provider and writes the vector to `vec_embeddings`. The entry is then retrievable via `search.semantic` (entry-level granularity).
+**Creating an entry auto-embeds the blocks**: daemon chunks each block's text, calls the embedding provider, and writes the per-chunk vectors to `vec_chunk_embeddings`. The entry is then retrievable via `search.semantic` (chunk-level granularity, with entry-level rollup).
 
 ### Block
 
@@ -294,7 +296,7 @@ Each `BatchOp` has `{id?: string, method: string, params: object}`. The `id` fie
     {
       "id": "e1",
       "method": "entry.create",
-      "params": { "title": "doc", "body": "..." }
+      "params": { "title": "doc", "blocks": [{ "type": "note", "text": "..." }] }
     },
     {
       "method": "chunk.create",
@@ -458,7 +460,7 @@ Every embedding API call is cached transparently in the `emb_cache` SQLite table
 
 **Where it applies** — every `embed()` call in the daemon:
 
-- `entry.create` / `entry.update` with non-empty body
+- `entry.create` / `entry.update` with non-empty block text
 - `chunk.create` with text
 - `search.semantic` (the query is embedded before KNN)
 - `batch` (commit-time batch embed of all queued texts)
