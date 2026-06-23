@@ -61,6 +61,14 @@ pub mod block {
     pub const DELETE: &str = "block.delete";
 }
 
+pub mod index {
+    /// Plan 5: reconcile the SQLite index against the filesystem. Adds
+    /// new entries discovered on disk, re-indexes those whose `.nomai`
+    /// mtime changed, and removes index rows whose `.nomai` is gone.
+    /// Returns `{ added, updated, removed, unchanged }` counts.
+    pub const SYNC: &str = "index.sync";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +124,10 @@ mod tests {
         assert_eq!(block::APPEND, "block.append");
         assert_eq!(block::UPDATE, "block.update");
         assert_eq!(block::DELETE, "block.delete");
+    }
+
+    #[test]
+    fn index_namespace_methods() {
+        assert_eq!(index::SYNC, "index.sync");
     }
 }

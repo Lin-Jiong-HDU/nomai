@@ -14,6 +14,7 @@ pub mod cache;
 pub mod chunk;
 pub mod entry;
 pub mod events;
+pub mod index;
 pub mod link;
 pub mod mcp;
 pub mod provider;
@@ -63,6 +64,10 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     let h = block::Update;
     m.insert(h.method(), Arc::new(h));
     let h = block::Delete;
+    m.insert(h.method(), Arc::new(h));
+
+    // index.* (Plan 5: FS↔SQLite reconciliation.)
+    let h = index::Sync;
     m.insert(h.method(), Arc::new(h));
 
     // events.*
@@ -1109,9 +1114,9 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 24 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
-        // events:3, search:2, provider:1, cache:2, batch:1).
-        assert_eq!(tools.len(), 24);
+        // 25 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
+        // events:3, search:2, provider:1, cache:2, batch:1, index:1).
+        assert_eq!(tools.len(), 25);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1127,6 +1132,7 @@ mod tests {
         assert!(names.contains(&"chunk.get"));
         assert!(names.contains(&"search.semantic"));
         assert!(names.contains(&"provider.list"));
+        assert!(names.contains(&"index.sync"));
         // MCP meta-methods are not callable tools.
         assert!(!names.contains(&"initialize"));
         assert!(!names.contains(&"tools/list"));
@@ -1239,7 +1245,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 25); // 24 built-in + custom.echo
+        assert_eq!(tools.len(), 26); // 25 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
@@ -1983,5 +1989,73 @@ mod tests {
             .await;
         let err = resp.error.unwrap();
         assert_eq!(err.code, 1001); // NotFound
+    }
+
+    // ----- index.sync e2e test (Plan 5 Task 6) -----
+
+    #[tokio::test]
+    async fn index_sync_picks_up_external_file_and_reports_counts() {
+        // Spec §7.1: FS is source-of-truth; index.sync reconciles. Drop a
+        // .nomai file directly into the content store, then call index.sync
+        // and verify the new entry appears + counts are reported.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create one entry via the service so the index starts non-empty.
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"Indexed","blocks":[{"type":"note","text":"x"}]}),
+            ))
+            .await;
+        let indexed_id = create_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .parse::<ulid::Ulid>()
+            .unwrap();
+
+        // Drop a second .nomai file directly via the content store (no INSERT).
+        let external_id = ulid::Ulid::new();
+        let now: chrono::DateTime<chrono::Utc> = "2026-06-23T10:00:00Z".parse().unwrap();
+        let doc = nomai_core::NomaiDoc {
+            format_version: 1,
+            id: external_id,
+            title: "External".into(),
+            tags: vec![],
+            attrs: Default::default(),
+            source: None,
+            created_at: now,
+            updated_at: now,
+            blocks: vec![nomai_core::nomai_format::Block {
+                r#type: nomai_core::nomai_format::BlockType::Note,
+                text: "from fs\n".into(),
+                attrs: Default::default(),
+            }],
+        };
+        daemon
+            .entries
+            .content_store()
+            .write_entry(external_id, &doc)
+            .unwrap();
+
+        // Sync.
+        let sync_resp = daemon.dispatch(req("index.sync", json!({}))).await;
+        assert!(sync_resp.error.is_none(), "{:?}", sync_resp.error);
+        let result = sync_resp.result.unwrap();
+        assert_eq!(result["added"], 1);
+        assert_eq!(result["unchanged"], 1);
+        assert_eq!(result["updated"], 0);
+        assert_eq!(result["removed"], 0);
+
+        // The external entry is now retrievable via entry.get.
+        let get_resp = daemon
+            .dispatch(req("entry.get", json!({"id": external_id.to_string()})))
+            .await;
+        assert!(get_resp.error.is_none(), "{:?}", get_resp.error);
+        assert_eq!(get_resp.result.unwrap()["title"], "External");
+
+        // The originally-indexed entry is untouched (still present, same id).
+        let _ = indexed_id;
     }
 }

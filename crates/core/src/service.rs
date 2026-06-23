@@ -2,13 +2,28 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use rusqlite::{Connection, params};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ulid::Ulid;
 
 use crate::error::CoreError;
 use crate::model::Entry;
 use crate::storage;
+
+/// Result of `EntryService::sync_from_fs`: per-bucket counts of what the
+/// sync pass touched. Plan 5 §7.1: FS is source-of-truth; this diff
+/// reconciles the SQLite index against the FS state.
+#[derive(Debug, Default, Serialize)]
+pub struct SyncResult {
+    /// FS entries that were newly added to the index.
+    pub added: u64,
+    /// FS entries whose mtime changed since indexing (re-indexed).
+    pub updated: u64,
+    /// Index entries whose `.nomai` file is gone (removed).
+    pub removed: u64,
+    /// FS entries whose mtime matches the index (no-op).
+    pub unchanged: u64,
+}
 
 pub struct EntryService {
     conn: Arc<Mutex<Connection>>,
@@ -198,17 +213,27 @@ impl EntryService {
 
         // 2. INSERT entry row (body column dropped in V7; fts_blocks is
         //    populated by the `blocks_ai` trigger when blocks are inserted
-        //    in the next step, so no direct FTS write here).
+        //    in the next step, so no direct FTS write here). Record the
+        //    FS path + mtime so `sync_from_fs` can detect later mutations
+        //    (Spec §7.1: FS is source-of-truth, index tracks last-seen mtime).
+        let fs_path = format!("entries/{id}/entry.nomai");
+        let fs_mtime = self
+            .content_store
+            .entry_mtime(id)
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
         conn.execute(
             "INSERT INTO entries
-               (id, title, tags, attrs, source, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+               (id, title, tags, attrs, source, fs_path, fs_mtime, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id.to_string(),
                 &params.title,
                 serde_json::to_string(&params.tags.unwrap_or_default()).expect("tags serialize"),
                 attrs.to_string(),
                 &params.source,
+                &fs_path,
+                &fs_mtime,
                 now.to_rfc3339(),
                 now.to_rfc3339(),
             ],
@@ -466,6 +491,198 @@ impl EntryService {
         )?;
 
         Ok(())
+    }
+
+    /// Reindex a single entry from its `.nomai` file. Spec §7.1 reconciliation
+    /// primitive: parse the FS document → DELETE the existing index row
+    /// (CASCADE removes blocks → chunks → fts_blocks; the V9 `chunks_ad`
+    /// trigger cleans `vec_chunk_embeddings`) → INSERT a fresh entry + its
+    /// blocks. Does NOT re-embed; the background chunk embedder (or a later
+    /// sync) picks up changed chunks. Used by `sync_from_fs` (Plan 5 Task 6)
+    /// and `rebuild_index` (Plan 5 Task 7).
+    ///
+    /// Lock discipline: takes `self.conn` for the whole tx. Callers that
+    /// hold the lock must release it before invoking this.
+    pub fn reindex_one(&self, entry_id: Ulid) -> Result<(), CoreError> {
+        let doc = self.content_store.read_entry(entry_id)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> Result<(), CoreError> {
+            // DELETE existing entry. CASCADE removes blocks → chunks; the
+            // chunks_ad trigger removes vec_chunk_embeddings; blocks_ad
+            // removes fts_blocks. No manual cleanup needed.
+            conn.execute(
+                "DELETE FROM entries WHERE id = ?1",
+                params![entry_id.to_string()],
+            )?;
+
+            // INSERT fresh entry row with current FS path + mtime so the
+            // next `sync_from_fs` pass can detect further mutations.
+            let fs_path = format!("entries/{entry_id}/entry.nomai");
+            let fs_mtime = self
+                .content_store
+                .entry_mtime(entry_id)
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_default();
+            let attrs_value = serde_json::Value::Object(doc.attrs.clone());
+            conn.execute(
+                "INSERT INTO entries
+                   (id, title, tags, attrs, source, fs_path, fs_mtime, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    entry_id.to_string(),
+                    &doc.title,
+                    serde_json::to_string(&doc.tags).expect("tags serialize"),
+                    attrs_value.to_string(),
+                    doc.source.as_ref(),
+                    &fs_path,
+                    &fs_mtime,
+                    doc.created_at.to_rfc3339(),
+                    doc.updated_at.to_rfc3339(),
+                ],
+            )?;
+
+            // Re-create each block. BlockService::create_in_tx auto-derives
+            // chunks and emits block.created events. The `blocks_ai` trigger
+            // populates fts_blocks; the chunks_ad trigger is in place to
+            // clean embeddings on the next DELETE.
+            for (ordinal, parser_block) in doc.blocks.iter().enumerate() {
+                let create = crate::block_model::CreateBlock {
+                    entry_id,
+                    ordinal: ordinal as u32,
+                    r#type: parser_block.r#type.as_str().to_string(),
+                    text: parser_block.text.trim_end_matches('\n').to_string(),
+                    attrs: Some(serde_json::Value::Object(parser_block.attrs.clone())),
+                };
+                self.block_service.create_in_tx(&conn, create)?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Diff FS against the index and reconcile. Spec §7.1: FS is the source
+    /// of truth. For each FS entry, compare its current `.nomai` mtime against
+    /// the indexed `fs_mtime`:
+    /// - not in index → `reindex_one` (added)
+    /// - mtime same → skip (unchanged)
+    /// - mtime changed → `reindex_one` (updated)
+    ///
+    /// For each indexed entry with no corresponding FS directory → DELETE
+    /// (removed). Returns counts per bucket.
+    ///
+    /// Atomicity: each phase commits independently. A failure mid-pass
+    /// surfaces the error; earlier mutations stay committed (best-effort).
+    pub fn sync_from_fs(&self) -> Result<SyncResult, CoreError> {
+        let fs_ids = self.content_store.scan_entry_ids();
+        let fs_id_set: std::collections::HashSet<Ulid> = fs_ids.iter().copied().collect();
+
+        // Snapshot the index under one short lock, then release so each
+        // per-entry reindex/delete can take its own lock without deadlock.
+        let db_rows: Vec<(Ulid, Option<String>)> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id, fs_mtime FROM entries")?;
+            let rows = stmt.query_map([], |row| {
+                let id_str: String = row.get(0)?;
+                let mtime_str: Option<String> = row.get(1)?;
+                // Index invariant: ids are ULID strings. A parse failure here
+                // indicates index corruption; surface as a storage error
+                // rather than silently skipping.
+                let id = id_str.parse::<Ulid>().map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                Ok((id, mtime_str))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut added = 0u64;
+        let mut updated = 0u64;
+        let mut unchanged = 0u64;
+        let mut removed = 0u64;
+
+        // Phase 1: walk FS, add/update/skip each entry.
+        for fs_id in &fs_ids {
+            let db_row = db_rows.iter().find(|(id, _)| id == fs_id).cloned();
+            let fs_mtime = self.content_store.entry_mtime(*fs_id);
+            match (db_row, fs_mtime) {
+                (None, Some(_)) => {
+                    // FS has entry, index doesn't → add.
+                    self.reindex_one(*fs_id)?;
+                    added += 1;
+                }
+                (Some((_, Some(db_mtime_str))), Some(fs_mtime)) => {
+                    let db_mtime = chrono::DateTime::parse_from_rfc3339(&db_mtime_str)
+                        .ok()
+                        .map(|t| t.with_timezone(&Utc));
+                    if db_mtime == Some(fs_mtime) {
+                        unchanged += 1;
+                    } else {
+                        self.reindex_one(*fs_id)?;
+                        updated += 1;
+                    }
+                }
+                (Some(_), None) => {
+                    // Indexed but the .nomai file is unreadable / gone even
+                    // though its directory remains. Treat as orphan: remove
+                    // the index row. (A later sync will surface the directory
+                    // as a fresh add if the file is restored.)
+                    let conn = self.conn.lock().unwrap();
+                    conn.execute(
+                        "DELETE FROM entries WHERE id = ?1",
+                        params![fs_id.to_string()],
+                    )?;
+                    removed += 1;
+                }
+                (Some((_, None)), Some(_)) => {
+                    // Index row exists but fs_mtime was never populated (legacy
+                    // row from before Plan 5, or a hand-written INSERT). Backfill
+                    // via reindex so future passes can diff correctly. Counts
+                    // as updated because the index changed.
+                    self.reindex_one(*fs_id)?;
+                    updated += 1;
+                }
+                (None, None) => {
+                    // FS directory exists but entry.nomai is missing and the
+                    // index has no record. Nothing to index; skip silently.
+                    unchanged += 1;
+                }
+            }
+        }
+
+        // Phase 2: sweep index for entries whose FS directory is gone. We
+        // re-check `entry_mtime` here (rather than trusting `fs_id_set`) so
+        // a file deleted mid-pass between scan and now is still detected.
+        for (db_id, _) in &db_rows {
+            if !fs_id_set.contains(db_id) {
+                let conn = self.conn.lock().unwrap();
+                conn.execute(
+                    "DELETE FROM entries WHERE id = ?1",
+                    params![db_id.to_string()],
+                )?;
+                removed += 1;
+            }
+        }
+
+        Ok(SyncResult {
+            added,
+            updated,
+            removed,
+            unchanged,
+        })
     }
 
     pub fn list(&self, query: EntryListQuery) -> Result<EntryListResult, CoreError> {
@@ -1428,5 +1645,118 @@ mod tests {
         assert!(svc.content_store.read_entry(entry.id).is_ok());
         svc.delete(entry.id).unwrap();
         assert!(svc.content_store.read_entry(entry.id).is_err());
+    }
+
+    // ----- sync_from_fs tests (Plan 5 Task 6) -----
+
+    #[test]
+    fn sync_from_fs_picks_up_newly_dropped_file() {
+        let svc = EntryService::for_test().unwrap();
+        // Create an entry via the service (writes .nomai + indexes).
+        let _ = svc
+            .create(CreateEntry {
+                title: "T".into(),
+                blocks: vec![note_block("x")],
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+
+        // Drop a new .nomai file directly into the entries dir, bypassing
+        // the service so the SQLite index does not see it.
+        let new_id = Ulid::new();
+        let doc = crate::nomai_format::NomaiDoc {
+            format_version: 1,
+            id: new_id,
+            title: "External".into(),
+            tags: vec![],
+            attrs: Default::default(),
+            source: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            blocks: vec![crate::nomai_format::Block {
+                r#type: crate::nomai_format::BlockType::Note,
+                text: "from fs\n".into(),
+                attrs: Default::default(),
+            }],
+        };
+        svc.content_store.write_entry(new_id, &doc).unwrap();
+
+        // Verify the orphan is not in the index yet.
+        assert!(svc.get(new_id).is_err());
+
+        let result = svc.sync_from_fs().unwrap();
+        assert_eq!(result.added, 1);
+        // The pre-existing entry is unchanged (mtime matches).
+        assert_eq!(result.unchanged, 1);
+
+        // Now in the index, parsed from the .nomai file we wrote.
+        let fetched = svc.get(new_id).unwrap();
+        assert_eq!(fetched.title, "External");
+        assert_eq!(fetched.blocks.len(), 1);
+        assert_eq!(fetched.blocks[0].text, "from fs");
+    }
+
+    #[test]
+    fn sync_from_fs_removes_orphan_index_rows() {
+        let svc = EntryService::for_test().unwrap();
+        let entry = svc
+            .create(CreateEntry {
+                title: "T".into(),
+                blocks: vec![note_block("x")],
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+
+        // Delete the .nomai file directly (bypassing service.delete).
+        std::fs::remove_file(svc.content_store.entry_file(entry.id)).unwrap();
+
+        let result = svc.sync_from_fs().unwrap();
+        assert_eq!(result.removed, 1);
+
+        assert!(svc.get(entry.id).is_err());
+    }
+
+    #[test]
+    fn sync_from_fs_reindexes_when_mtime_changes() {
+        let svc = EntryService::for_test().unwrap();
+        let entry = svc
+            .create(CreateEntry {
+                title: "Original".into(),
+                blocks: vec![note_block("x")],
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+
+        // Rewrite .nomai with new content + bump mtime.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let doc = crate::nomai_format::NomaiDoc {
+            format_version: 1,
+            id: entry.id,
+            title: "Updated".into(),
+            tags: vec![],
+            attrs: Default::default(),
+            source: None,
+            created_at: entry.created_at,
+            updated_at: Utc::now(),
+            blocks: vec![crate::nomai_format::Block {
+                r#type: crate::nomai_format::BlockType::Note,
+                text: "new\n".into(),
+                attrs: Default::default(),
+            }],
+        };
+        svc.content_store.write_entry(entry.id, &doc).unwrap();
+
+        let result = svc.sync_from_fs().unwrap();
+        assert_eq!(result.updated, 1);
+
+        let fetched = svc.get(entry.id).unwrap();
+        assert_eq!(fetched.title, "Updated");
+        assert_eq!(fetched.blocks[0].text, "new");
     }
 }

@@ -28,3 +28,4 @@ ulid = { version = "1", features = ["serde"] }
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"
+chrono = { version = "0.4", features = ["serde"] }
