@@ -97,8 +97,14 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert!(cols.contains(&"fs_path".to_string()), "entries should have fs_path");
-        assert!(cols.contains(&"fs_mtime".to_string()), "entries should have fs_mtime");
+        assert!(
+            cols.contains(&"fs_path".to_string()),
+            "entries should have fs_path"
+        );
+        assert!(
+            cols.contains(&"fs_mtime".to_string()),
+            "entries should have fs_mtime"
+        );
     }
 
     #[test]
@@ -112,7 +118,10 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert!(cols.contains(&"block_id".to_string()), "chunks should have block_id");
+        assert!(
+            cols.contains(&"block_id".to_string()),
+            "chunks should have block_id"
+        );
     }
 
     #[test]

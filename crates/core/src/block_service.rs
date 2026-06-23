@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use ulid::Ulid;
 
 use crate::block_model::{Block, BlockListResult, CreateBlock};
