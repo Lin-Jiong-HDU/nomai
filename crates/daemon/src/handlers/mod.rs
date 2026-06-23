@@ -19,6 +19,7 @@ pub mod link;
 pub mod mcp;
 pub mod provider;
 pub mod search;
+pub mod system;
 
 /// Build the default method → handler registry for the daemon.
 ///
@@ -66,10 +67,16 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     let h = block::Delete;
     m.insert(h.method(), Arc::new(h));
 
-    // index.* (Plan 5: FS↔SQLite reconciliation.)
+    // index.* (Plan 5: FS↔SQLite reconciliation. Plan 6: read-only verify.)
     let h = index::Sync;
     m.insert(h.method(), Arc::new(h));
     let h = index::Rebuild;
+    m.insert(h.method(), Arc::new(h));
+    let h = index::Verify;
+    m.insert(h.method(), Arc::new(h));
+
+    // system.* (Plan 6: Spec §12 migration utilities.)
+    let h = system::ExportToFs;
     m.insert(h.method(), Arc::new(h));
 
     // events.*
@@ -707,8 +714,9 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         // Create 3 entries → 3 entry.created + 3 block.created = 6 events.
-        // Plan 5 Task 8: daemon startup also emits one `index.synced` event,
-        // bringing the total to 7 before any entry.create call.
+        // Plan 6 Task 5: daemon startup emits `index.synced` only when the
+        // boot scan changes something; setup_daemon's empty FS means no
+        // boot event, so the total is 6 before any entry.create call.
         daemon
             .dispatch(req(
                 "entry.create",
@@ -732,14 +740,14 @@ mod tests {
         let list_resp = daemon.dispatch(req("events.list", json!({}))).await;
         let result = list_resp.result.unwrap();
         let items = result["items"].as_array().unwrap();
-        assert_eq!(items.len(), 7);
-        let last_event_id = items[6]["id"].as_str().unwrap().to_string();
+        assert_eq!(items.len(), 6);
+        let last_event_id = items[5]["id"].as_str().unwrap().to_string();
 
         // Purge events with id < last_event_id (exclusive).
         let purge_resp = daemon
             .dispatch(req("events.purge", json!({"before": last_event_id})))
             .await;
-        assert_eq!(purge_resp.result.unwrap()["deleted"], 6);
+        assert_eq!(purge_resp.result.unwrap()["deleted"], 5);
 
         // Verify only 1 event remains.
         let list_resp2 = daemon.dispatch(req("events.list", json!({}))).await;
@@ -755,8 +763,9 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         // Create 3 entries → 6 entry events total (each entry.create emits
-        // entry.created + block.created). Plan 5 Task 8: daemon startup also
-        // emits one `index.synced` event, so the grand total is 7.
+        // entry.created + block.created). Plan 6 Task 5: daemon startup
+        // emits `index.synced` only when the boot scan changes something;
+        // setup_daemon's empty FS means no boot event, so total = 6.
         for i in 0..3 {
             daemon
                 .dispatch(req(
@@ -775,12 +784,12 @@ mod tests {
         assert_eq!(p1_result["has_more"], true);
         let last_id = p1_result["items"][3]["id"].as_str().unwrap().to_string();
 
-        // Page 2: since = last_id from page 1 → 3 remaining events.
+        // Page 2: since = last_id from page 1 → 2 remaining events.
         let p2 = daemon
             .dispatch(req("events.list", json!({"limit": 4, "since": last_id})))
             .await;
         let p2_result = p2.result.unwrap();
-        assert_eq!(p2_result["items"].as_array().unwrap().len(), 3);
+        assert_eq!(p2_result["items"].as_array().unwrap().len(), 2);
         assert_eq!(p2_result["has_more"], false);
     }
 
@@ -1119,9 +1128,10 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 26 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
-        // events:3, search:2, provider:1, cache:2, batch:1, index:2).
-        assert_eq!(tools.len(), 26);
+        // 28 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
+        // events:3, search:2, provider:1, cache:2, batch:1, index:3,
+        // system:1).
+        assert_eq!(tools.len(), 28);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1139,6 +1149,8 @@ mod tests {
         assert!(names.contains(&"provider.list"));
         assert!(names.contains(&"index.sync"));
         assert!(names.contains(&"index.rebuild"));
+        assert!(names.contains(&"index.verify"));
+        assert!(names.contains(&"system.export_to_fs"));
         // MCP meta-methods are not callable tools.
         assert!(!names.contains(&"initialize"));
         assert!(!names.contains(&"tools/list"));
@@ -1251,7 +1263,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 27); // 26 built-in + custom.echo
+        assert_eq!(tools.len(), 29); // 28 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
@@ -2097,8 +2109,149 @@ mod tests {
         assert_eq!(err.code, 1001); // NotFound
     }
 
-    // ----- index.sync e2e test (Plan 5 Task 6) -----
+    // ----- system.export_to_fs e2e test (Plan 6 Task 3) -----
 
+    #[tokio::test]
+    async fn system_export_to_fs_rpc_generates_missing_nomai() {
+        // Spec §12: walk every entry row and render .nomai for any that lack
+        // one. Entries created via entry.create already have .nomai; orphan
+        // rows (created via direct DB manipulation) do not.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create one entry normally (writes .nomai).
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"Has File","blocks":[{"type":"note","text":"x"}]}),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+        let indexed_id = create_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .parse::<ulid::Ulid>()
+            .unwrap();
+
+        // Manually insert an orphan entry directly in the DB, bypassing the
+        // service so no .nomai file is written. Daemon startup has already
+        // run its sync pass, so this row will not be cleaned up on boot.
+        let orphan_id = ulid::Ulid::new();
+        {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .execute(
+                    "INSERT INTO entries (id, title, tags, attrs, source, fs_path, fs_mtime, created_at, updated_at)
+                     VALUES (?1, 'orphan', '[]', '{}', NULL, NULL, NULL, '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+                    rusqlite::params![orphan_id.to_string()],
+                )
+                .unwrap();
+            let block_id = ulid::Ulid::new().to_string();
+            guard
+                .execute(
+                    "INSERT INTO blocks (id, entry_id, ordinal, type, text, attrs, created_at, updated_at)
+                     VALUES (?1, ?2, 0, 'note', 'orphan content', '{}', '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+                    rusqlite::params![block_id, orphan_id.to_string()],
+                )
+                .unwrap();
+        }
+
+        // Precondition: orphan has no .nomai file; indexed entry does.
+        let cs = daemon.entries.content_store().clone();
+        assert!(!cs.entry_file(orphan_id).exists());
+        assert!(cs.entry_file(indexed_id).exists());
+
+        // Call system.export_to_fs.
+        let resp = daemon.dispatch(req("system.export_to_fs", json!({}))).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["exported"], 1, "orphan should be exported");
+        assert_eq!(result["skipped"], 1, "indexed entry should be skipped");
+        assert!(result["errors"].as_array().unwrap().is_empty());
+
+        // Verify orphan now has a .nomai file on disk and fs_path populated.
+        assert!(cs.entry_file(orphan_id).exists());
+        let fs_path: String = {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .query_row(
+                    "SELECT fs_path FROM entries WHERE id = ?1",
+                    rusqlite::params![orphan_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert!(!fs_path.is_empty());
+
+        // The orphan's .nomai round-trips via the content store.
+        let doc = cs.read_entry(orphan_id).unwrap();
+        assert_eq!(doc.title, "orphan");
+        assert_eq!(doc.blocks[0].text, "orphan content\n");
+    }
+
+    // ----- index.verify e2e test (Plan 6 Task 4) -----
+
+    #[tokio::test]
+    async fn index_verify_reports_drift_without_mutating() {
+        // Read-only drift report. Drop an orphan .nomai file and verify
+        // index.verify reports fs_only=1 without indexing it.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create one entry via the service so the index starts non-empty.
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"Indexed","blocks":[{"type":"note","text":"x"}]}),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+
+        // Drop an orphan .nomai file directly via the content store.
+        let external_id = ulid::Ulid::new();
+        let now: chrono::DateTime<chrono::Utc> = "2026-06-23T10:00:00Z".parse().unwrap();
+        let doc = nomai_core::NomaiDoc {
+            format_version: 1,
+            id: external_id,
+            title: "External".into(),
+            tags: vec![],
+            attrs: Default::default(),
+            source: None,
+            created_at: now,
+            updated_at: now,
+            blocks: vec![nomai_core::nomai_format::Block {
+                r#type: nomai_core::nomai_format::BlockType::Note,
+                text: "from fs\n".into(),
+                attrs: Default::default(),
+            }],
+        };
+        daemon
+            .entries
+            .content_store()
+            .write_entry(external_id, &doc)
+            .unwrap();
+
+        // Call index.verify.
+        let verify_resp = daemon.dispatch(req("index.verify", json!({}))).await;
+        assert!(verify_resp.error.is_none(), "{:?}", verify_resp.error);
+        let result = verify_resp.result.unwrap();
+        assert_eq!(result["fs_only"], 1, "orphan FS file");
+        assert_eq!(result["consistent"], 1, "indexed entry with matching mtime");
+        assert_eq!(result["db_only"], 0);
+        assert_eq!(result["stale_mtime"], 0);
+
+        // Read-only: the orphan must NOT be indexed.
+        let get_resp = daemon
+            .dispatch(req("entry.get", json!({"id": external_id.to_string()})))
+            .await;
+        assert!(get_resp.error.is_some(), "verify must not index the orphan");
+    }
+
+    // ----- index.sync e2e test (Plan 5 Task 6) -----
     #[tokio::test]
     async fn index_sync_picks_up_external_file_and_reports_counts() {
         // Spec §7.1: FS is source-of-truth; index.sync reconciles. Drop a
@@ -2374,5 +2527,33 @@ mod tests {
         assert_eq!(payload["updated"], 0);
         assert_eq!(payload["removed"], 0);
         assert_eq!(payload["unchanged"], 0);
+    }
+
+    // ----- Plan 6 Task 5: quiet boot emits no index.synced event -----
+
+    #[tokio::test]
+    async fn quiet_boot_emits_no_index_synced_event() {
+        // setup_daemon uses EntryService::for_test — empty FS + empty index.
+        // Boot scan sees zero added/updated/removed and must skip the event
+        // so the audit log stays quiet across restarts with no FS changes.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let n: i64 = {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .query_row(
+                    "SELECT COUNT(*) FROM events WHERE type = 'index.synced'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            n, 0,
+            "empty boot should not emit index.synced event (got {n})"
+        );
     }
 }

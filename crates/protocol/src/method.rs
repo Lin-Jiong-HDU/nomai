@@ -73,6 +73,20 @@ pub mod index {
     /// or emb_cache (deterministic, reusable). Returns
     /// `{ reindexed, errors }` where `errors` collects per-entry failures.
     pub const REBUILD: &str = "index.rebuild";
+    /// Plan 6: read-only drift report between FS and the SQLite index.
+    /// Mirrors `index.sync`'s scan/diff but does NOT mutate. Returns
+    /// `{ fs_only, db_only, stale_mtime, consistent }` so callers can
+    /// surface drift before deciding whether to run `sync` / `rebuild`.
+    pub const VERIFY: &str = "index.verify";
+}
+
+pub mod system {
+    /// Plan 6: walk every entry row and render `.nomai` for any that lacks
+    /// one. Spec §12 migration utility — post-Plan-3 entries created via
+    /// `entry.create` already have `.nomai` and are skipped; this is for
+    /// rows created via direct DB manipulation. Returns
+    /// `{ exported, skipped, errors }`.
+    pub const EXPORT_TO_FS: &str = "system.export_to_fs";
 }
 
 #[cfg(test)]
@@ -136,5 +150,11 @@ mod tests {
     fn index_namespace_methods() {
         assert_eq!(index::SYNC, "index.sync");
         assert_eq!(index::REBUILD, "index.rebuild");
+        assert_eq!(index::VERIFY, "index.verify");
+    }
+
+    #[test]
+    fn system_namespace_methods() {
+        assert_eq!(system::EXPORT_TO_FS, "system.export_to_fs");
     }
 }

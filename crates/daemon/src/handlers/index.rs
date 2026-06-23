@@ -8,18 +8,24 @@
 //!
 //! `index.rebuild` is the nuclear option: wipes every derived table, then
 //! re-indexes every FS entry. Used to recover from index corruption.
+//!
+//! `index.verify` (Plan 6 Task 4) is a read-only drift report: same scan/diff
+//! as `index.sync` but never mutates. Useful for surfacing drift to the user
+//! before deciding whether to run sync/rebuild.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
-use nomai_core::{CoreError, EntryService, RebuildResult, SyncResult};
+use nomai_core::{CoreError, EntryService, RebuildResult, SyncResult, VerifyResult};
 
 use crate::daemon::Daemon;
 use crate::handlers::entry::blocking;
 use crate::rpc::RpcHandler;
-use nomai_protocol::method::index::{REBUILD as INDEX_REBUILD, SYNC as INDEX_SYNC};
+use nomai_protocol::method::index::{
+    REBUILD as INDEX_REBUILD, SYNC as INDEX_SYNC, VERIFY as INDEX_VERIFY,
+};
 
 pub struct Sync;
 
@@ -49,6 +55,23 @@ impl RpcHandler for Rebuild {
         // rebuild takes per-entry locks internally during the reindex phase.
         let entries: Arc<EntryService> = daemon.entries.clone();
         let result: RebuildResult = { blocking(move || entries.rebuild_index()).await?? };
+        serde_json::to_value(&result).map_err(|e| CoreError::Config(format!("serialize: {e}")))
+    }
+}
+
+pub struct Verify;
+
+#[async_trait]
+impl RpcHandler for Verify {
+    fn method(&self) -> &'static str {
+        INDEX_VERIFY
+    }
+    async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
+        // Read-only drift report. verify_fs snapshots the index under one
+        // short lock and then walks the FS without taking any lock; safe to
+        // run on a live daemon.
+        let entries: Arc<EntryService> = daemon.entries.clone();
+        let result: VerifyResult = { blocking(move || entries.verify_fs()).await?? };
         serde_json::to_value(&result).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
 }

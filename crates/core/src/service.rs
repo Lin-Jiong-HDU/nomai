@@ -40,6 +40,43 @@ pub struct RebuildResult {
     pub errors: Vec<String>,
 }
 
+/// Result of `EntryService::verify_fs`: read-only drift report between the
+/// filesystem and the SQLite index. Mirrors `sync_from_fs`'s scan/diff
+/// logic but does NOT mutate — the caller can inspect drift before deciding
+/// whether to run `sync_from_fs` / `rebuild_index`. Plan 6 Task 4.
+#[derive(Debug, Default, Serialize)]
+pub struct VerifyResult {
+    /// `.nomai` files on disk with no index row (would be `added` by sync).
+    pub fs_only: u64,
+    /// Index rows whose `.nomai` is missing on disk (would be `removed`).
+    pub db_only: u64,
+    /// `.nomai` exists but its mtime differs from the indexed `fs_mtime`
+    /// (would be `updated`).
+    pub stale_mtime: u64,
+    /// `.nomai` exists and its mtime matches the indexed `fs_mtime` (would
+    /// be `unchanged`).
+    pub consistent: u64,
+}
+
+/// Result of `EntryService::export_to_fs`: walks every entry row and
+/// generates the `.nomai` file on disk for those that lack one. Spec §12
+/// utility — post-Plan-3 entries created via `EntryService::create` already
+/// have their `.nomai` and are skipped; this is for legacy rows or entries
+/// created via direct DB manipulation. `exported` counts entries that got a
+/// fresh `.nomai` (and had their `fs_path`/`fs_mtime` populated); `skipped`
+/// counts entries whose `.nomai` already exists; `errors` collects
+/// per-entry failure messages without aborting the pass.
+#[derive(Debug, Default, Serialize)]
+pub struct ExportResult {
+    /// Entries that received a freshly-rendered `.nomai` file.
+    pub exported: u64,
+    /// Entries whose `.nomai` already existed on disk (no-op).
+    pub skipped: u64,
+    /// Per-entry error messages (render/write/update failures). The pass
+    /// skips failures and continues to the next entry.
+    pub errors: Vec<String>,
+}
+
 pub struct EntryService {
     conn: Arc<Mutex<Connection>>,
     content_store: Arc<crate::content_store::ContentStore>,
@@ -700,6 +737,88 @@ impl EntryService {
         })
     }
 
+    /// Read-only diff between the filesystem and the SQLite index. Plan 6
+    /// Task 4: reports drift categories (`fs_only` / `db_only` /
+    /// `stale_mtime` / `consistent`) but does NOT mutate the database or
+    /// the filesystem. Use this when you want to surface drift to the user
+    /// before deciding whether to call `sync_from_fs` / `rebuild_index`.
+    ///
+    /// Algorithm mirrors `sync_from_fs`: scan FS, snapshot the index under
+    /// one short lock, then walk both sides counting categories. Categorization:
+    /// - FS entry with no index row → `fs_only`
+    /// - FS entry whose indexed `fs_mtime` matches the file → `consistent`
+    /// - FS entry whose indexed `fs_mtime` differs → `stale_mtime`
+    /// - FS entry whose index row has no `fs_mtime` (legacy) → `consistent`
+    ///   (would be backfilled by sync; we don't want to scare the user)
+    /// - Index row with no corresponding FS directory → `db_only`
+    ///
+    /// Lock discipline: one short lock to snapshot the index, then per-entry
+    /// FS mtime reads (no lock). Never holds the conn lock while touching
+    /// the content store.
+    pub fn verify_fs(&self) -> Result<VerifyResult, CoreError> {
+        let fs_ids = self.content_store.scan_entry_ids();
+        let fs_id_set: std::collections::HashSet<Ulid> = fs_ids.iter().copied().collect();
+
+        // Snapshot the index under one short lock, then release. Read-only:
+        // no reindex_one, no INSERT/UPDATE/DELETE.
+        let db_rows: Vec<(Ulid, Option<String>)> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id, fs_mtime FROM entries")?;
+            let rows = stmt.query_map([], |row| {
+                let id_str: String = row.get(0)?;
+                let mtime_str: Option<String> = row.get(1)?;
+                let id = id_str.parse::<Ulid>().map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                Ok((id, mtime_str))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut fs_only = 0u64;
+        let mut db_only = 0u64;
+        let mut stale_mtime = 0u64;
+        let mut consistent = 0u64;
+
+        for fs_id in &fs_ids {
+            let db_row = db_rows.iter().find(|(id, _)| id == fs_id).cloned();
+            match db_row {
+                None => fs_only += 1,
+                Some((_, Some(db_mtime_str))) => {
+                    let db_mtime = chrono::DateTime::parse_from_rfc3339(&db_mtime_str)
+                        .ok()
+                        .map(|t| t.with_timezone(&Utc));
+                    let fs_mtime = self.content_store.entry_mtime(*fs_id);
+                    if db_mtime == fs_mtime {
+                        consistent += 1;
+                    } else {
+                        stale_mtime += 1;
+                    }
+                }
+                // DB row exists but fs_mtime is null/legacy: would be
+                // backfilled by sync, but for verify we count it as
+                // consistent (no observable drift to the user).
+                Some((_, None)) => consistent += 1,
+            }
+        }
+        for (db_id, _) in &db_rows {
+            if !fs_id_set.contains(db_id) {
+                db_only += 1;
+            }
+        }
+
+        Ok(VerifyResult {
+            fs_only,
+            db_only,
+            stale_mtime,
+            consistent,
+        })
+    }
+
     /// Wholesale rebuild of the derived index from the filesystem. Plan 5
     /// §7.1: nuclear option for index corruption. DELETEs every derived
     /// table (chunks → blocks → entries → links; fts_blocks via trigger;
@@ -756,6 +875,117 @@ impl EntryService {
             }
         }
         Ok(RebuildResult { reindexed, errors })
+    }
+
+    /// Walk every entry row and render the `.nomai` file for any that lacks
+    /// one. Spec §12 migration utility: post-Plan-3 entries created via
+    /// `EntryService::create` already have their `.nomai` and are skipped;
+    /// this is for legacy rows or entries created via direct DB manipulation
+    /// (e.g. an import path that bypasses the service layer).
+    ///
+    /// Per-entry logic:
+    /// - `fs_path` set AND file exists → skip.
+    /// - Otherwise → render `.nomai` from current entry+blocks state via
+    ///   `ContentStore::write_entry`, then UPDATE `fs_path` + `fs_mtime` so
+    ///   the next `sync_from_fs` treats the entry as indexed.
+    ///
+    /// Per-entry failures are collected into `errors` and the pass continues;
+    /// only an unrecoverable error from the initial row scan aborts the call.
+    pub fn export_to_fs(&self) -> Result<ExportResult, CoreError> {
+        // Snapshot the row list under one short lock; release before per-entry
+        // work so each get/write/update can take its own lock without deadlock.
+        let rows: Vec<(Ulid, Option<String>)> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id, fs_path FROM entries")?;
+            let mapped = stmt.query_map([], |row| {
+                let id_str: String = row.get(0)?;
+                let fs_path: Option<String> = row.get(1)?;
+                // Index invariant: ids are ULID strings. A parse failure here
+                // indicates index corruption; surface as a storage error.
+                let id = id_str.parse::<Ulid>().map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                Ok((id, fs_path))
+            })?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut exported = 0u64;
+        let mut skipped = 0u64;
+        let mut errors: Vec<String> = Vec::new();
+
+        for (entry_id, fs_path) in rows {
+            // Skip if fs_path is set AND the .nomai file actually exists.
+            if let Some(p) = &fs_path {
+                if !p.is_empty() && self.content_store.entry_file(entry_id).exists() {
+                    skipped += 1;
+                    continue;
+                }
+            }
+
+            // Need to export — fetch entry + blocks.
+            let entry = match self.get(entry_id) {
+                Ok(e) => e,
+                Err(e) => {
+                    errors.push(format!("entry {entry_id}: get failed: {e}"));
+                    continue;
+                }
+            };
+
+            // Render .nomai from the storage-layer blocks.
+            let parser_blocks: Vec<crate::nomai_format::Block> = entry
+                .blocks
+                .iter()
+                .map(crate::nomai_format_util::storage_block_to_parser_block)
+                .collect();
+            let doc = crate::nomai_format::NomaiDoc {
+                format_version: 1,
+                id: entry.id,
+                title: entry.title.clone(),
+                tags: entry.tags.clone(),
+                attrs: entry.attrs.as_object().cloned().unwrap_or_default(),
+                source: entry.source.clone(),
+                created_at: entry.created_at,
+                updated_at: entry.updated_at,
+                blocks: parser_blocks,
+            };
+
+            // Write the .nomai file via the content store.
+            if let Err(e) = self.content_store.write_entry(entry_id, &doc) {
+                errors.push(format!("entry {entry_id}: write failed: {e}"));
+                continue;
+            }
+
+            // Refresh fs_path + fs_mtime so the next sync_from_fs treats the
+            // entry as indexed.
+            let fs_path = format!("entries/{entry_id}/entry.nomai");
+            let fs_mtime = self
+                .content_store
+                .entry_mtime(entry_id)
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_default();
+            let conn = self.conn.lock().unwrap();
+            if let Err(e) = conn.execute(
+                "UPDATE entries SET fs_path = ?1, fs_mtime = ?2 WHERE id = ?3",
+                params![&fs_path, &fs_mtime, entry_id.to_string()],
+            ) {
+                errors.push(format!("entry {entry_id}: fs_path update failed: {e}"));
+                continue;
+            }
+            drop(conn);
+
+            exported += 1;
+        }
+
+        Ok(ExportResult {
+            exported,
+            skipped,
+            errors,
+        })
     }
 
     pub fn list(&self, query: EntryListQuery) -> Result<EntryListResult, CoreError> {
@@ -1957,5 +2187,209 @@ mod tests {
         // The good entry still round-trips cleanly.
         let fetched = svc.get(good.id).unwrap();
         assert!(!fetched.blocks.is_empty());
+    }
+
+    // ----- export_to_fs tests (Plan 6 Task 3) -----
+
+    #[test]
+    fn export_to_fs_generates_nomai_for_missing_files() {
+        let svc = EntryService::for_test().unwrap();
+        // Create an entry normally (this writes .nomai).
+        let _entry = svc
+            .create(CreateEntry {
+                title: "Has File".into(),
+                blocks: vec![BlockInput {
+                    r#type: "note".into(),
+                    text: "x".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+
+        // Manually insert an orphan entry directly in the DB, bypassing the
+        // service so no .nomai file is written. Spec §12 scenario: rows
+        // created via direct DB manipulation (e.g. legacy import path).
+        let orphan_id = Ulid::new();
+        {
+            let conn = svc.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .execute(
+                    "INSERT INTO entries (id, title, tags, attrs, source, fs_path, fs_mtime, created_at, updated_at)
+                     VALUES (?1, 'Orphan', '[]', '{}', NULL, NULL, NULL, '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+                    params![orphan_id.to_string()],
+                )
+                .unwrap();
+            // Add a block so the rendered .nomai has content.
+            let block_id = Ulid::new().to_string();
+            guard
+                .execute(
+                    "INSERT INTO blocks (id, entry_id, ordinal, type, text, attrs, created_at, updated_at)
+                     VALUES (?1, ?2, 0, 'note', 'orphan content', '{}', '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+                    params![block_id, orphan_id.to_string()],
+                )
+                .unwrap();
+        }
+
+        // Precondition: orphan has no .nomai file.
+        let cs = svc.content_store();
+        assert!(!cs.entry_file(orphan_id).exists());
+
+        let result = svc.export_to_fs().unwrap();
+        assert_eq!(result.exported, 1, "orphan should be exported");
+        assert_eq!(result.skipped, 1, "entry-with-file should be skipped");
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        // Verify .nomai now exists for orphan.
+        assert!(cs.entry_file(orphan_id).exists());
+
+        // Verify orphan entry's fs_path is now populated.
+        let conn = svc.conn_for_test();
+        let guard = conn.lock().unwrap();
+        let fs_path: String = guard
+            .query_row(
+                "SELECT fs_path FROM entries WHERE id = ?1",
+                params![orphan_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!fs_path.is_empty());
+    }
+
+    // ----- verify_fs tests (Plan 6 Task 4) -----
+
+    #[test]
+    fn verify_fs_reports_drift_without_mutating() {
+        let svc = EntryService::for_test().unwrap();
+        // Create one synced entry.
+        let entry = svc
+            .create(CreateEntry {
+                title: "T".into(),
+                blocks: vec![BlockInput {
+                    r#type: "note".into(),
+                    text: "x".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+
+        // Drop a new orphan FS file directly into the content store,
+        // bypassing the service so the SQLite index never sees it.
+        let new_id = Ulid::new();
+        let doc = crate::nomai_format::NomaiDoc {
+            format_version: 1,
+            id: new_id,
+            title: "Orphan".into(),
+            tags: vec![],
+            attrs: Default::default(),
+            source: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            blocks: vec![crate::nomai_format::Block {
+                r#type: crate::nomai_format::BlockType::Note,
+                text: "fs-only\n".into(),
+                attrs: Default::default(),
+            }],
+        };
+        svc.content_store.write_entry(new_id, &doc).unwrap();
+
+        let result = svc.verify_fs().unwrap();
+        assert_eq!(result.consistent, 1, "entry with matching mtime");
+        assert_eq!(result.fs_only, 1, "orphan FS file");
+        assert_eq!(result.db_only, 0);
+        assert_eq!(result.stale_mtime, 0);
+
+        // Verify NO mutation happened: the orphan is still unindexed, and
+        // the original entry is still readable.
+        assert!(
+            svc.get(new_id).is_err(),
+            "verify_fs should not index the orphan"
+        );
+        assert!(svc.get(entry.id).is_ok(), "existing entry untouched");
+    }
+
+    #[test]
+    fn verify_fs_reports_db_only_when_fs_file_missing() {
+        let svc = EntryService::for_test().unwrap();
+        let entry = svc
+            .create(CreateEntry {
+                title: "T".into(),
+                blocks: vec![BlockInput {
+                    r#type: "note".into(),
+                    text: "x".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+
+        // Delete the entire entry directory directly, bypassing the service.
+        // scan_entry_ids walks directories, so removing the dir (not just the
+        // .nomai file) is what surfaces db_only drift.
+        std::fs::remove_dir_all(svc.content_store.entry_dir(entry.id)).unwrap();
+
+        let result = svc.verify_fs().unwrap();
+        assert_eq!(result.db_only, 1, "index row with no FS directory");
+        assert_eq!(result.fs_only, 0);
+        assert_eq!(result.consistent, 0);
+        assert_eq!(result.stale_mtime, 0);
+
+        // The index row must still exist — verify_fs is read-only.
+        assert!(svc.get(entry.id).is_ok(), "verify_fs should not delete");
+    }
+
+    #[test]
+    fn verify_fs_reports_stale_mtime_when_file_changed() {
+        let svc = EntryService::for_test().unwrap();
+        let entry = svc
+            .create(CreateEntry {
+                title: "T".into(),
+                blocks: vec![BlockInput {
+                    r#type: "note".into(),
+                    text: "x".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+
+        // Rewrite the .nomai file with bumped mtime.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let doc = crate::nomai_format::NomaiDoc {
+            format_version: 1,
+            id: entry.id,
+            title: "T2".into(),
+            tags: vec![],
+            attrs: Default::default(),
+            source: None,
+            created_at: entry.created_at,
+            updated_at: Utc::now(),
+            blocks: vec![crate::nomai_format::Block {
+                r#type: crate::nomai_format::BlockType::Note,
+                text: "new\n".into(),
+                attrs: Default::default(),
+            }],
+        };
+        svc.content_store.write_entry(entry.id, &doc).unwrap();
+
+        let result = svc.verify_fs().unwrap();
+        assert_eq!(result.stale_mtime, 1, "file changed since indexing");
+        assert_eq!(result.consistent, 0);
+        assert_eq!(result.fs_only, 0);
+        assert_eq!(result.db_only, 0);
+
+        // Index must still reflect the old title — verify_fs is read-only.
+        let fetched = svc.get(entry.id).unwrap();
+        assert_eq!(fetched.title, "T", "verify_fs should not reindex");
     }
 }
