@@ -35,6 +35,30 @@ pub struct ChunkSearchResult {
     pub score: f32,
 }
 
+/// Action taken by `ChunkService::ensure_vec_chunk_embeddings` to reconcile
+/// the runtime dim (from config) with the dim baked into the existing
+/// `vec_chunk_embeddings` virtual table.
+///
+/// V9 (Plan 5) creates this table with the daemon default dim (1536). Users
+/// with `config.embedding.dim != 1536` (e.g. GLM at 2048) would otherwise
+/// hit a vec0 "Dimension mismatch" error on the first embedding write. The
+/// daemon reconciles at boot: if dims differ, the table is dropped and
+/// recreated at the config dim. `emb_cache` (keyed by content hash, FK-free,
+/// independent of `vec_chunk_embeddings`) absorbs the re-embed cost — the
+/// next `semantic_search` re-embeds from cache with zero API calls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "action")]
+pub enum DimReconciliation {
+    /// Table existed with matching dim; no action taken.
+    Consistent { dim: usize },
+    /// Table didn't exist; created fresh at the requested dim.
+    Created { dim: usize },
+    /// Table existed at a different dim; dropped and recreated. Existing
+    /// `vec_chunk_embeddings` rows are lost but `emb_cache` preserves their
+    /// source content for cheap re-embedding.
+    Recreated { from: usize, to: usize },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

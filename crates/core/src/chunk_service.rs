@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params};
 use ulid::Ulid;
 
-use crate::chunk_model::{Chunk, ChunkListResult, ChunkSearchResult};
+use crate::chunk_model::{Chunk, ChunkListResult, ChunkSearchResult, DimReconciliation};
 use crate::error::CoreError;
 use crate::storage;
 
@@ -73,34 +73,75 @@ impl ChunkService {
         Ok(ChunkListResult { items, total })
     }
 
-    /// Ensure `vec_chunk_embeddings` virtual table exists. Idempotent.
+    /// Ensure `vec_chunk_embeddings` virtual table exists with the requested
+    /// dim. Returns the reconciliation action taken:
+    /// - `Created { dim }` if the table was missing and we created it
+    /// - `Consistent { dim }` if the table existed with a matching dim
+    /// - `Recreated { from, to }` if the table existed at a different dim —
+    ///   we DROP + CREATE
     ///
-    /// V9 creates this table with the daemon default dim (1536) so the
-    /// `chunks_ad` DELETE trigger can resolve it at fire time. This call is
-    /// a true no-op when the V9 table exists with a matching dim. If a
-    /// non-default dim is required, the caller must DROP the V9-created
-    /// table first, then call this with the desired dim.
-    pub fn ensure_vec_chunk_embeddings(&self, dim: usize) -> Result<(), CoreError> {
+    /// V9 (Plan 5) creates this table with the daemon default dim (1536) so
+    /// the `chunks_ad` DELETE trigger can resolve it at fire time. Users with
+    /// a non-default `config.embedding.dim` (e.g. GLM at 2048) would otherwise
+    /// hit a vec0 "Dimension mismatch" error on the first embedding write, so
+    /// the daemon reconciles at boot.
+    ///
+    /// The `Recreated` path loses existing `vec_chunk_embeddings` rows but
+    /// `emb_cache` (keyed by content hash, FK-free, independent of this table)
+    /// preserves them — the next `semantic_search` re-embeds from cache with
+    /// zero API calls.
+    pub fn ensure_vec_chunk_embeddings(&self, dim: usize) -> Result<DimReconciliation, CoreError> {
         let conn = self.conn.lock().unwrap();
-        let already_exists: i64 = conn
+
+        // Check if table exists; capture its CREATE SQL if so.
+        let existing_sql: Option<String> = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
+                "SELECT sql FROM sqlite_master
                  WHERE type='table' AND name='vec_chunk_embeddings'",
                 [],
                 |row| row.get(0),
             )
+            .ok();
+
+        let Some(sql) = existing_sql else {
+            // Table doesn't exist — create fresh at the requested dim.
+            conn.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE vec_chunk_embeddings USING vec0(
+                    chunk_id TEXT PRIMARY KEY,
+                    embedding FLOAT[{dim}] distance_metric=cosine
+                )"
+            ))
             .map_err(CoreError::Storage)?;
-        if already_exists > 0 {
-            return Ok(());
+            return Ok(DimReconciliation::Created { dim });
+        };
+
+        // Parse the dim baked into the existing CREATE VIRTUAL TABLE SQL.
+        // Format: `... embedding FLOAT[N] distance_metric=cosine ...`
+        let actual_dim = parse_vec_dim(&sql).ok_or_else(|| {
+            CoreError::Storage(rusqlite::Error::InvalidParameterName(format!(
+                "cannot parse dim from vec_chunk_embeddings SQL: {sql}"
+            )))
+        })?;
+
+        if actual_dim == dim {
+            return Ok(DimReconciliation::Consistent { dim });
         }
+
+        // Mismatch — DROP + CREATE at the requested dim.
+        conn.execute_batch("DROP TABLE vec_chunk_embeddings")
+            .map_err(CoreError::Storage)?;
         conn.execute_batch(&format!(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunk_embeddings USING vec0(
+            "CREATE VIRTUAL TABLE vec_chunk_embeddings USING vec0(
                 chunk_id TEXT PRIMARY KEY,
                 embedding FLOAT[{dim}] distance_metric=cosine
             )"
         ))
         .map_err(CoreError::Storage)?;
-        Ok(())
+
+        Ok(DimReconciliation::Recreated {
+            from: actual_dim,
+            to: dim,
+        })
     }
 
     /// Upsert a chunk embedding. vec0 doesn't support `INSERT OR REPLACE`,
@@ -230,6 +271,18 @@ fn row_to_chunk(row: &rusqlite::Row<'_>, _offset: usize) -> rusqlite::Result<Chu
             .expect("RFC3339 stored in DB is always valid")
             .with_timezone(&Utc),
     })
+}
+
+/// Parse the embedding dim from a vec0 CREATE VIRTUAL TABLE SQL.
+/// Matches the first `FLOAT[N]` token in the SQL text (the embedding
+/// column declaration). Returns `None` if no token is found or the inner
+/// text isn't a valid `usize`.
+fn parse_vec_dim(sql: &str) -> Option<usize> {
+    let marker = "FLOAT[";
+    let start = sql.find(marker)? + marker.len();
+    let rest = &sql[start..];
+    let end = rest.find(']')?;
+    rest[..end].parse().ok()
 }
 
 #[cfg(test)]
@@ -440,10 +493,101 @@ mod tests {
         crate::storage::init_sqlite_extensions();
         let chunks = ChunkService::for_test().unwrap();
         // V9 migration creates vec_chunk_embeddings with dim=1536 (daemon
-        // default). The call is a no-op (IF NOT EXISTS) when the table
-        // exists, so any `dim` arg works without error.
+        // default). First call requests dim=8, which mismatches 1536 → the
+        // table is dropped and recreated at dim=8. Second call matches the
+        // new dim → Consistent. Both calls must succeed (no error path).
         chunks.ensure_vec_chunk_embeddings(8).unwrap();
         chunks.ensure_vec_chunk_embeddings(8).unwrap();
+    }
+
+    #[test]
+    fn ensure_vec_chunk_embeddings_creates_when_missing() {
+        crate::storage::init_sqlite_extensions();
+        let svc = ChunkService::for_test().unwrap();
+        // Manually drop the table that V9 created
+        {
+            let conn = svc.conn.lock().unwrap();
+            conn.execute_batch("DROP TABLE vec_chunk_embeddings")
+                .unwrap();
+        }
+        let result = svc.ensure_vec_chunk_embeddings(2048).unwrap();
+        match result {
+            DimReconciliation::Created { dim } => assert_eq!(dim, 2048),
+            other => panic!("expected Created, got {other:?}"),
+        }
+        // Verify table exists with dim 2048
+        let conn = svc.conn.lock().unwrap();
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_chunk_embeddings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("FLOAT[2048]"), "table should have dim 2048");
+    }
+
+    #[test]
+    fn ensure_vec_chunk_embeddings_recreates_on_dim_mismatch() {
+        crate::storage::init_sqlite_extensions();
+        let svc = ChunkService::for_test().unwrap();
+        // V9 created with dim=1536 (daemon default). Request dim=2048.
+        let result = svc.ensure_vec_chunk_embeddings(2048).unwrap();
+        match result {
+            DimReconciliation::Recreated { from, to } => {
+                assert_eq!(from, 1536);
+                assert_eq!(to, 2048);
+            }
+            other => panic!("expected Recreated, got {other:?}"),
+        }
+        // Verify table now has dim 2048
+        let conn = svc.conn.lock().unwrap();
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_chunk_embeddings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("FLOAT[2048]"));
+    }
+
+    #[test]
+    fn ensure_vec_chunk_embeddings_returns_consistent_when_dims_match() {
+        crate::storage::init_sqlite_extensions();
+        let svc = ChunkService::for_test().unwrap();
+        // V9 created with dim=1536. Request dim=1536.
+        let result = svc.ensure_vec_chunk_embeddings(1536).unwrap();
+        assert!(matches!(
+            result,
+            DimReconciliation::Consistent { dim: 1536 }
+        ));
+    }
+
+    #[test]
+    fn ensure_vec_chunk_embeddings_recreate_preserves_emb_cache() {
+        // emb_cache is independent of vec_chunk_embeddings (keyed by content
+        // hash, FK-free). Recreating the vec table doesn't touch emb_cache.
+        crate::storage::init_sqlite_extensions();
+        let svc = ChunkService::for_test().unwrap();
+        // Manually insert into emb_cache
+        {
+            let conn = svc.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at)
+                 VALUES ('test-model', X'00', 1536, ?1, '2026-06-23T10:00:00Z')",
+                [&[0u8; 4][..]],
+            )
+            .unwrap();
+        }
+        // Recreate vec_chunk_embeddings with new dim
+        let _ = svc.ensure_vec_chunk_embeddings(2048).unwrap();
+        // emb_cache row still there
+        let conn = svc.conn.lock().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM emb_cache", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "emb_cache should be untouched by vec recreate");
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub mod storage;
 
 pub use block_model::{Block, BlockInput, BlockListResult, CreateBlock};
 pub use block_service::BlockService;
-pub use chunk_model::{Chunk, ChunkListResult, ChunkSearchResult};
+pub use chunk_model::{Chunk, ChunkListResult, ChunkSearchResult, DimReconciliation};
 pub use chunk_service::ChunkService;
 pub use content_store::ContentStore;
 pub use error::CoreError;
