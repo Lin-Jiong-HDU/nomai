@@ -67,10 +67,12 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     let h = block::Delete;
     m.insert(h.method(), Arc::new(h));
 
-    // index.* (Plan 5: FS↔SQLite reconciliation.)
+    // index.* (Plan 5: FS↔SQLite reconciliation. Plan 6: read-only verify.)
     let h = index::Sync;
     m.insert(h.method(), Arc::new(h));
     let h = index::Rebuild;
+    m.insert(h.method(), Arc::new(h));
+    let h = index::Verify;
     m.insert(h.method(), Arc::new(h));
 
     // system.* (Plan 6: Spec §12 migration utilities.)
@@ -1124,10 +1126,10 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 27 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
-        // events:3, search:2, provider:1, cache:2, batch:1, index:2,
+        // 28 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
+        // events:3, search:2, provider:1, cache:2, batch:1, index:3,
         // system:1).
-        assert_eq!(tools.len(), 27);
+        assert_eq!(tools.len(), 28);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1145,6 +1147,7 @@ mod tests {
         assert!(names.contains(&"provider.list"));
         assert!(names.contains(&"index.sync"));
         assert!(names.contains(&"index.rebuild"));
+        assert!(names.contains(&"index.verify"));
         assert!(names.contains(&"system.export_to_fs"));
         // MCP meta-methods are not callable tools.
         assert!(!names.contains(&"initialize"));
@@ -1258,7 +1261,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 28); // 27 built-in + custom.echo
+        assert_eq!(tools.len(), 29); // 28 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
@@ -2185,6 +2188,65 @@ mod tests {
         let doc = cs.read_entry(orphan_id).unwrap();
         assert_eq!(doc.title, "orphan");
         assert_eq!(doc.blocks[0].text, "orphan content\n");
+    }
+
+    // ----- index.verify e2e test (Plan 6 Task 4) -----
+
+    #[tokio::test]
+    async fn index_verify_reports_drift_without_mutating() {
+        // Read-only drift report. Drop an orphan .nomai file and verify
+        // index.verify reports fs_only=1 without indexing it.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create one entry via the service so the index starts non-empty.
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"Indexed","blocks":[{"type":"note","text":"x"}]}),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+
+        // Drop an orphan .nomai file directly via the content store.
+        let external_id = ulid::Ulid::new();
+        let now: chrono::DateTime<chrono::Utc> = "2026-06-23T10:00:00Z".parse().unwrap();
+        let doc = nomai_core::NomaiDoc {
+            format_version: 1,
+            id: external_id,
+            title: "External".into(),
+            tags: vec![],
+            attrs: Default::default(),
+            source: None,
+            created_at: now,
+            updated_at: now,
+            blocks: vec![nomai_core::nomai_format::Block {
+                r#type: nomai_core::nomai_format::BlockType::Note,
+                text: "from fs\n".into(),
+                attrs: Default::default(),
+            }],
+        };
+        daemon
+            .entries
+            .content_store()
+            .write_entry(external_id, &doc)
+            .unwrap();
+
+        // Call index.verify.
+        let verify_resp = daemon.dispatch(req("index.verify", json!({}))).await;
+        assert!(verify_resp.error.is_none(), "{:?}", verify_resp.error);
+        let result = verify_resp.result.unwrap();
+        assert_eq!(result["fs_only"], 1, "orphan FS file");
+        assert_eq!(result["consistent"], 1, "indexed entry with matching mtime");
+        assert_eq!(result["db_only"], 0);
+        assert_eq!(result["stale_mtime"], 0);
+
+        // Read-only: the orphan must NOT be indexed.
+        let get_resp = daemon
+            .dispatch(req("entry.get", json!({"id": external_id.to_string()})))
+            .await;
+        assert!(get_resp.error.is_some(), "verify must not index the orphan");
     }
 
     // ----- index.sync e2e test (Plan 5 Task 6) -----

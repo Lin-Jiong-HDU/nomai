@@ -73,6 +73,11 @@ pub mod index {
     /// or emb_cache (deterministic, reusable). Returns
     /// `{ reindexed, errors }` where `errors` collects per-entry failures.
     pub const REBUILD: &str = "index.rebuild";
+    /// Plan 6: read-only drift report between FS and the SQLite index.
+    /// Mirrors `index.sync`'s scan/diff but does NOT mutate. Returns
+    /// `{ fs_only, db_only, stale_mtime, consistent }` so callers can
+    /// surface drift before deciding whether to run `sync` / `rebuild`.
+    pub const VERIFY: &str = "index.verify";
 }
 
 pub mod system {
@@ -145,6 +150,7 @@ mod tests {
     fn index_namespace_methods() {
         assert_eq!(index::SYNC, "index.sync");
         assert_eq!(index::REBUILD, "index.rebuild");
+        assert_eq!(index::VERIFY, "index.verify");
     }
 
     #[test]

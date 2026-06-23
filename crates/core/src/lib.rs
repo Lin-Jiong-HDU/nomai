@@ -35,7 +35,7 @@ pub use nomai_format::{
 };
 pub use service::{
     CreateEntry, EntryListQuery, EntryListResult, EntryService, ExportResult, FulltextSearchResult,
-    RebuildResult, SyncResult, UpdateEntry,
+    RebuildResult, SyncResult, UpdateEntry, VerifyResult,
 };
 
 #[cfg(test)]
