@@ -37,6 +37,20 @@ pub struct CreateBlock {
     pub attrs: Option<Value>,
 }
 
+/// Input shape for a block when creating an entry. Caller does NOT supply
+/// `entry_id` or `ordinal` — `EntryService::create` assigns them based on
+/// the parent entry and the block's position in the input vector.
+///
+/// Differs from `CreateBlock` (which is the storage-layer input directly
+/// to `BlockService::create` and requires `entry_id` + `ordinal`).
+#[derive(Debug, Deserialize)]
+pub struct BlockInput {
+    pub r#type: String,
+    pub text: String,
+    #[serde(default)]
+    pub attrs: Option<Value>,
+}
+
 /// Result of `BlockService::list`.
 #[derive(Debug)]
 pub struct BlockListResult {
@@ -89,5 +103,21 @@ mod tests {
         let s = serde_json::to_string(&block).unwrap();
         // serde translates r#type → "type" in JSON
         assert!(s.contains(r#""type":"claim""#));
+    }
+
+    #[test]
+    fn block_input_deserializes_minimal() {
+        let json = r#"{"type":"claim","text":"Earth orbits the sun."}"#;
+        let b: BlockInput = serde_json::from_str(json).unwrap();
+        assert_eq!(b.r#type, "claim");
+        assert_eq!(b.text, "Earth orbits the sun.");
+        assert!(b.attrs.is_none());
+    }
+
+    #[test]
+    fn block_input_deserializes_with_attrs() {
+        let json = r#"{"type":"evidence","text":"x","attrs":{"src":"paper.pdf"}}"#;
+        let b: BlockInput = serde_json::from_str(json).unwrap();
+        assert_eq!(b.attrs.unwrap()["src"], json!("paper.pdf"));
     }
 }

@@ -15,7 +15,7 @@ pub mod nomai_format;
 pub mod service;
 pub mod storage;
 
-pub use block_model::{Block, BlockListResult, CreateBlock};
+pub use block_model::{Block, BlockInput, BlockListResult, CreateBlock};
 pub use block_service::BlockService;
 pub use chunk_model::{Chunk, ChunkListResult, ChunkSearchResult, CreateChunk, Granularity};
 pub use chunk_service::ChunkService;
