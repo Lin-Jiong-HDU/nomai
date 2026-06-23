@@ -38,6 +38,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build daemon with dummy providers (read-only, no API calls)
     nomai_core::storage::init_sqlite_extensions();
     let conn = Arc::new(std::sync::Mutex::new(rusqlite::Connection::open(&db_path)?));
+    let knowledge_root = std::path::PathBuf::from(format!("{output_dir}/.nomai_store"));
+    std::fs::create_dir_all(&knowledge_root)?;
+    let content_store = Arc::new(nomai_core::ContentStore::new(knowledge_root));
     let embedder: Arc<dyn nomai_providers::EmbeddingProvider> = Arc::new(
         nomai_providers::OpenAiCompatibleEmbed::new("http://localhost", "x", "x", 8),
     );
@@ -46,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let daemon = nomai_daemon::daemon::Daemon::from_services(
         conn,
+        content_store,
         embedder,
         llm,
         8,
@@ -85,7 +89,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match event_type {
             "entry.created" | "entry.updated" => {
-                let body = payload["body"].as_str().unwrap_or("");
+                // Body is now derived from blocks (Spec 6 Plan 3). Re-join
+                // block texts with "\n\n" to reconstruct the body.
+                let body = payload["blocks"]
+                    .as_array()
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("\n\n")
+                    })
+                    .unwrap_or_default();
                 let file_path = format!("{output_dir}/{id}.md");
                 std::fs::write(&file_path, format!("# {title}\n\n{body}"))?;
                 synced += 1;

@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
-use nomai_core::{CoreError, EntryListQuery, EntryService};
+use nomai_core::{ContentStore, CoreError, EntryListQuery, EntryService};
 use nomai_daemon::daemon::Daemon;
 use nomai_daemon::rpc::RpcHandler;
 
@@ -49,19 +49,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Open in-memory database + run migrations
     let conn = Arc::new(std::sync::Mutex::new(Connection::open_in_memory()?));
-    let entries = Arc::new(EntryService::new(conn.clone())?);
+    let tmp_store_dir = std::env::temp_dir().join(format!("nomai-example-{}", ulid::Ulid::new()));
+    let content_store = Arc::new(ContentStore::new(tmp_store_dir));
+    let entries = Arc::new(EntryService::new(conn.clone(), content_store.clone())?);
 
     // 3. Seed some data
     entries.create(nomai_core::CreateEntry {
         title: "Hello".into(),
-        body: "World".into(),
+        blocks: vec![nomai_core::BlockInput {
+            r#type: "note".into(),
+            text: "World".into(),
+            attrs: None,
+        }],
         tags: None,
         attrs: None,
         source: None,
     })?;
     entries.create(nomai_core::CreateEntry {
         title: "Second".into(),
-        body: "Entry".into(),
+        blocks: vec![nomai_core::BlockInput {
+            r#type: "note".into(),
+            text: "Entry".into(),
+            attrs: None,
+        }],
         tags: None,
         attrs: None,
         source: None,
@@ -76,7 +86,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         nomai_providers::OpenAiCompatibleLlm::new("http://localhost", "dummy", "dummy"),
     );
 
-    let mut daemon = Daemon::from_services(conn, embedder, llm, 8, "example-model", 100_000)?;
+    let mut daemon = Daemon::from_services(
+        conn,
+        content_store,
+        embedder,
+        llm,
+        8,
+        "example-model",
+        100_000,
+    )?;
 
     // 5. Register custom RPC
     daemon.register_handler(Arc::new(Stats));

@@ -161,14 +161,17 @@ impl RpcHandler for Batch {
                         if op.method == "entry.create" || op.method == "entry.update" {
                             if let Some(id_str) = value.get("id").and_then(|v| v.as_str()) {
                                 if let Ok(id) = id_str.parse::<ulid::Ulid>() {
-                                    if let Some(text) = value.get("body").and_then(|v| v.as_str()) {
-                                        if !text.is_empty() {
-                                            embed_queue.push(EmbedTask {
-                                                id,
-                                                text: text.to_string(),
-                                                target: EmbedTarget::Entry,
-                                            });
-                                        }
+                                    // Derived body = blocks' text joined with
+                                    // "\n\n" (mirrors core's
+                                    // `derived_body_from_blocks`). Empty when
+                                    // the entry has no blocks.
+                                    let text = derived_body_from_value(&value);
+                                    if !text.is_empty() {
+                                        embed_queue.push(EmbedTask {
+                                            id,
+                                            text,
+                                            target: EmbedTarget::Entry,
+                                        });
                                     }
                                 }
                             }
@@ -238,6 +241,25 @@ impl RpcHandler for Batch {
             }
         }
     }
+}
+
+/// Compute the derived body from an entry-shaped JSON value (the result of
+/// `entry.create` / `entry.update` inside a batch). Mirrors core's private
+/// `derived_body_from_blocks`: blocks' text fields joined with `\n\n` in
+/// array order. Returns an empty string when there are no blocks or the
+/// value isn't entry-shaped.
+fn derived_body_from_value(value: &Value) -> String {
+    value
+        .get("blocks")
+        .and_then(|v| v.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .unwrap_or_default()
 }
 
 /// Resolve $ref placeholders in params, using results from previous ops.

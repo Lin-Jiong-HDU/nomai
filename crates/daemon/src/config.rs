@@ -20,12 +20,18 @@ pub struct Config {
 pub struct DataConfig {
     #[serde(default = "default_db_path")]
     pub db_path: PathBuf,
+    /// Root directory for FS-backed content storage (.nomai files). Defaults
+    /// to `<data_dir>/store/` (sibling of the default db_path) when None.
+    /// Tilde (`~`) prefixes are expanded at read time in `Daemon::new`.
+    #[serde(default)]
+    pub knowledge_root: Option<PathBuf>,
 }
 
 impl Default for DataConfig {
     fn default() -> Self {
         Self {
             db_path: default_db_path(),
+            knowledge_root: None,
         }
     }
 }
@@ -81,6 +87,16 @@ fn default_db_path() -> PathBuf {
     ProjectDirs::from("dev", "nomai", "nomai")
         .map(|d| d.data_dir().join("db.sqlite"))
         .unwrap_or_else(|| PathBuf::from("nomai.sqlite"))
+}
+
+/// Resolve a `knowledge_root` config value to a concrete path. If the user
+/// supplied a value, it's used as-is. Otherwise, default to `<data_dir>/store/`
+/// (sibling of the default `db_path`). Mirrors how `default_db_path` uses
+/// `ProjectDirs` so both storage roots share the same base directory.
+pub fn default_knowledge_root() -> PathBuf {
+    ProjectDirs::from("dev", "nomai", "nomai")
+        .map(|d| d.data_dir().join("store"))
+        .unwrap_or_else(|| PathBuf::from("store"))
 }
 
 pub fn default_config_path() -> PathBuf {

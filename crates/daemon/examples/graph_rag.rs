@@ -71,14 +71,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         neighbors
     );
 
-    // Step 3: Build context + call LLM (pure application-layer composition)
+    // Step 3: Build context + call LLM (pure application-layer composition).
+    //         Body is now derived from blocks (Spec 6 Plan 3); re-join here.
     let context: Vec<String> = entries
         .iter()
         .map(|e| {
+            let body = e["blocks"]
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                })
+                .unwrap_or_default();
             format!(
                 "## {}\n{}",
                 e["title"].as_str().unwrap_or("(untitled)"),
-                e["body"].as_str().unwrap_or("")
+                body
             )
         })
         .collect();

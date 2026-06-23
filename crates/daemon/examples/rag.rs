@@ -17,6 +17,7 @@ use rusqlite::Connection;
 use nomai_core::EntryService;
 use nomai_core::storage;
 use nomai_daemon::config::Config;
+use nomai_daemon::config::default_knowledge_root;
 use nomai_providers::{
     ChatMessage, CompletionRequest, EmbeddingProvider, LlmProvider, MessageRole,
     OpenAiCompatibleEmbed, OpenAiCompatibleLlm,
@@ -39,7 +40,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     storage::init_sqlite_extensions();
     let conn = Arc::new(Mutex::new(Connection::open(&config.data.db_path)?));
-    let entries = EntryService::new(conn)?;
+    let knowledge_root = config
+        .data
+        .knowledge_root
+        .clone()
+        .unwrap_or_else(default_knowledge_root);
+    std::fs::create_dir_all(&knowledge_root)?;
+    let content_store = Arc::new(nomai_core::ContentStore::new(knowledge_root));
+    let entries = EntryService::new(conn, content_store)?;
     entries.ensure_vec_embeddings(config.embedding.dim)?;
 
     // 2. Read API keys + construct providers (config.validate checked env).
@@ -68,10 +76,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. KNN top-K semantic search over entries.
     let hits = entries.semantic_search(&qvec, TOP_K)?;
 
-    // 5. Build context from title + body of each hit.
+    // 5. Build context from title + derived body of each hit. Derived body
+    //    = block texts joined with "\n\n" (Spec 6 Plan 3).
     let context = hits
         .iter()
-        .map(|h| format!("## {}\n\n{}", h.entry.title, h.entry.body))
+        .map(|h| {
+            let body = h
+                .entry
+                .blocks
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            format!("## {}\n\n{}", h.entry.title, body)
+        })
         .collect::<Vec<_>>()
         .join("\n---\n\n");
     let user = if context.is_empty() {

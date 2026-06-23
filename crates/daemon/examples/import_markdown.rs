@@ -18,19 +18,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_string();
 
     // Simple chunking: split by double-newline (paragraphs).
-    // First paragraph = entry body; rest = chunks.
+    // Plan 3: entries are blocks-based. Put every paragraph in a single
+    // entry as one block per paragraph; skip separate chunk creation.
     let paragraphs: Vec<&str> = content
         .split("\n\n")
         .filter(|p| !p.trim().is_empty())
         .collect();
-    let body = paragraphs.first().copied().unwrap_or("");
+
+    let blocks: Vec<serde_json::Value> = paragraphs
+        .iter()
+        .map(|p| json!({ "type": "note", "text": p }))
+        .collect();
 
     let mut ops = vec![json!({
         "id": "e1",
         "method": "entry.create",
-        "params": { "title": title, "body": body }
+        "params": { "title": title, "blocks": blocks }
     })];
 
+    // Extra paragraphs were previously emitted as chunks; that role is now
+    // filled by multiple blocks within the same entry. We keep the rest of
+    // the batch flow unchanged for demonstration purposes — no chunks here.
     for (ordinal, text) in paragraphs.iter().skip(1).enumerate() {
         ops.push(json!({
             "id": format!("c{ordinal}"),

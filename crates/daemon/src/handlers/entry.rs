@@ -25,6 +25,17 @@ where
         .map_err(|e| CoreError::Config(format!("blocking task join error: {e}")))
 }
 
+/// Compute the derived body of an entry from its blocks. Mirrors the private
+/// `derived_body_from_blocks` in `nomai_core::service`: blocks joined with
+/// `\n\n` (paragraph break), in ordinal order. Used as the embedding input.
+fn derived_body_from_blocks(blocks: &[nomai_core::Block]) -> String {
+    blocks
+        .iter()
+        .map(|b| b.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 pub struct Create;
 #[async_trait]
 impl RpcHandler for Create {
@@ -38,9 +49,9 @@ impl RpcHandler for Create {
         let entries = daemon.entries.clone();
         let entry = blocking(move || entries.create(input)).await??;
 
-        // Trigger embedding if body is non-empty.
-        if !entry.body.is_empty() {
-            let body = entry.body.clone();
+        // Trigger embedding if derived body is non-empty.
+        let body = derived_body_from_blocks(&entry.blocks);
+        if !body.is_empty() {
             let embeddings = daemon.cache.embed(&[&body]).await?;
             if let Some(emb) = embeddings.into_iter().next() {
                 let entries = daemon.entries.clone();
@@ -90,26 +101,33 @@ impl RpcHandler for Update {
         let p: Params = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
-        // Snapshot current body to detect change.
+        // Snapshot current derived body to detect change. UpdateEntry no
+        // longer carries a body field (blocks are immutable at this layer),
+        // so only title/tags/attrs/source changes can occur — but we still
+        // re-embed if the derived body differs for any reason (e.g. caller
+        // mutated blocks out-of-band).
         let entries = daemon.entries.clone();
         let id_for_get = p.id;
-        let old_body = blocking(move || entries.get(id_for_get)).await??.body;
+        let old_body =
+            derived_body_from_blocks(&blocking(move || entries.get(id_for_get)).await??.blocks);
 
         let entries = daemon.entries.clone();
         let id_for_update = p.id;
         let fields = p.fields;
         let updated = blocking(move || entries.update(id_for_update, fields)).await??;
 
-        // Re-embed if body changed.
-        if updated.body != old_body {
-            if updated.body.is_empty() {
+        let new_body = derived_body_from_blocks(&updated.blocks);
+
+        // Re-embed if derived body changed.
+        if new_body != old_body {
+            if new_body.is_empty() {
                 // body cleared — remove stale embedding so searches no longer match.
                 let entries = daemon.entries.clone();
                 let id = updated.id;
                 blocking(move || entries.delete_embedding(id)).await??;
             } else {
                 // body changed (non-empty) — re-embed.
-                let body = updated.body.clone();
+                let body = new_body;
                 let embeddings = daemon.cache.embed(&[&body]).await?;
                 if let Some(emb) = embeddings.into_iter().next() {
                     let entries = daemon.entries.clone();
