@@ -55,6 +55,15 @@ impl ContentStore {
         let content = crate::nomai_format::render(doc);
         atomic_write(&path, &content)
     }
+
+    /// Read and parse `<root>/entries/<id>/entry.nomai`.
+    /// Returns `CoreError::Io` if the file is missing or unreadable,
+    /// `CoreError::NomaiFormat` if parsing fails.
+    pub fn read_entry(&self, entry_id: Ulid) -> Result<crate::nomai_format::NomaiDoc, CoreError> {
+        let path = self.entry_file(entry_id);
+        let content = std::fs::read_to_string(&path)?;
+        crate::nomai_format::parse(&content).map_err(CoreError::from)
+    }
 }
 
 /// Atomically write `content` to `path`. Writes to `<path>.tmp`, fsyncs, then
@@ -164,5 +173,37 @@ mod tests {
         assert!(content.contains("Hello."));
     }
 
-    // TODO Task 6: write_entry_round_trips_through_read (uncomment after read_entry lands)
+    #[test]
+    fn write_entry_round_trips_through_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let doc = sample_doc();
+
+        store.write_entry(id, &doc).unwrap();
+        let read = store.read_entry(id).unwrap();
+        assert_eq!(read, doc);
+    }
+
+    #[test]
+    fn read_entry_errors_on_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let err = store.read_entry(id).unwrap_err();
+        assert!(matches!(err, CoreError::Io(_)));
+    }
+
+    #[test]
+    fn read_entry_errors_on_malformed_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        // Write malformed content directly via atomic_write
+        let path = store.entry_file(id);
+        atomic_write(&path, "not a valid nomai file").unwrap();
+
+        let err = store.read_entry(id).unwrap_err();
+        assert!(matches!(err, CoreError::NomaiFormat(_)));
+    }
 }
