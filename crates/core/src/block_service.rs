@@ -38,6 +38,9 @@ impl BlockService {
     /// `entries` table exists (FK target for `blocks.entry_id`).
     #[doc(hidden)]
     pub fn for_test() -> Result<Self, CoreError> {
+        // V9 migration creates a vec0 virtual table; the extension must be
+        // registered before the connection is opened.
+        crate::storage::init_sqlite_extensions();
         let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
         let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", ulid::Ulid::new()));
         let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
@@ -149,6 +152,219 @@ impl BlockService {
         .map_err(crate::storage::map_constraint_violation)?;
 
         Ok(block)
+    }
+
+    /// Append a block to an entry. Computes `ordinal = max(existing) + 1`
+    /// (0 when the entry has no blocks). Auto-chunks via the same path as
+    /// `create_in_tx`. Emits `block.created`. Returns NotFound if the entry
+    /// does not exist.
+    pub fn append(
+        &self,
+        entry_id: Ulid,
+        r#type: String,
+        text: String,
+        attrs: Option<serde_json::Value>,
+    ) -> Result<Block, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN")?;
+        let result = self.append_in_tx(&conn, entry_id, r#type, text, attrs);
+        match result {
+            Ok(block) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(block)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Append within an existing transaction. Caller controls BEGIN/COMMIT.
+    /// Computes ordinal = MAX(ordinal) + 1 over existing blocks for the entry
+    /// (0 if the entry has no blocks yet). Returns NotFound if the entry does
+    /// not exist; Validation on unknown block type via create_in_tx.
+    pub fn append_in_tx(
+        &self,
+        conn: &Connection,
+        entry_id: Ulid,
+        r#type: String,
+        text: String,
+        attrs: Option<serde_json::Value>,
+    ) -> Result<Block, CoreError> {
+        // Verify entry exists. The FK on blocks.entry_id would catch this
+        // anyway, but a NotFound error is more informative than the mapped
+        // constraint violation.
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries WHERE id = ?1",
+                params![entry_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(CoreError::Storage)?;
+        if exists == 0 {
+            return Err(CoreError::NotFound(entry_id));
+        }
+
+        // Compute next ordinal. MAX returns NULL when there are no rows; map
+        // that to 0.
+        let max_ordinal: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(ordinal) FROM blocks WHERE entry_id = ?1",
+                params![entry_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(CoreError::Storage)?;
+        let ordinal = max_ordinal.map(|m| (m + 1) as u32).unwrap_or(0);
+
+        self.create_in_tx(
+            conn,
+            CreateBlock {
+                entry_id,
+                ordinal,
+                r#type,
+                text,
+                attrs,
+            },
+        )
+    }
+
+    /// Update a block. Any of `type`/`text`/`attrs` may be `None` (= leave
+    /// unchanged). Re-chunks when `text` changes (DELETE existing chunks +
+    /// `chunking::chunk_text` on the new text + INSERT). The chunks_ad
+    /// trigger removes the prior chunk embeddings automatically. The
+    /// blocks_au trigger refreshes `fts_blocks`. Emits `block.updated`.
+    pub fn update(
+        &self,
+        id: Ulid,
+        r#type: Option<String>,
+        text: Option<String>,
+        attrs: Option<serde_json::Value>,
+    ) -> Result<Block, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN")?;
+        let result = self.update_in_tx(&conn, id, r#type, text, attrs);
+        match result {
+            Ok(block) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(block)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Execute update within an existing transaction. Caller controls
+    /// BEGIN/COMMIT. Does NOT lock self.conn. Does NOT call self methods
+    /// that lock conn.
+    pub fn update_in_tx(
+        &self,
+        conn: &Connection,
+        id: Ulid,
+        r#type: Option<String>,
+        text: Option<String>,
+        attrs: Option<serde_json::Value>,
+    ) -> Result<Block, CoreError> {
+        use chrono::Utc;
+
+        // Fetch existing snapshot (for diff + return value).
+        let existing = match conn.query_row(
+            "SELECT id, entry_id, ordinal, type, text, attrs, created_at, updated_at
+             FROM blocks WHERE id = ?1",
+            params![id.to_string()],
+            |row| row_to_block(row, 0),
+        ) {
+            Ok(b) => b,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(CoreError::NotFound(id)),
+            Err(e) => return Err(CoreError::Storage(e)),
+        };
+
+        let new_type = r#type.unwrap_or_else(|| existing.r#type.clone());
+        let new_text = text.unwrap_or_else(|| existing.text.clone());
+        let new_attrs = attrs.unwrap_or_else(|| existing.attrs.clone());
+        if !new_attrs.is_object() {
+            return Err(CoreError::Validation("attrs must be a JSON object".into()));
+        }
+        let now = Utc::now();
+
+        // UPDATE block (blocks_au trigger refreshes fts_blocks).
+        conn.execute(
+            "UPDATE blocks SET type = ?1, text = ?2, attrs = ?3, updated_at = ?4
+             WHERE id = ?5",
+            params![
+                &new_type,
+                &new_text,
+                new_attrs.to_string(),
+                now.to_rfc3339(),
+                id.to_string(),
+            ],
+        )?;
+
+        // Re-chunk only when text changed. The chunks_ad trigger cleans
+        // vec_chunk_embeddings for each deleted chunk row.
+        if new_text != existing.text {
+            conn.execute(
+                "DELETE FROM chunks WHERE block_id = ?1",
+                params![id.to_string()],
+            )?;
+            let chunk_texts = crate::chunking::chunk_text(&new_text, 1024);
+            let mut chunk_attrs = new_attrs.clone();
+            if let Some(obj) = chunk_attrs.as_object_mut() {
+                obj.insert(
+                    "parent_block_type".into(),
+                    serde_json::Value::String(new_type.clone()),
+                );
+            }
+            for (chunk_ordinal, chunk_text) in chunk_texts.into_iter().enumerate() {
+                let chunk_id = Ulid::new();
+                conn.execute(
+                    "INSERT INTO chunks (id, block_id, ordinal, text, attrs, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        chunk_id.to_string(),
+                        id.to_string(),
+                        chunk_ordinal as u32,
+                        &chunk_text,
+                        chunk_attrs.to_string(),
+                        now.to_rfc3339(),
+                        now.to_rfc3339(),
+                    ],
+                )
+                .map_err(crate::storage::map_constraint_violation)?;
+            }
+        }
+
+        let updated = Block {
+            id,
+            entry_id: existing.entry_id,
+            ordinal: existing.ordinal,
+            r#type: new_type,
+            text: new_text,
+            attrs: new_attrs,
+            created_at: existing.created_at,
+            updated_at: now,
+        };
+
+        // Emit block.updated event.
+        let event_id = Ulid::new();
+        let event_payload = serde_json::to_value(&updated).expect("block serializes");
+        conn.execute(
+            "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event_id.to_string(),
+                "block.updated",
+                "block",
+                id.to_string(),
+                event_payload.to_string(),
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(crate::storage::map_constraint_violation)?;
+
+        Ok(updated)
     }
 
     /// List all blocks for an entry, ordered by ordinal. Empty result if
@@ -577,6 +793,133 @@ mod tests {
         let svc = BlockService::for_test().unwrap();
         let fake_id = Ulid::new();
         let err = svc.delete(fake_id).unwrap_err();
+        assert!(matches!(err, CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn append_adds_block_at_end() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        // Seed one block at ordinal 0
+        svc.create(CreateBlock {
+            entry_id,
+            ordinal: 0,
+            r#type: "note".into(),
+            text: "first".into(),
+            attrs: None,
+        })
+        .unwrap();
+
+        let appended = svc
+            .append(entry_id, "claim".into(), "appended".into(), None)
+            .unwrap();
+        assert_eq!(appended.entry_id, entry_id);
+        assert_eq!(appended.ordinal, 1, "append should use max ordinal + 1");
+        assert_eq!(appended.r#type, "claim");
+
+        let list = svc.list(entry_id).unwrap();
+        assert_eq!(list.total, 2);
+        assert_eq!(list.items[1].id, appended.id);
+    }
+
+    #[test]
+    fn append_to_empty_entry_uses_ordinal_zero() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        let appended = svc
+            .append(entry_id, "note".into(), "first".into(), None)
+            .unwrap();
+        assert_eq!(appended.ordinal, 0);
+    }
+
+    #[test]
+    fn append_emits_block_created_event() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        let block = svc
+            .append(entry_id, "note".into(), "x".into(), None)
+            .unwrap();
+
+        let guard = svc.conn.lock().unwrap();
+        let event_type: String = guard
+            .query_row(
+                "SELECT type FROM events WHERE target_id = ?1 AND type = 'block.created'",
+                params![block.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_type, "block.created");
+    }
+
+    // ----- update tests (Plan 5 Task 3) -----
+
+    #[test]
+    fn update_changes_block_text() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        let block = svc
+            .append(entry_id, "note".into(), "original".into(), None)
+            .unwrap();
+
+        let updated = svc
+            .update(block.id, None, Some("new text".into()), None)
+            .unwrap();
+        assert_eq!(updated.text, "new text");
+        assert_eq!(updated.r#type, "note"); // unchanged
+    }
+
+    #[test]
+    fn update_re_chunks_when_text_changes() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        // Long text → multiple chunks
+        let long_text: String = "para.\n\n".repeat(200); // > 1024 chars
+        let block = svc
+            .append(entry_id, "note".into(), long_text, None)
+            .unwrap();
+
+        let chunks = crate::chunk_service::ChunkService::new(svc.conn.clone()).unwrap();
+        let before_count = chunks.list(block.id).unwrap().total;
+
+        // Update to short text
+        svc.update(block.id, None, Some("short".into()), None)
+            .unwrap();
+        let after_count = chunks.list(block.id).unwrap().total;
+        assert!(
+            after_count < before_count,
+            "re-chunking should reduce chunk count for shorter text"
+        );
+        assert_eq!(after_count, 1);
+    }
+
+    #[test]
+    fn update_emits_block_updated_event() {
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        let block = svc
+            .append(entry_id, "note".into(), "x".into(), None)
+            .unwrap();
+
+        svc.update(block.id, Some("claim".into()), None, None)
+            .unwrap();
+
+        let guard = svc.conn.lock().unwrap();
+        let event_type: String = guard
+            .query_row(
+                "SELECT type FROM events WHERE target_id = ?1 AND type = 'block.updated'",
+                params![block.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_type, "block.updated");
+    }
+
+    #[test]
+    fn update_returns_not_found_for_missing_block() {
+        let svc = BlockService::for_test().unwrap();
+        let err = svc
+            .update(Ulid::new(), None, Some("x".into()), None)
+            .unwrap_err();
         assert!(matches!(err, CoreError::NotFound(_)));
     }
 

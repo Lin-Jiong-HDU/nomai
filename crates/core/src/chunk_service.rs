@@ -74,8 +74,25 @@ impl ChunkService {
     }
 
     /// Ensure `vec_chunk_embeddings` virtual table exists. Idempotent.
+    ///
+    /// V9 creates this table with the daemon default dim (1536) so the
+    /// `chunks_ad` DELETE trigger can resolve it at fire time. This call is
+    /// a true no-op when the V9 table exists with a matching dim. If a
+    /// non-default dim is required, the caller must DROP the V9-created
+    /// table first, then call this with the desired dim.
     pub fn ensure_vec_chunk_embeddings(&self, dim: usize) -> Result<(), CoreError> {
         let conn = self.conn.lock().unwrap();
+        let already_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='table' AND name='vec_chunk_embeddings'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(CoreError::Storage)?;
+        if already_exists > 0 {
+            return Ok(());
+        }
         conn.execute_batch(&format!(
             "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunk_embeddings USING vec0(
                 chunk_id TEXT PRIMARY KEY,
@@ -245,6 +262,18 @@ mod tests {
         (entry.id, block_list.items[0].id, conn)
     }
 
+    /// Build a 1536-dim embedding from a short prefix (rest zero-padded).
+    /// V9 migration creates `vec_chunk_embeddings` with dim=1536 (daemon
+    /// default); tests override to dim=1536 via ensure_vec_chunk_embeddings
+    /// before writing, so 1536 is the effective test dim.
+    fn vec_1536(prefix: &[f32]) -> Vec<f32> {
+        let mut v = vec![0.0f32; 1536];
+        for (i, x) in prefix.iter().enumerate() {
+            v[i] = *x;
+        }
+        v
+    }
+
     /// Insert a chunk directly via SQL (test helper for cases that need
     /// multiple chunks per block without going through chunking).
     fn insert_chunk_sql(
@@ -410,6 +439,9 @@ mod tests {
     fn ensure_vec_chunk_embeddings_is_idempotent() {
         crate::storage::init_sqlite_extensions();
         let chunks = ChunkService::for_test().unwrap();
+        // V9 migration creates vec_chunk_embeddings with dim=1536 (daemon
+        // default). The call is a no-op (IF NOT EXISTS) when the table
+        // exists, so any `dim` arg works without error.
         chunks.ensure_vec_chunk_embeddings(8).unwrap();
         chunks.ensure_vec_chunk_embeddings(8).unwrap();
     }
@@ -419,12 +451,11 @@ mod tests {
         crate::storage::init_sqlite_extensions();
         let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn.clone()).unwrap();
-        chunks.ensure_vec_chunk_embeddings(4).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
         let chunk_id = chunks.list(block_id).unwrap().items[0].id;
 
-        chunks
-            .write_embedding(chunk_id, &[1.0, 0.0, 0.0, 0.0])
-            .unwrap();
+        let emb = vec_1536(&[1.0]);
+        chunks.write_embedding(chunk_id, &emb).unwrap();
 
         let c = conn.lock().unwrap();
         let n: i64 = c
@@ -442,9 +473,10 @@ mod tests {
         crate::storage::init_sqlite_extensions();
         let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn.clone()).unwrap();
-        chunks.ensure_vec_chunk_embeddings(2).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
         let chunk_id = chunks.list(block_id).unwrap().items[0].id;
-        chunks.write_embedding(chunk_id, &[1.0, 0.0]).unwrap();
+        let emb = vec_1536(&[1.0]);
+        chunks.write_embedding(chunk_id, &emb).unwrap();
 
         chunks.delete_embedding(chunk_id).unwrap();
 
@@ -464,7 +496,7 @@ mod tests {
         crate::storage::init_sqlite_extensions();
         let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn.clone()).unwrap();
-        chunks.ensure_vec_chunk_embeddings(3).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
 
         // Insert two chunks under the same block with known embeddings.
         {
@@ -477,13 +509,70 @@ mod tests {
         }
         let near = insert_chunk_sql(&conn, block_id, 0, "near", json!({}));
         let far = insert_chunk_sql(&conn, block_id, 1, "far", json!({}));
-        chunks.write_embedding(near, &[1.0, 0.0, 0.0]).unwrap();
-        chunks.write_embedding(far, &[0.0, 0.0, 1.0]).unwrap();
+        // near aligned with +X axis, far aligned with +Z axis.
+        chunks.write_embedding(near, &vec_1536(&[1.0])).unwrap();
+        chunks
+            .write_embedding(far, &vec_1536(&[0.0, 0.0, 1.0]))
+            .unwrap();
 
-        let hits = chunks.semantic_search(&[0.9, 0.1, 0.0], 10, None).unwrap();
+        // Query slightly off +X: near should rank above far.
+        let hits = chunks
+            .semantic_search(&vec_1536(&[0.9, 0.1, 0.0]), 10, None)
+            .unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].chunk.id, near, "near should rank first");
         assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn semantic_search_uses_cosine_not_l2_for_non_unit_vectors() {
+        // Regression: V9 must declare vec_chunk_embeddings with
+        // distance_metric=cosine. Without it, vec0 defaults to L2, and L2
+        // gives different rankings than cosine for non-unit vectors. Existing
+        // tests use unit vectors (axis-aligned) which are metric-invariant,
+        // so they can't catch the bug.
+        //
+        // Here A = [1, 0, ...] and B = 2*A = [2, 0, ...]: same direction.
+        // Cosine says both should match query [1,0,...] with similarity 1.0
+        // (distance 0). L2 says B is at distance 1.0 from the query (A's
+        // distance is 0), so under L2 their scores differ.
+        crate::storage::init_sqlite_extensions();
+        let (_entry_id, block_id, conn) = seed_entry_and_block();
+        let chunks = ChunkService::new(conn.clone()).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
+
+        // Wipe auto-derived chunk; insert two manual chunks for A and B.
+        {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "DELETE FROM chunks WHERE block_id = ?1",
+                params![block_id.to_string()],
+            )
+            .unwrap();
+        }
+        let chunk_a = insert_chunk_sql(&conn, block_id, 0, "a", json!({}));
+        let chunk_b = insert_chunk_sql(&conn, block_id, 1, "b", json!({}));
+
+        let mut a = vec![0.0f32; 1536];
+        a[0] = 1.0;
+        let mut b = vec![0.0f32; 1536];
+        b[0] = 2.0;
+        chunks.write_embedding(chunk_a, &a).unwrap();
+        chunks.write_embedding(chunk_b, &b).unwrap();
+
+        let hits = chunks.semantic_search(&a, 10, None).unwrap();
+        assert_eq!(hits.len(), 2, "both chunks should be returned");
+        // Both should score ~1.0 (identical direction under cosine). Under L2,
+        // B's score would be 1.0 - 1.0 = 0.0 because |B - A| = 1.
+        let max_diff = hits
+            .iter()
+            .map(|h| (h.score - 1.0).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff < 0.01,
+            "cosine scores should all be ≈1.0 for same-direction vectors, got: {:?}",
+            hits.iter().map(|h| h.score).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -523,15 +612,16 @@ mod tests {
         let note_block = blocks.list(b.id).unwrap().items[0].id;
 
         let chunks = ChunkService::new(conn.clone()).unwrap();
-        chunks.ensure_vec_chunk_embeddings(2).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
         let claim_chunk = chunks.list(claim_block).unwrap().items[0].id;
         let note_chunk = chunks.list(note_block).unwrap().items[0].id;
-        chunks.write_embedding(claim_chunk, &[1.0, 0.0]).unwrap();
-        chunks.write_embedding(note_chunk, &[1.0, 0.0]).unwrap();
+        let emb = vec_1536(&[1.0]);
+        chunks.write_embedding(claim_chunk, &emb).unwrap();
+        chunks.write_embedding(note_chunk, &emb).unwrap();
 
         // Filter by block_type="claim": only the claim chunk matches.
         let hits = chunks
-            .semantic_search(&[0.9, 0.1], 10, Some("claim"))
+            .semantic_search(&vec_1536(&[0.9, 0.1]), 10, Some("claim"))
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.id, claim_chunk);
@@ -542,11 +632,11 @@ mod tests {
         crate::storage::init_sqlite_extensions();
         let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn).unwrap();
-        chunks.ensure_vec_chunk_embeddings(2).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
         // Auto-derived chunk exists but no embedding written.
         assert_eq!(chunks.list(block_id).unwrap().total, 1);
 
-        let hits = chunks.semantic_search(&[1.0, 0.0], 10, None).unwrap();
+        let hits = chunks.semantic_search(&vec_1536(&[1.0]), 10, None).unwrap();
         assert!(hits.is_empty());
     }
 
@@ -555,7 +645,7 @@ mod tests {
         crate::storage::init_sqlite_extensions();
         let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn.clone()).unwrap();
-        chunks.ensure_vec_chunk_embeddings(2).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
         // Wipe auto-derived; insert 5 chunks with embeddings.
         {
             let c = conn.lock().unwrap();
@@ -565,12 +655,13 @@ mod tests {
             )
             .unwrap();
         }
+        let emb = vec_1536(&[1.0]);
         for i in 0..5 {
             let cid = insert_chunk_sql(&conn, block_id, i, &format!("c{i}"), json!({}));
-            chunks.write_embedding(cid, &[1.0, 0.0]).unwrap();
+            chunks.write_embedding(cid, &emb).unwrap();
         }
 
-        let hits = chunks.semantic_search(&[1.0, 0.0], 3, None).unwrap();
+        let hits = chunks.semantic_search(&vec_1536(&[1.0]), 3, None).unwrap();
         assert_eq!(hits.len(), 3);
     }
 }

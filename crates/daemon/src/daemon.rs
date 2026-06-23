@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 
 use nomai_core::{ChunkService, ContentStore, CoreError, EntryService, EventService, LinkService};
 use nomai_providers::{
@@ -89,6 +89,12 @@ impl Daemon {
             &config.llm.model,
         ));
 
+        // Spec §9.1: sync FS → index at startup. Best-effort; failures log
+        // warning to stderr and do not abort the boot (single-user tool; an
+        // empty/STALE index still lets the daemon serve RPCs, and a later
+        // `index.sync` or `index.rebuild` call can recover).
+        run_startup_sync(&entries);
+
         Ok(Self {
             entries,
             links,
@@ -129,6 +135,9 @@ impl Daemon {
             embedding_model.as_str(),
             100_000,
         ));
+        // Mirror Daemon::new: run startup FS→index sync so a test that
+        // pre-populates the content store sees the entries indexed.
+        run_startup_sync(&entries);
         Self {
             entries,
             links,
@@ -344,6 +353,48 @@ fn expand_knowledge_root(path: &std::path::Path) -> Result<std::path::PathBuf, C
     std::fs::create_dir_all(&expanded)
         .map_err(|e| CoreError::Config(format!("create knowledge_root dir: {e}")))?;
     Ok(expanded)
+}
+
+/// Spec §9.1: best-effort FS→index reconciliation at daemon startup. Logs
+/// counts to stderr when the sync made changes, and emits an `index.synced`
+/// event into the events log so `events.list` consumers can observe boot
+/// reconciliations. Failures are swallowed: a stale/empty index still lets
+/// the daemon serve RPCs, and a later `index.sync` / `index.rebuild` call
+/// can recover. Shared between `Daemon::new` (production) and `for_test`
+/// (tests) so both paths exercise the same boot contract.
+fn run_startup_sync(entries: &EntryService) {
+    let sync_result = entries.sync_from_fs().unwrap_or_else(|e| {
+        eprintln!("warn: startup index.sync failed: {e}");
+        nomai_core::SyncResult::default()
+    });
+    if sync_result.added > 0 || sync_result.updated > 0 || sync_result.removed > 0 {
+        eprintln!(
+            "info: index.synced: +{} ~{} -{} ({} unchanged)",
+            sync_result.added, sync_result.updated, sync_result.removed, sync_result.unchanged
+        );
+    }
+    // Emit `index.synced` event. Best-effort: a write failure (e.g. events
+    // table missing) only means we lose the audit row, not the sync itself.
+    // The events table is created by V6+ migrations which EntryService::new
+    // has already applied by this point. `target_id` is the all-zero ULID —
+    // EventService parses every events.target_id as a ULID, and system-level
+    // events have no natural target.
+    let conn = entries.conn_for_test();
+    if let Ok(guard) = conn.lock() {
+        let payload = serde_json::to_string(&sync_result).unwrap_or_default();
+        let _ = guard.execute(
+            "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                ulid::Ulid::new().to_string(),
+                "index.synced",
+                "system",
+                "00000000000000000000000000",
+                payload,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        );
+    }
 }
 
 #[cfg(test)]

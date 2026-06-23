@@ -9,10 +9,12 @@ use std::sync::Arc;
 use crate::rpc::RpcHandler;
 
 pub mod batch;
+pub mod block;
 pub mod cache;
 pub mod chunk;
 pub mod entry;
 pub mod events;
+pub mod index;
 pub mod link;
 pub mod mcp;
 pub mod provider;
@@ -54,6 +56,20 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     let h = chunk::Get;
     m.insert(h.method(), Arc::new(h));
     let h = chunk::List;
+    m.insert(h.method(), Arc::new(h));
+
+    // block.* (Plan 5: block-level RPCs on top of Plan 3 blocks storage.)
+    let h = block::Append;
+    m.insert(h.method(), Arc::new(h));
+    let h = block::Update;
+    m.insert(h.method(), Arc::new(h));
+    let h = block::Delete;
+    m.insert(h.method(), Arc::new(h));
+
+    // index.* (Plan 5: FS↔SQLite reconciliation.)
+    let h = index::Sync;
+    m.insert(h.method(), Arc::new(h));
+    let h = index::Rebuild;
     m.insert(h.method(), Arc::new(h));
 
     // events.*
@@ -105,7 +121,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    const DIM: usize = 8;
+    const DIM: usize = 1536;
 
     async fn setup_daemon(server: &MockServer) -> Daemon {
         let entries = Arc::new(EntryService::for_test().unwrap());
@@ -143,6 +159,17 @@ mod tests {
             method: method.into(),
             params: Some(params),
         }
+    }
+
+    /// Build a 1536-dim embedding (V9 daemon default) from a short prefix,
+    /// zero-padding the rest. Used by similarity tests that want unit vectors
+    /// along specific axes.
+    fn vec_1536(prefix: &[f32]) -> Vec<f32> {
+        let mut v = vec![0.0_f32; DIM];
+        for (i, x) in prefix.iter().enumerate() {
+            v[i] = *x;
+        }
+        v
     }
 
     #[tokio::test]
@@ -254,17 +281,20 @@ mod tests {
         let a_chunk_id = chunks.list(a_block_id).unwrap().items[0].id;
         let b_chunk_id = chunks.list(b_block_id).unwrap().items[0].id;
         chunks
-            .write_embedding(a_chunk_id, &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            .write_embedding(a_chunk_id, &vec_1536(&[1.0]))
             .unwrap();
         chunks
-            .write_embedding(b_chunk_id, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+            .write_embedding(
+                b_chunk_id,
+                &vec_1536(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
+            )
             .unwrap();
 
         // search.semantic will issue an embedding request for the query.
         Mock::given(method("POST"))
             .and(path("/embeddings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{"index": 0, "embedding": vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}]
+                "data": [{"index": 0, "embedding": vec_1536(&[1.0])}]
             })))
             .mount(&server)
             .await;
@@ -677,6 +707,8 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         // Create 3 entries → 3 entry.created + 3 block.created = 6 events.
+        // Plan 5 Task 8: daemon startup also emits one `index.synced` event,
+        // bringing the total to 7 before any entry.create call.
         daemon
             .dispatch(req(
                 "entry.create",
@@ -700,14 +732,14 @@ mod tests {
         let list_resp = daemon.dispatch(req("events.list", json!({}))).await;
         let result = list_resp.result.unwrap();
         let items = result["items"].as_array().unwrap();
-        assert_eq!(items.len(), 6);
-        let last_event_id = items[5]["id"].as_str().unwrap().to_string();
+        assert_eq!(items.len(), 7);
+        let last_event_id = items[6]["id"].as_str().unwrap().to_string();
 
         // Purge events with id < last_event_id (exclusive).
         let purge_resp = daemon
             .dispatch(req("events.purge", json!({"before": last_event_id})))
             .await;
-        assert_eq!(purge_resp.result.unwrap()["deleted"], 5);
+        assert_eq!(purge_resp.result.unwrap()["deleted"], 6);
 
         // Verify only 1 event remains.
         let list_resp2 = daemon.dispatch(req("events.list", json!({}))).await;
@@ -722,8 +754,9 @@ mod tests {
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
 
-        // Create 3 entries → 6 events total (each entry.create emits
-        // entry.created + block.created).
+        // Create 3 entries → 6 entry events total (each entry.create emits
+        // entry.created + block.created). Plan 5 Task 8: daemon startup also
+        // emits one `index.synced` event, so the grand total is 7.
         for i in 0..3 {
             daemon
                 .dispatch(req(
@@ -742,12 +775,12 @@ mod tests {
         assert_eq!(p1_result["has_more"], true);
         let last_id = p1_result["items"][3]["id"].as_str().unwrap().to_string();
 
-        // Page 2: since = last_id from page 1
+        // Page 2: since = last_id from page 1 → 3 remaining events.
         let p2 = daemon
             .dispatch(req("events.list", json!({"limit": 4, "since": last_id})))
             .await;
         let p2_result = p2.result.unwrap();
-        assert_eq!(p2_result["items"].as_array().unwrap().len(), 2);
+        assert_eq!(p2_result["items"].as_array().unwrap().len(), 3);
         assert_eq!(p2_result["has_more"], false);
     }
 
@@ -930,7 +963,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_delete_cascades_to_chunks_and_cleanups_embeddings() {
+    async fn entry_delete_cleans_chunk_embeddings_via_trigger() {
+        // Plan 5 Task 4: the V9 chunks_ad trigger now cleans
+        // vec_chunk_embeddings when chunks are CASCADE-deleted; the entry.delete
+        // handler no longer walks chunks and calls delete_embedding.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -957,23 +993,46 @@ mod tests {
             }
         }
 
-        // Precondition: chunk search finds 2.
+        // Precondition: chunk search finds 2; vec_chunk_embeddings has 2 rows.
         let pre = daemon
             .dispatch(req("search.semantic", json!({"query":"x","limit":10})))
             .await;
         assert_eq!(pre.result.unwrap()["items"].as_array().unwrap().len(), 2);
+        {
+            let conn = daemon.entries.conn_for_test();
+            let n: i64 = conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM vec_chunk_embeddings", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(n, 2);
+        }
 
-        // Delete the entry.
+        // Delete the entry — CASCADE removes blocks → chunks; chunks_ad trigger
+        // cleans vec_chunk_embeddings.
         daemon
             .dispatch(req("entry.delete", json!({"id": entry_id})))
             .await;
 
-        // After: chunk search returns 0 (CASCADE removed chunks; entry.delete
-        // handler cleaned up vec_chunk_embeddings rows).
+        // After: chunk search returns 0 because the trigger cleaned up
+        // vec_chunk_embeddings (no handler-side walk).
         let post = daemon
             .dispatch(req("search.semantic", json!({"query":"x","limit":10})))
             .await;
         assert_eq!(post.result.unwrap()["items"].as_array().unwrap().len(), 0);
+        {
+            let conn = daemon.entries.conn_for_test();
+            let n: i64 = conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM vec_chunk_embeddings", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(n, 0, "chunks_ad trigger should have cleaned embeddings");
+        }
 
         // entry.list should not return the deleted entry.
         let list = daemon
@@ -1060,9 +1119,9 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 21 built-in non-MCP handlers (entry:5, link:5, chunk:2, events:3,
-        // search:2, provider:1, cache:2, batch:1).
-        assert_eq!(tools.len(), 21);
+        // 26 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
+        // events:3, search:2, provider:1, cache:2, batch:1, index:2).
+        assert_eq!(tools.len(), 26);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1078,6 +1137,8 @@ mod tests {
         assert!(names.contains(&"chunk.get"));
         assert!(names.contains(&"search.semantic"));
         assert!(names.contains(&"provider.list"));
+        assert!(names.contains(&"index.sync"));
+        assert!(names.contains(&"index.rebuild"));
         // MCP meta-methods are not callable tools.
         assert!(!names.contains(&"initialize"));
         assert!(!names.contains(&"tools/list"));
@@ -1190,7 +1251,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 22); // 21 built-in + custom.echo
+        assert_eq!(tools.len(), 27); // 26 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
@@ -1621,5 +1682,697 @@ mod tests {
 
         let stats = daemon.dispatch(req("cache.stats", json!({}))).await;
         assert_eq!(stats.result.unwrap()["embeddings"]["rows"], 1);
+    }
+
+    // ----- block.append e2e test (Plan 5 Task 2) -----
+
+    #[tokio::test]
+    async fn block_append_adds_block_and_rerenders_nomai() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create entry with one initial block at ordinal 0.
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"T","blocks":[{"type":"note","text":"first"}]}),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+        let entry_json = create_resp.result.unwrap();
+        let entry_id = entry_json["id"].as_str().unwrap().to_string();
+        let entry_ulid: ulid::Ulid = entry_id.parse().unwrap();
+
+        // Append a second block of a different type.
+        let append_resp = daemon
+            .dispatch(req(
+                "block.append",
+                json!({
+                    "entry_id": entry_id,
+                    "type": "question",
+                    "text": "Why?",
+                    "attrs": {"priority": "high"},
+                }),
+            ))
+            .await;
+        assert!(append_resp.error.is_none(), "{:?}", append_resp.error);
+        let appended = append_resp.result.unwrap();
+        assert_eq!(appended["entry_id"], entry_id);
+        assert_eq!(appended["ordinal"], 1, "append should pick max ordinal + 1");
+        assert_eq!(appended["type"], "question");
+        assert_eq!(appended["text"], "Why?");
+        assert_eq!(appended["attrs"]["priority"], "high");
+
+        // entry.get reflects 2 blocks.
+        let get_resp = daemon
+            .dispatch(req("entry.get", json!({"id": entry_id})))
+            .await;
+        let blocks = get_resp.result.unwrap()["blocks"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[1]["type"], "question");
+
+        // The .nomai file on disk was rewritten and round-trips.
+        let doc = daemon
+            .entries
+            .content_store()
+            .read_entry(entry_ulid)
+            .expect("rerendered .nomai must be readable");
+        assert_eq!(doc.title, "T");
+        assert_eq!(doc.blocks.len(), 2);
+        assert_eq!(doc.blocks[1].r#type.as_str(), "question");
+    }
+
+    #[tokio::test]
+    async fn block_append_updates_fs_mtime_so_sync_skips_reindex() {
+        // Plan 5 final review (I1): rerender_entry_nomai must refresh
+        // entries.fs_mtime so the next sync_from_fs treats the entry as
+        // unchanged. Without the refresh, sync sees a stale mtime and
+        // triggers a full reindex on every boot.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create entry with one block.
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"T","blocks":[{"type":"note","text":"first"}]}),
+            ))
+            .await;
+        let entry_id = create_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let entry_ulid: ulid::Ulid = entry_id.parse().unwrap();
+
+        // Capture fs_mtime right after create.
+        let original_mtime: Option<String> = {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .query_row(
+                    "SELECT fs_mtime FROM entries WHERE id = ?1",
+                    rusqlite::params![entry_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        // entry.create writes the .nomai file via EntryService::create, which
+        // sets fs_mtime. Sanity check it's present.
+        assert!(original_mtime.is_some(), "create should set fs_mtime");
+
+        // Sleep so the file mtime can differ (filesystem mtime resolution).
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Append a block — this rewrites the .nomai file via rerender.
+        let append_resp = daemon
+            .dispatch(req(
+                "block.append",
+                json!({"entry_id": entry_id, "type": "note", "text": "second"}),
+            ))
+            .await;
+        assert!(append_resp.error.is_none(), "{:?}", append_resp.error);
+
+        // fs_mtime should have been refreshed to the new file's mtime.
+        let new_mtime: Option<String> = {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .query_row(
+                    "SELECT fs_mtime FROM entries WHERE id = ?1",
+                    rusqlite::params![entry_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert!(
+            new_mtime.is_some(),
+            "fs_mtime should remain set after append"
+        );
+        assert_ne!(
+            original_mtime, new_mtime,
+            "fs_mtime should refresh after block.append rewrites the .nomai file"
+        );
+
+        // The on-disk mtime must match what we stored — that's the whole
+        // point of the refresh.
+        let on_disk = daemon
+            .entries
+            .content_store()
+            .entry_mtime(entry_ulid)
+            .unwrap()
+            .to_rfc3339();
+        assert_eq!(
+            new_mtime.unwrap(),
+            on_disk,
+            "stored fs_mtime must match on-disk mtime after rerender"
+        );
+
+        // sync_from_fs should treat this entry as unchanged (no reindex).
+        let result = daemon.entries.sync_from_fs().unwrap();
+        assert_eq!(
+            result.updated, 0,
+            "sync should not reindex; fs_mtime is fresh"
+        );
+        assert_eq!(
+            result.unchanged, 1,
+            "sync should report the entry as unchanged"
+        );
+        assert_eq!(result.added, 0);
+        assert_eq!(result.removed, 0);
+    }
+
+    #[tokio::test]
+    async fn block_append_to_unknown_entry_returns_not_found() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req(
+                "block.append",
+                json!({"entry_id": phantom, "type": "note", "text": "x"}),
+            ))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1001); // NotFound
+    }
+
+    // ----- block.update e2e tests (Plan 5 Task 3) -----
+
+    #[tokio::test]
+    async fn block_update_changes_text_and_rerenders_nomai() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create entry with a single block.
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"T","blocks":[{"type":"note","text":"original"}]}),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+        let entry_json = create_resp.result.unwrap();
+        let entry_id = entry_json["id"].as_str().unwrap().to_string();
+        let entry_ulid: ulid::Ulid = entry_id.parse().unwrap();
+        let block_id = entry_json["blocks"][0]["id"].as_str().unwrap().to_string();
+
+        // Update the block: new text + type, leaving attrs untouched.
+        let update_resp = daemon
+            .dispatch(req(
+                "block.update",
+                json!({
+                    "id": block_id,
+                    "type": "claim",
+                    "text": "rewritten",
+                }),
+            ))
+            .await;
+        assert!(update_resp.error.is_none(), "{:?}", update_resp.error);
+        let updated = update_resp.result.unwrap();
+        assert_eq!(updated["text"], "rewritten");
+        assert_eq!(updated["type"], "claim");
+
+        // entry.get reflects the mutation.
+        let get_resp = daemon
+            .dispatch(req("entry.get", json!({"id": entry_id})))
+            .await;
+        let blocks = get_resp.result.unwrap()["blocks"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "claim");
+        assert_eq!(blocks[0]["text"], "rewritten");
+
+        // The .nomai file on disk was rewritten and round-trips.
+        let doc = daemon
+            .entries
+            .content_store()
+            .read_entry(entry_ulid)
+            .expect("rerendered .nomai must be readable");
+        assert_eq!(doc.blocks.len(), 1);
+        assert_eq!(doc.blocks[0].r#type.as_str(), "claim");
+        assert_eq!(doc.blocks[0].text.trim(), "rewritten");
+    }
+
+    #[tokio::test]
+    async fn block_update_re_chunks_on_text_change() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create entry whose block has text spanning multiple chunks.
+        let long_text = "para.\n\n".repeat(200);
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"T","blocks":[{"type":"note","text":long_text}]}),
+            ))
+            .await;
+        let entry_json = create_resp.result.unwrap();
+        let block_id: ulid::Ulid = entry_json["blocks"][0]["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let before = daemon.chunks.list(block_id).unwrap().total;
+        assert!(before > 1);
+
+        // Shrink the text → re-chunk should produce exactly one chunk.
+        daemon
+            .dispatch(req(
+                "block.update",
+                json!({"id": block_id.to_string(), "text": "short"}),
+            ))
+            .await;
+        let after = daemon.chunks.list(block_id).unwrap().total;
+        assert_eq!(after, 1);
+    }
+
+    #[tokio::test]
+    async fn block_update_to_unknown_block_returns_not_found() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req("block.update", json!({"id": phantom, "text": "x"})))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1001); // NotFound
+    }
+
+    // ----- block.delete e2e tests (Plan 5 Task 4) -----
+
+    #[tokio::test]
+    async fn block_delete_removes_block_and_rerenders_nomai() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create entry with two blocks.
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"T","blocks":[
+                    {"type":"note","text":"first"},
+                    {"type":"claim","text":"second"}
+                ]}),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+        let entry_json = create_resp.result.unwrap();
+        let entry_id = entry_json["id"].as_str().unwrap().to_string();
+        let entry_ulid: ulid::Ulid = entry_id.parse().unwrap();
+        let block0_id = entry_json["blocks"][0]["id"].as_str().unwrap().to_string();
+        let block1_id = entry_json["blocks"][1]["id"].as_str().unwrap().to_string();
+
+        // Delete the first block.
+        let del_resp = daemon
+            .dispatch(req("block.delete", json!({"id": block0_id})))
+            .await;
+        assert!(del_resp.error.is_none(), "{:?}", del_resp.error);
+        let del_result = del_resp.result.unwrap();
+        assert_eq!(del_result["deleted"], true);
+        assert_eq!(del_result["id"], block0_id);
+
+        // entry.get now shows only the surviving block.
+        let get_resp = daemon
+            .dispatch(req("entry.get", json!({"id": entry_id})))
+            .await;
+        let blocks = get_resp.result.unwrap()["blocks"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["id"], block1_id);
+        assert_eq!(blocks[0]["type"], "claim");
+
+        // The .nomai file on disk was rewritten and round-trips.
+        let doc = daemon
+            .entries
+            .content_store()
+            .read_entry(entry_ulid)
+            .expect("rerendered .nomai must be readable");
+        assert_eq!(doc.blocks.len(), 1);
+        assert_eq!(doc.blocks[0].r#type.as_str(), "claim");
+    }
+
+    #[tokio::test]
+    async fn block_delete_cleans_chunk_embeddings_via_trigger() {
+        // Plan 5 Task 4: the V9 chunks_ad trigger must clean
+        // vec_chunk_embeddings when block.delete CASCADE-removes chunks.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"T","blocks":[{"type":"note","text":"body"}]}),
+            ))
+            .await;
+        let entry_json = create_resp.result.unwrap();
+        let block_id: ulid::Ulid = entry_json["blocks"][0]["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        // Write a chunk embedding directly.
+        let chunks = daemon.chunks.clone();
+        let chunk_id = chunks.list(block_id).unwrap().items[0].id;
+        chunks.write_embedding(chunk_id, &[1.0_f32; DIM]).unwrap();
+
+        // Precondition: the vec_chunk_embeddings row exists.
+        {
+            let conn = daemon.entries.conn_for_test();
+            let n: i64 = conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM vec_chunk_embeddings", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(n, 1);
+        }
+
+        // Delete the block — CASCADE removes chunks; chunks_ad trigger cleans
+        // vec_chunk_embeddings.
+        daemon
+            .dispatch(req("block.delete", json!({"id": block_id.to_string()})))
+            .await;
+
+        // The trigger should have removed the embedding row.
+        let n: i64 = {
+            let conn = daemon.entries.conn_for_test();
+            conn.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM vec_chunk_embeddings", [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(n, 0, "chunks_ad trigger should clean vec_chunk_embeddings");
+    }
+
+    #[tokio::test]
+    async fn block_delete_to_unknown_block_returns_not_found() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req("block.delete", json!({"id": phantom})))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1001); // NotFound
+    }
+
+    // ----- index.sync e2e test (Plan 5 Task 6) -----
+
+    #[tokio::test]
+    async fn index_sync_picks_up_external_file_and_reports_counts() {
+        // Spec §7.1: FS is source-of-truth; index.sync reconciles. Drop a
+        // .nomai file directly into the content store, then call index.sync
+        // and verify the new entry appears + counts are reported.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create one entry via the service so the index starts non-empty.
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"Indexed","blocks":[{"type":"note","text":"x"}]}),
+            ))
+            .await;
+        let indexed_id = create_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .parse::<ulid::Ulid>()
+            .unwrap();
+
+        // Drop a second .nomai file directly via the content store (no INSERT).
+        let external_id = ulid::Ulid::new();
+        let now: chrono::DateTime<chrono::Utc> = "2026-06-23T10:00:00Z".parse().unwrap();
+        let doc = nomai_core::NomaiDoc {
+            format_version: 1,
+            id: external_id,
+            title: "External".into(),
+            tags: vec![],
+            attrs: Default::default(),
+            source: None,
+            created_at: now,
+            updated_at: now,
+            blocks: vec![nomai_core::nomai_format::Block {
+                r#type: nomai_core::nomai_format::BlockType::Note,
+                text: "from fs\n".into(),
+                attrs: Default::default(),
+            }],
+        };
+        daemon
+            .entries
+            .content_store()
+            .write_entry(external_id, &doc)
+            .unwrap();
+
+        // Sync.
+        let sync_resp = daemon.dispatch(req("index.sync", json!({}))).await;
+        assert!(sync_resp.error.is_none(), "{:?}", sync_resp.error);
+        let result = sync_resp.result.unwrap();
+        assert_eq!(result["added"], 1);
+        assert_eq!(result["unchanged"], 1);
+        assert_eq!(result["updated"], 0);
+        assert_eq!(result["removed"], 0);
+
+        // The external entry is now retrievable via entry.get.
+        let get_resp = daemon
+            .dispatch(req("entry.get", json!({"id": external_id.to_string()})))
+            .await;
+        assert!(get_resp.error.is_none(), "{:?}", get_resp.error);
+        assert_eq!(get_resp.result.unwrap()["title"], "External");
+
+        // The originally-indexed entry is untouched (still present, same id).
+        let _ = indexed_id;
+    }
+
+    // ----- index.rebuild e2e test (Plan 5 Task 7) -----
+
+    #[tokio::test]
+    async fn index_rebuild_restores_blocks_and_preserves_events() {
+        // Spec §7.1: rebuild wipes derived tables + reindexes every FS
+        // entry. events (audit history) and emb_cache (deterministic) are
+        // untouched.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create two entries via the service so the index + FS are seeded.
+        let c1 = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"first","blocks":[{"type":"note","text":"a"}]}),
+            ))
+            .await;
+        let c2 = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"second","blocks":[{"type":"note","text":"b"}]}),
+            ))
+            .await;
+        let id1 = c1.result.unwrap()["id"].as_str().unwrap().to_string();
+        let id2 = c2.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        // Corrupt the index: drop id1's blocks row directly. (The chunks_ad
+        // trigger also removes chunk embeddings when we drop chunks; that's
+        // fine for the test, we only care that rebuild re-creates them.)
+        {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .execute(
+                    "DELETE FROM blocks WHERE entry_id = ?1",
+                    rusqlite::params![id1],
+                )
+                .unwrap();
+        }
+        // Precondition: id1 has no blocks.
+        let pre = daemon
+            .dispatch(req("entry.get", json!({"id": id1.clone()})))
+            .await;
+        assert!(pre.result.unwrap()["blocks"].as_array().unwrap().is_empty());
+
+        // Snapshot event count before rebuild (2 entry.created + 2 block.created
+        // = 4 events). These should survive the rebuild (reindex may append
+        // new block.created events during re-population, but must not wipe
+        // pre-existing ones).
+        let events_before: i64 = {
+            let conn = daemon.entries.conn_for_test();
+            conn.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap()
+        };
+
+        // Rebuild.
+        let rebuild_resp = daemon.dispatch(req("index.rebuild", json!({}))).await;
+        assert!(rebuild_resp.error.is_none(), "{:?}", rebuild_resp.error);
+        let result = rebuild_resp.result.unwrap();
+        assert_eq!(result["reindexed"], 2);
+        assert!(result["errors"].as_array().unwrap().is_empty());
+
+        // id1's blocks are restored from the .nomai file.
+        let post = daemon
+            .dispatch(req("entry.get", json!({"id": id1.clone()})))
+            .await;
+        let blocks = post.result.unwrap()["blocks"].as_array().unwrap().clone();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["text"], "a");
+
+        // id2 also re-indexed.
+        let post2 = daemon
+            .dispatch(req("entry.get", json!({"id": id2.clone()})))
+            .await;
+        assert_eq!(post2.result.unwrap()["blocks"][0]["text"], "b");
+
+        // events table not wiped — reindex may append new block.created
+        // events, but pre-existing events (the original entry.created +
+        // block.created) must still be present.
+        let events_after: i64 = {
+            let conn = daemon.entries.conn_for_test();
+            conn.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert!(
+            events_after >= events_before,
+            "events table wiped by rebuild: before={events_before}, after={events_after}"
+        );
+    }
+
+    // ----- daemon startup scan e2e test (Plan 5 Task 8) -----
+
+    #[tokio::test]
+    async fn daemon_startup_syncs_pre_populated_fs_to_index() {
+        // Spec §9.1: daemon startup runs `EntryService::sync_from_fs` once
+        // before serving RPCs. Pre-populate the FS with a .nomai file (via
+        // ContentStore directly, bypassing EntryService so the index starts
+        // empty), then construct a daemon and verify the entry is indexed.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+
+        // Build a content store in a temp dir, then construct EntryService
+        // against it (instead of for_test, which makes its own anonymous dir).
+        let tmp = tempfile::tempdir().unwrap();
+        let content_store = Arc::new(nomai_core::ContentStore::new(tmp.path().to_path_buf()));
+        nomai_core::storage::init_sqlite_extensions();
+        let conn = Arc::new(std::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        ));
+        let entries = Arc::new(EntryService::new(conn, content_store.clone()).unwrap());
+
+        // Drop a .nomai file directly via the content store (no INSERT, no
+        // EntryService::create) so the index is empty but the FS has one entry.
+        let external_id = ulid::Ulid::new();
+        let now: chrono::DateTime<chrono::Utc> = "2026-06-23T10:00:00Z".parse().unwrap();
+        let doc = nomai_core::NomaiDoc {
+            format_version: 1,
+            id: external_id,
+            title: "Pre-existing".into(),
+            tags: vec![],
+            attrs: Default::default(),
+            source: None,
+            created_at: now,
+            updated_at: now,
+            blocks: vec![nomai_core::nomai_format::Block {
+                r#type: nomai_core::nomai_format::BlockType::Note,
+                text: "dropped before boot\n".into(),
+                attrs: Default::default(),
+            }],
+        };
+        content_store.write_entry(external_id, &doc).unwrap();
+
+        // Precondition: index has no rows yet.
+        {
+            let conn = entries.conn_for_test();
+            let n: i64 = conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(n, 0);
+        }
+
+        // Construct the daemon. Daemon::for_test runs run_startup_sync at
+        // the end of construction, which must pick up the external file.
+        let embedder: Arc<dyn nomai_providers::EmbeddingProvider> =
+            Arc::new(nomai_providers::OpenAiCompatibleEmbed::new(
+                server.uri(),
+                "test-key",
+                "test-model",
+                DIM,
+            ));
+        let llm: Arc<dyn nomai_providers::LlmProvider> = Arc::new(
+            nomai_providers::OpenAiCompatibleLlm::new(server.uri(), "test-key", "test-model"),
+        );
+        let daemon = Daemon::for_test(
+            entries,
+            embedder,
+            llm,
+            "test-model".into(),
+            "test-model".into(),
+            DIM,
+        );
+
+        // The external entry is now retrievable via entry.get without any
+        // explicit index.sync call — startup scan indexed it.
+        let get_resp = daemon
+            .dispatch(req("entry.get", json!({"id": external_id.to_string()})))
+            .await;
+        assert!(get_resp.error.is_none(), "{:?}", get_resp.error);
+        let result = get_resp.result.unwrap();
+        assert_eq!(result["title"], "Pre-existing");
+        assert_eq!(result["blocks"][0]["text"], "dropped before boot");
+
+        // The startup scan emitted an `index.synced` event into the audit log.
+        let events: Vec<Value> = {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            let mut stmt = guard
+                .prepare("SELECT type, payload FROM events ORDER BY id")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    let t: String = row.get(0)?;
+                    let p: String = row.get(1)?;
+                    Ok(json!({"type": t, "payload": p}))
+                })
+                .unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        let synced: Vec<&Value> = events
+            .iter()
+            .filter(|e| e["type"] == "index.synced")
+            .collect();
+        assert_eq!(
+            synced.len(),
+            1,
+            "exactly one index.synced event: {events:?}"
+        );
+        let payload: Value = serde_json::from_str(synced[0]["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["added"], 1);
+        assert_eq!(payload["updated"], 0);
+        assert_eq!(payload["removed"], 0);
+        assert_eq!(payload["unchanged"], 0);
     }
 }

@@ -48,6 +48,33 @@ pub mod chunk {
     pub const LIST: &str = "chunk.list";
 }
 
+pub mod block {
+    /// Plan 5: append a block to an entry. Computes ordinal = max(existing)+1
+    /// and re-renders the entry's `.nomai` file.
+    pub const APPEND: &str = "block.append";
+    /// Plan 5: update a block's type/text/attrs. Re-chunks when text changes
+    /// (chunks_ad trigger cleans vec_chunk_embeddings) and re-renders the
+    /// entry's `.nomai` file.
+    pub const UPDATE: &str = "block.update";
+    /// Plan 5: delete a block. The chunks_ad trigger cleans vec_chunk_embeddings
+    /// and re-renders the entry's `.nomai` file.
+    pub const DELETE: &str = "block.delete";
+}
+
+pub mod index {
+    /// Plan 5: reconcile the SQLite index against the filesystem. Adds
+    /// new entries discovered on disk, re-indexes those whose `.nomai`
+    /// mtime changed, and removes index rows whose `.nomai` is gone.
+    /// Returns `{ added, updated, removed, unchanged }` counts.
+    pub const SYNC: &str = "index.sync";
+    /// Plan 5: wholesale rebuild. DELETEs every derived table (chunks,
+    /// blocks, links, entries, fts_blocks, vec_chunk_embeddings) then
+    /// re-indexes every FS entry. Does NOT touch events (daemon history)
+    /// or emb_cache (deterministic, reusable). Returns
+    /// `{ reindexed, errors }` where `errors` collects per-entry failures.
+    pub const REBUILD: &str = "index.rebuild";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +123,18 @@ mod tests {
         assert_eq!(chunk::GET, "chunk.get");
         assert_eq!(chunk::DELETE, "chunk.delete");
         assert_eq!(chunk::LIST, "chunk.list");
+    }
+
+    #[test]
+    fn block_namespace_methods() {
+        assert_eq!(block::APPEND, "block.append");
+        assert_eq!(block::UPDATE, "block.update");
+        assert_eq!(block::DELETE, "block.delete");
+    }
+
+    #[test]
+    fn index_namespace_methods() {
+        assert_eq!(index::SYNC, "index.sync");
+        assert_eq!(index::REBUILD, "index.rebuild");
     }
 }
