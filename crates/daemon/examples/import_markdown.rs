@@ -17,9 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_string_lossy()
         .to_string();
 
-    // Simple chunking: split by double-newline (paragraphs).
-    // Plan 3: entries are blocks-based. Each paragraph becomes one block in
-    // a single entry.create — no separate chunk.create ops needed.
+    // Split into paragraphs; each becomes one note block in a single entry.create.
     let blocks: Vec<serde_json::Value> = content
         .split("\n\n")
         .filter(|p| !p.trim().is_empty())
