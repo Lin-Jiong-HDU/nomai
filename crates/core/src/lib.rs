@@ -34,8 +34,8 @@ pub use nomai_format::{
     BlockType, NomaiDoc, ParseError, parse as parse_nomai, render as render_nomai,
 };
 pub use service::{
-    CreateEntry, EntryListQuery, EntryListResult, EntryService, FulltextSearchResult, SyncResult,
-    UpdateEntry,
+    CreateEntry, EntryListQuery, EntryListResult, EntryService, FulltextSearchResult,
+    RebuildResult, SyncResult, UpdateEntry,
 };
 
 #[cfg(test)]

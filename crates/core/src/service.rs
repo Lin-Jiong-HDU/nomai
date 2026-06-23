@@ -25,6 +25,21 @@ pub struct SyncResult {
     pub unchanged: u64,
 }
 
+/// Result of `EntryService::rebuild_index`: a wholesale wipe + re-populate
+/// of the derived tables (chunks/blocks/links/entries/fts_blocks/
+/// vec_chunk_embeddings). Plan 5 §7.1: used to recover from index
+/// corruption. `reindexed` counts entries successfully re-read from the FS;
+/// `errors` collects per-entry failure messages so callers can see which
+/// `.nomai` files failed to parse without aborting the whole rebuild.
+#[derive(Debug, Default, Serialize)]
+pub struct RebuildResult {
+    /// FS entries that were successfully re-indexed.
+    pub reindexed: u64,
+    /// Per-entry error messages (e.g. malformed `.nomai` files). The
+    /// rebuild skips failures and continues to the next entry.
+    pub errors: Vec<String>,
+}
+
 pub struct EntryService {
     conn: Arc<Mutex<Connection>>,
     content_store: Arc<crate::content_store::ContentStore>,
@@ -683,6 +698,64 @@ impl EntryService {
             removed,
             unchanged,
         })
+    }
+
+    /// Wholesale rebuild of the derived index from the filesystem. Plan 5
+    /// §7.1: nuclear option for index corruption. DELETEs every derived
+    /// table (chunks → blocks → entries → links; fts_blocks via trigger;
+    /// vec_chunk_embeddings via trigger), then re-indexes every FS entry
+    /// via `reindex_one`.
+    ///
+    /// What survives the wipe:
+    /// - `events` — daemon audit history is never deleted. New
+    ///   `block.created` events are appended during the reindex phase
+    ///   (one per re-created block); pre-existing events stay put.
+    /// - `emb_cache` — keyed by content hash, deterministic; safe to reuse.
+    ///
+    /// Atomicity: the wipe is one transaction; each `reindex_one` commits
+    /// independently. A failure mid-reindex surfaces in `errors` but does
+    /// not roll back prior reindexes (best-effort, same as `sync_from_fs`).
+    pub fn rebuild_index(&self) -> Result<RebuildResult, CoreError> {
+        // Phase 1: wipe derived tables. Order matters because of trigger
+        // chains — chunks first so the chunks_ad trigger cleans embeddings
+        // while the rows still exist; then blocks (blocks_ad cleans
+        // fts_blocks); then entries + links. A final sweep cleans any
+        // orphaned fts_blocks / vec_chunk_embeddings rows left by edge
+        // cases (legacy data, dropped triggers mid-migration, etc.).
+        // events + emb_cache are intentionally untouched.
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute_batch("BEGIN")?;
+            let result = conn.execute_batch(
+                "DELETE FROM chunks;\
+                 DELETE FROM blocks;\
+                 DELETE FROM links;\
+                 DELETE FROM entries;\
+                 DELETE FROM fts_blocks;\
+                 DELETE FROM vec_chunk_embeddings;",
+            );
+            match result {
+                Ok(()) => conn.execute_batch("COMMIT")?,
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(CoreError::Storage(e));
+                }
+            }
+        }
+
+        // Phase 2: re-index every FS entry. Each reindex_one takes the
+        // conn lock independently; we release between iterations so a
+        // slow / large FS walk doesn't hold the lock for the whole pass.
+        let fs_ids = self.content_store.scan_entry_ids();
+        let mut reindexed = 0u64;
+        let mut errors = Vec::new();
+        for id in fs_ids {
+            match self.reindex_one(id) {
+                Ok(()) => reindexed += 1,
+                Err(e) => errors.push(format!("entry {id}: {e}")),
+            }
+        }
+        Ok(RebuildResult { reindexed, errors })
     }
 
     pub fn list(&self, query: EntryListQuery) -> Result<EntryListResult, CoreError> {
@@ -1758,5 +1831,131 @@ mod tests {
         let fetched = svc.get(entry.id).unwrap();
         assert_eq!(fetched.title, "Updated");
         assert_eq!(fetched.blocks[0].text, "new");
+    }
+
+    // ----- rebuild_index tests (Plan 5 Task 7) -----
+
+    #[test]
+    fn rebuild_index_clears_and_repopulates() {
+        let svc = EntryService::for_test().unwrap();
+        let entry1 = seed(&svc, "first", vec![]);
+        let entry2 = seed(&svc, "second", vec![]);
+
+        // Corrupt the index manually: drop entry1's only block row. The
+        // entry row stays so .get() returns an entry but with no blocks.
+        let conn = svc.conn_for_test();
+        {
+            let guard = conn.lock().unwrap();
+            guard
+                .execute(
+                    "DELETE FROM blocks WHERE entry_id = ?1",
+                    params![entry1.id.to_string()],
+                )
+                .unwrap();
+        }
+        let corrupted = svc.get(entry1.id).unwrap();
+        assert!(
+            corrupted.blocks.is_empty(),
+            "precondition: entry1 has no blocks after corruption"
+        );
+
+        let result = svc.rebuild_index().unwrap();
+        assert_eq!(result.reindexed, 2);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        // Verify entry1's blocks restored from the .nomai file.
+        let fetched = svc.get(entry1.id).unwrap();
+        assert!(!fetched.blocks.is_empty());
+        assert_eq!(fetched.blocks[0].text, "body of first");
+
+        // entry2 also re-indexed cleanly.
+        let fetched2 = svc.get(entry2.id).unwrap();
+        assert_eq!(fetched2.blocks[0].text, "body of second");
+    }
+
+    #[test]
+    fn rebuild_index_preserves_events_and_emb_cache() {
+        // rebuild_index wipes derived tables only. The events table is never
+        // *deleted from* (it accumulates new block.created events as
+        // reindex_one re-creates blocks); emb_cache (deterministic, keyed
+        // by content hash) is entirely untouched.
+        let svc = EntryService::for_test().unwrap();
+        let _entry = seed(&svc, "t", vec![]);
+
+        // Pre-populate emb_cache with a fake row.
+        let conn = svc.conn_for_test();
+        {
+            let guard = conn.lock().unwrap();
+            guard
+                .execute(
+                    "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        "test-model",
+                        vec![1u8; 32],
+                        4,
+                        vec![0u8; 16],
+                        "2026-01-01T00:00:00Z"
+                    ],
+                )
+                .unwrap();
+        }
+
+        // Count events before (entry.created + block.created = 2).
+        let events_before: i64 = {
+            let guard = conn.lock().unwrap();
+            guard
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert!(events_before >= 2);
+
+        drop(conn);
+        let _result = svc.rebuild_index().unwrap();
+
+        let conn = svc.conn_for_test();
+        // events table must not have been wiped. The pre-existing events
+        // from create() survive; reindex_one may have appended new
+        // block.created events for the re-created block(s), so the count
+        // is >= events_before, never less.
+        let events_after: i64 = {
+            let guard = conn.lock().unwrap();
+            guard
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert!(
+            events_after >= events_before,
+            "events table wiped by rebuild: before={events_before}, after={events_after}"
+        );
+
+        let emb_cache_after: i64 = {
+            let guard = conn.lock().unwrap();
+            guard
+                .query_row("SELECT COUNT(*) FROM emb_cache", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(emb_cache_after, 1, "emb_cache must be untouched by rebuild");
+    }
+
+    #[test]
+    fn rebuild_index_reports_per_entry_errors() {
+        // A malformed .nomai file should be skipped (recorded in errors)
+        // without aborting the rest of the rebuild.
+        let svc = EntryService::for_test().unwrap();
+        let good = seed(&svc, "good", vec![]);
+        let bad = seed(&svc, "bad", vec![]);
+
+        // Corrupt bad's .nomai file so reindex_one fails to parse.
+        let bad_path = svc.content_store.entry_file(bad.id);
+        std::fs::write(&bad_path, "this is not a valid .nomai header\n").unwrap();
+
+        let result = svc.rebuild_index().unwrap();
+        assert_eq!(result.reindexed, 1, "one good entry re-indexed");
+        assert_eq!(result.errors.len(), 1, "one entry failed to parse");
+        assert!(result.errors[0].contains(&bad.id.to_string()));
+        // The good entry still round-trips cleanly.
+        let fetched = svc.get(good.id).unwrap();
+        assert!(!fetched.blocks.is_empty());
     }
 }

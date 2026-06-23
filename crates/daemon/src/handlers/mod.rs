@@ -69,6 +69,8 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     // index.* (Plan 5: FS↔SQLite reconciliation.)
     let h = index::Sync;
     m.insert(h.method(), Arc::new(h));
+    let h = index::Rebuild;
+    m.insert(h.method(), Arc::new(h));
 
     // events.*
     let h = events::List;
@@ -1114,9 +1116,9 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 25 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
-        // events:3, search:2, provider:1, cache:2, batch:1, index:1).
-        assert_eq!(tools.len(), 25);
+        // 26 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
+        // events:3, search:2, provider:1, cache:2, batch:1, index:2).
+        assert_eq!(tools.len(), 26);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1133,6 +1135,7 @@ mod tests {
         assert!(names.contains(&"search.semantic"));
         assert!(names.contains(&"provider.list"));
         assert!(names.contains(&"index.sync"));
+        assert!(names.contains(&"index.rebuild"));
         // MCP meta-methods are not callable tools.
         assert!(!names.contains(&"initialize"));
         assert!(!names.contains(&"tools/list"));
@@ -1245,7 +1248,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 26); // 25 built-in + custom.echo
+        assert_eq!(tools.len(), 27); // 26 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
@@ -2057,5 +2060,100 @@ mod tests {
 
         // The originally-indexed entry is untouched (still present, same id).
         let _ = indexed_id;
+    }
+
+    // ----- index.rebuild e2e test (Plan 5 Task 7) -----
+
+    #[tokio::test]
+    async fn index_rebuild_restores_blocks_and_preserves_events() {
+        // Spec §7.1: rebuild wipes derived tables + reindexes every FS
+        // entry. events (audit history) and emb_cache (deterministic) are
+        // untouched.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create two entries via the service so the index + FS are seeded.
+        let c1 = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"first","blocks":[{"type":"note","text":"a"}]}),
+            ))
+            .await;
+        let c2 = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"second","blocks":[{"type":"note","text":"b"}]}),
+            ))
+            .await;
+        let id1 = c1.result.unwrap()["id"].as_str().unwrap().to_string();
+        let id2 = c2.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        // Corrupt the index: drop id1's blocks row directly. (The chunks_ad
+        // trigger also removes chunk embeddings when we drop chunks; that's
+        // fine for the test, we only care that rebuild re-creates them.)
+        {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            guard
+                .execute(
+                    "DELETE FROM blocks WHERE entry_id = ?1",
+                    rusqlite::params![id1],
+                )
+                .unwrap();
+        }
+        // Precondition: id1 has no blocks.
+        let pre = daemon
+            .dispatch(req("entry.get", json!({"id": id1.clone()})))
+            .await;
+        assert!(pre.result.unwrap()["blocks"].as_array().unwrap().is_empty());
+
+        // Snapshot event count before rebuild (2 entry.created + 2 block.created
+        // = 4 events). These should survive the rebuild (reindex may append
+        // new block.created events during re-population, but must not wipe
+        // pre-existing ones).
+        let events_before: i64 = {
+            let conn = daemon.entries.conn_for_test();
+            conn.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap()
+        };
+
+        // Rebuild.
+        let rebuild_resp = daemon.dispatch(req("index.rebuild", json!({}))).await;
+        assert!(rebuild_resp.error.is_none(), "{:?}", rebuild_resp.error);
+        let result = rebuild_resp.result.unwrap();
+        assert_eq!(result["reindexed"], 2);
+        assert!(result["errors"].as_array().unwrap().is_empty());
+
+        // id1's blocks are restored from the .nomai file.
+        let post = daemon
+            .dispatch(req("entry.get", json!({"id": id1.clone()})))
+            .await;
+        let blocks = post.result.unwrap()["blocks"].as_array().unwrap().clone();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["text"], "a");
+
+        // id2 also re-indexed.
+        let post2 = daemon
+            .dispatch(req("entry.get", json!({"id": id2.clone()})))
+            .await;
+        assert_eq!(post2.result.unwrap()["blocks"][0]["text"], "b");
+
+        // events table not wiped — reindex may append new block.created
+        // events, but pre-existing events (the original entry.created +
+        // block.created) must still be present.
+        let events_after: i64 = {
+            let conn = daemon.entries.conn_for_test();
+            conn.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert!(
+            events_after >= events_before,
+            "events table wiped by rebuild: before={events_before}, after={events_after}"
+        );
     }
 }

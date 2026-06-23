@@ -5,18 +5,21 @@
 //! `index.sync` walks the content store, diffs each entry's `.nomai` mtime
 //! against the indexed `fs_mtime`, and reconciles via
 //! `EntryService::reindex_one` / direct DELETE. Returns per-bucket counts.
+//!
+//! `index.rebuild` is the nuclear option: wipes every derived table, then
+//! re-indexes every FS entry. Used to recover from index corruption.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
-use nomai_core::{CoreError, EntryService, SyncResult};
+use nomai_core::{CoreError, EntryService, RebuildResult, SyncResult};
 
 use crate::daemon::Daemon;
 use crate::handlers::entry::blocking;
 use crate::rpc::RpcHandler;
-use nomai_protocol::method::index::SYNC as INDEX_SYNC;
+use nomai_protocol::method::index::{REBUILD as INDEX_REBUILD, SYNC as INDEX_SYNC};
 
 pub struct Sync;
 
@@ -30,6 +33,22 @@ impl RpcHandler for Sync {
         // pass takes per-entry locks internally; we don't hold any lock here.
         let entries: Arc<EntryService> = daemon.entries.clone();
         let result: SyncResult = { blocking(move || entries.sync_from_fs()).await?? };
+        serde_json::to_value(&result).map_err(|e| CoreError::Config(format!("serialize: {e}")))
+    }
+}
+
+pub struct Rebuild;
+
+#[async_trait]
+impl RpcHandler for Rebuild {
+    fn method(&self) -> &'static str {
+        INDEX_REBUILD
+    }
+    async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
+        // Clone the Arc before spawning so the closure is 'static. The
+        // rebuild takes per-entry locks internally during the reindex phase.
+        let entries: Arc<EntryService> = daemon.entries.clone();
+        let result: RebuildResult = { blocking(move || entries.rebuild_index()).await?? };
         serde_json::to_value(&result).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
 }

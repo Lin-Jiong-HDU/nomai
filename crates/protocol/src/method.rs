@@ -67,6 +67,12 @@ pub mod index {
     /// mtime changed, and removes index rows whose `.nomai` is gone.
     /// Returns `{ added, updated, removed, unchanged }` counts.
     pub const SYNC: &str = "index.sync";
+    /// Plan 5: wholesale rebuild. DELETEs every derived table (chunks,
+    /// blocks, links, entries, fts_blocks, vec_chunk_embeddings) then
+    /// re-indexes every FS entry. Does NOT touch events (daemon history)
+    /// or emb_cache (deterministic, reusable). Returns
+    /// `{ reindexed, errors }` where `errors` collects per-entry failures.
+    pub const REBUILD: &str = "index.rebuild";
 }
 
 #[cfg(test)]
@@ -129,5 +135,6 @@ mod tests {
     #[test]
     fn index_namespace_methods() {
         assert_eq!(index::SYNC, "index.sync");
+        assert_eq!(index::REBUILD, "index.rebuild");
     }
 }
