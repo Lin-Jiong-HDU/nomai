@@ -19,7 +19,7 @@
 -- manual table drop + ChunkService::ensure call with correct dim.
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunk_embeddings USING vec0(
     chunk_id TEXT PRIMARY KEY,
-    embedding FLOAT[2048]
+    embedding FLOAT[2048] distance_metric=cosine
 );
 
 -- blocks_au: fts_blocks is a self-stored FTS5 table (no external content),

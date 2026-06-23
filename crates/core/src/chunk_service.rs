@@ -525,6 +525,57 @@ mod tests {
     }
 
     #[test]
+    fn semantic_search_uses_cosine_not_l2_for_non_unit_vectors() {
+        // Regression: V9 must declare vec_chunk_embeddings with
+        // distance_metric=cosine. Without it, vec0 defaults to L2, and L2
+        // gives different rankings than cosine for non-unit vectors. Existing
+        // tests use unit vectors (axis-aligned) which are metric-invariant,
+        // so they can't catch the bug.
+        //
+        // Here A = [1, 0, ...] and B = 2*A = [2, 0, ...]: same direction.
+        // Cosine says both should match query [1,0,...] with similarity 1.0
+        // (distance 0). L2 says B is at distance 1.0 from the query (A's
+        // distance is 0), so under L2 their scores differ.
+        crate::storage::init_sqlite_extensions();
+        let (_entry_id, block_id, conn) = seed_entry_and_block();
+        let chunks = ChunkService::new(conn.clone()).unwrap();
+        chunks.ensure_vec_chunk_embeddings(2048).unwrap();
+
+        // Wipe auto-derived chunk; insert two manual chunks for A and B.
+        {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "DELETE FROM chunks WHERE block_id = ?1",
+                params![block_id.to_string()],
+            )
+            .unwrap();
+        }
+        let chunk_a = insert_chunk_sql(&conn, block_id, 0, "a", json!({}));
+        let chunk_b = insert_chunk_sql(&conn, block_id, 1, "b", json!({}));
+
+        let mut a = vec![0.0f32; 2048];
+        a[0] = 1.0;
+        let mut b = vec![0.0f32; 2048];
+        b[0] = 2.0;
+        chunks.write_embedding(chunk_a, &a).unwrap();
+        chunks.write_embedding(chunk_b, &b).unwrap();
+
+        let hits = chunks.semantic_search(&a, 10, None).unwrap();
+        assert_eq!(hits.len(), 2, "both chunks should be returned");
+        // Both should score ~1.0 (identical direction under cosine). Under L2,
+        // B's score would be 1.0 - 1.0 = 0.0 because |B - A| = 1.
+        let max_diff = hits
+            .iter()
+            .map(|h| (h.score - 1.0).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff < 0.01,
+            "cosine scores should all be ≈1.0 for same-direction vectors, got: {:?}",
+            hits.iter().map(|h| h.score).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn semantic_search_filters_by_block_type() {
         crate::storage::init_sqlite_extensions();
         let entries = crate::EntryService::for_test().unwrap();
