@@ -105,7 +105,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    const DIM: usize = 8;
+    const DIM: usize = 2048;
 
     async fn setup_daemon(server: &MockServer) -> Daemon {
         let entries = Arc::new(EntryService::for_test().unwrap());
@@ -143,6 +143,17 @@ mod tests {
             method: method.into(),
             params: Some(params),
         }
+    }
+
+    /// Build a 2048-dim embedding (V9 daemon default) from a short prefix,
+    /// zero-padding the rest. Used by similarity tests that want unit vectors
+    /// along specific axes.
+    fn vec_2048(prefix: &[f32]) -> Vec<f32> {
+        let mut v = vec![0.0_f32; DIM];
+        for (i, x) in prefix.iter().enumerate() {
+            v[i] = *x;
+        }
+        v
     }
 
     #[tokio::test]
@@ -254,17 +265,20 @@ mod tests {
         let a_chunk_id = chunks.list(a_block_id).unwrap().items[0].id;
         let b_chunk_id = chunks.list(b_block_id).unwrap().items[0].id;
         chunks
-            .write_embedding(a_chunk_id, &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            .write_embedding(a_chunk_id, &vec_2048(&[1.0]))
             .unwrap();
         chunks
-            .write_embedding(b_chunk_id, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+            .write_embedding(
+                b_chunk_id,
+                &vec_2048(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
+            )
             .unwrap();
 
         // search.semantic will issue an embedding request for the query.
         Mock::given(method("POST"))
             .and(path("/embeddings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{"index": 0, "embedding": vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}]
+                "data": [{"index": 0, "embedding": vec_2048(&[1.0])}]
             })))
             .mount(&server)
             .await;

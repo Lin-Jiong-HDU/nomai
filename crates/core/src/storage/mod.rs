@@ -10,7 +10,13 @@ use rusqlite::Connection;
 use crate::error::CoreError;
 
 /// Run all pending migrations on the given connection. Idempotent.
+///
+/// Calls `init_sqlite_extensions()` first so V9's `CREATE VIRTUAL TABLE …
+/// USING vec0` (for `vec_chunk_embeddings`) succeeds regardless of whether
+/// the caller remembered to initialize extensions. The init is idempotent
+/// and safe to call multiple times.
 pub fn run_migrations(conn: &mut Connection) -> Result<(), CoreError> {
+    init_sqlite_extensions();
     embedded::migrations::runner()
         .run(conn)
         .map(|_| ())
@@ -263,5 +269,126 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 2, "V8 should create blocks_ai + blocks_ad triggers");
+    }
+
+    #[test]
+    fn v9_migration_creates_blocks_au_trigger() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='blocks_au'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "V9 should create blocks_au UPDATE trigger");
+    }
+
+    #[test]
+    fn v9_migration_creates_chunks_ad_trigger() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='chunks_ad'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "V9 should create chunks_ad DELETE trigger");
+    }
+
+    #[test]
+    fn v9_blocks_au_trigger_keeps_fts_blocks_sync_on_update() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        // Insert a block (need entries + blocks row manually since no service in unit test)
+        conn.execute(
+            "INSERT INTO entries (id, title, tags, attrs, source, fs_path, fs_mtime, created_at, updated_at)
+             VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAV', 't', '[]', '{}', NULL, NULL, NULL, '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blocks (id, entry_id, ordinal, type, text, attrs, created_at, updated_at)
+             VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAB', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 0, 'note', 'original', '{}', '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        // Verify fts_blocks populated by blocks_ai (V8)
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fts_blocks WHERE block_id = '01ARZ3NDEKTSV4RRFFQ69G5FAB'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+
+        // UPDATE the block — blocks_au should refresh fts_blocks
+        conn.execute(
+            "UPDATE blocks SET text = 'updated' WHERE id = '01ARZ3NDEKTSV4RRFFQ69G5FAB'",
+            [],
+        )
+        .unwrap();
+        let text: String = conn
+            .query_row(
+                "SELECT text FROM fts_blocks WHERE block_id = '01ARZ3NDEKTSV4RRFFQ69G5FAB'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(text, "updated");
+    }
+
+    #[test]
+    fn v9_chunks_ad_trigger_cleans_vec_chunk_embeddings() {
+        // Requires sqlite-vec extension for vec_chunk_embeddings table.
+        crate::storage::init_sqlite_extensions();
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        // V9 creates vec_chunk_embeddings with dim=2048 (daemon default).
+        // The CREATE here is a no-op (IF NOT EXISTS); embeddings must match 2048.
+        // Insert entry + block + chunk
+        conn.execute(
+            "INSERT INTO entries (id, title, tags, attrs, source, fs_path, fs_mtime, created_at, updated_at)
+             VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAV', 't', '[]', '{}', NULL, NULL, NULL, '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blocks (id, entry_id, ordinal, type, text, attrs, created_at, updated_at)
+             VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAB', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 0, 'note', 'x', '{}', '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chunks (id, block_id, ordinal, text, attrs, created_at, updated_at)
+             VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAC', '01ARZ3NDEKTSV4RRFFQ69G5FAB', 0, 'x', '{}', '2026-06-23T10:00:00Z', '2026-06-23T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        // Insert chunk embedding (FLOAT[2048] = 2048 * 4 bytes = 8192 bytes).
+        let emb: Vec<u8> = vec![0u8; 8192];
+        conn.execute(
+            "INSERT INTO vec_chunk_embeddings (chunk_id, embedding) VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAC', ?1)",
+            [&emb[..]],
+        )
+        .unwrap();
+        // DELETE the chunk — chunks_ad should clean vec_chunk_embeddings
+        conn.execute(
+            "DELETE FROM chunks WHERE id = '01ARZ3NDEKTSV4RRFFQ69G5FAC'",
+            [],
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM vec_chunk_embeddings WHERE chunk_id = '01ARZ3NDEKTSV4RRFFQ69G5FAC'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "chunks_ad should have removed the embedding");
     }
 }

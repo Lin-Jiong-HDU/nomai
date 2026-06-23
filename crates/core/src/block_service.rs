@@ -38,6 +38,9 @@ impl BlockService {
     /// `entries` table exists (FK target for `blocks.entry_id`).
     #[doc(hidden)]
     pub fn for_test() -> Result<Self, CoreError> {
+        // V9 migration creates a vec0 virtual table; the extension must be
+        // registered before the connection is opened.
+        crate::storage::init_sqlite_extensions();
         let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
         let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", ulid::Ulid::new()));
         let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
