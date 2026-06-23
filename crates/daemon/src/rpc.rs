@@ -7,7 +7,8 @@ use serde_json::Value;
 use nomai_core::CoreError;
 use nomai_protocol::RpcError;
 use nomai_protocol::error::{
-    CONFIG_ERROR, ENTRY_NOT_FOUND, INTERNAL_ERROR, PROVIDER_ERROR, VALIDATION_ERROR,
+    CONFIG_ERROR, ENTRY_NOT_FOUND, FS_ERROR, INTERNAL_ERROR, NOMAI_FORMAT_ERROR, PROVIDER_ERROR,
+    VALIDATION_ERROR,
 };
 use serde_json::json;
 
@@ -57,6 +58,16 @@ pub fn core_error_to_rpc(err: CoreError) -> RpcError {
             message: msg,
             data: None,
         },
+        CoreError::Io(e) => RpcError {
+            code: FS_ERROR,
+            message: format!("io error: {e}"),
+            data: None,
+        },
+        CoreError::NomaiFormat(pe) => RpcError {
+            code: NOMAI_FORMAT_ERROR,
+            message: format!("nomai format error: {pe}"),
+            data: Some(json!({ "parse_error": pe.to_string() })),
+        },
         CoreError::Storage(e) => RpcError {
             code: INTERNAL_ERROR,
             message: format!("storage error: {e}"),
@@ -103,5 +114,21 @@ mod tests {
         let storage_err = rusqlite::Error::InvalidParameterName("x".into());
         let rpc = core_error_to_rpc(CoreError::Storage(storage_err));
         assert_eq!(rpc.code, -32603);
+    }
+
+    #[test]
+    fn io_error_maps_to_1005() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let rpc = core_error_to_rpc(CoreError::Io(io_err));
+        assert_eq!(rpc.code, FS_ERROR);
+        assert!(rpc.message.contains("file missing"));
+    }
+
+    #[test]
+    fn nomai_format_error_maps_to_1006() {
+        let parse_err = nomai_core::ParseError::EmptyInput;
+        let rpc = core_error_to_rpc(CoreError::NomaiFormat(parse_err));
+        assert_eq!(rpc.code, NOMAI_FORMAT_ERROR);
+        assert!(rpc.message.contains("empty input"));
     }
 }
