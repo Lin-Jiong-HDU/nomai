@@ -7,8 +7,9 @@ For project overview and install, see the [README](../README.md) first.
 ## Table of contents
 
 - [Transport: how to talk to the daemon](#transport)
-- [The four primitives](#the-four-primitives)
+- [The five primitives](#the-five-primitives)
   - [Entry](#entry)
+  - [Block](#block)
   - [Links](#links)
   - [Events](#events)
   - [Chunks](#chunks)
@@ -58,9 +59,9 @@ For long-lived clients, open the daemon as a subprocess and keep stdin/stdout pi
 
 ---
 
-## The four primitives
+## The five primitives
 
-nomai provides four orthogonal building blocks. You can use any subset; they don't depend on each other at the API level.
+nomai provides five orthogonal building blocks. You can use any subset; they don't depend on each other at the API level.
 
 ### Entry
 
@@ -86,6 +87,14 @@ The atomic unit of knowledge. A markdown note with structured metadata.
 - `source` is an optional provenance string (URL, filename, etc.).
 
 **Creating an entry auto-embeds the body**: daemon calls the embedding provider and writes the vector to `vec_embeddings`. The entry is then retrievable via `search.semantic` (entry-level granularity).
+
+### Block
+
+A typed semantic block within an entry. Each entry is composed of an ordered list of blocks. Block types: `claim` (assertion), `evidence` (supporting material), `question` (open question), `source` (citation pointer), `note` (freeform text), `connection` (typed link to another entry — populates the `links` table).
+
+Blocks are the structural unit of an entry. `block.append` / `update` / `delete` mutate the entry's block list; each mutation rewrites the entry's `.nomai` file (see [Storage layer separation](#storage-layer-separation-lib-mode-users) for lib-mode caveats).
+
+Chunks are derived from block text via the [chunking algorithm](#) — see §10 of the spec for the paragraph→sentence→hard-cut cascade.
 
 ### Links
 
@@ -507,7 +516,7 @@ nomai-core = { path = "..." }
 ```
 
 ```rust
-use nomai_core::{EntryService, LinkService, EventService, ChunkService};
+use nomai_core::{EntryService, LinkService, EventService, ChunkService, BlockInput};
 
 let conn = std::sync::Arc::new(std::sync::Mutex::new(
     rusqlite::Connection::open("db.sqlite")?
@@ -519,7 +528,11 @@ let chunks = std::sync::Arc::new(ChunkService::new(conn.clone())?);
 
 let entry = entries.create(nomai_core::CreateEntry {
     title: "Hello".into(),
-    body: "world".into(),
+    blocks: vec![BlockInput {
+        r#type: "note".into(),
+        text: "world".into(),
+        attrs: None,
+    }],
     tags: None,
     attrs: None,
     source: None,
