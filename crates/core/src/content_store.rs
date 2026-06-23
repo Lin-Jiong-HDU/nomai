@@ -77,6 +77,40 @@ impl ContentStore {
             Err(e) => Err(CoreError::Io(e)),
         }
     }
+
+    /// Walk `<root>/entries/` and return every directory whose name parses as
+    /// a ULID. Invalid dir names are silently skipped (caller can decide
+    /// whether to log). Returns ULIDs in arbitrary order (caller sorts if
+    /// needed). Returns an empty `Vec` if `entries/` does not exist.
+    pub fn scan_entry_ids(&self) -> Vec<Ulid> {
+        let entries_dir = self.root.join("entries");
+        let mut ids = Vec::new();
+        if let Ok(read_dir) = std::fs::read_dir(&entries_dir) {
+            for entry in read_dir.flatten() {
+                if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name_str = match name.to_str() {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if let Ok(id) = name_str.parse::<Ulid>() {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
+    }
+
+    /// Return the mtime of an entry's `entry.nomai` file, or `None` if the
+    /// file is missing or its mtime cannot be read.
+    pub fn entry_mtime(&self, entry_id: Ulid) -> Option<chrono::DateTime<chrono::Utc>> {
+        let path = self.entry_file(entry_id);
+        let metadata = std::fs::metadata(&path).ok()?;
+        let mtime = metadata.modified().ok()?;
+        Some(chrono::DateTime::<chrono::Utc>::from(mtime))
+    }
 }
 
 /// Atomically write `content` to `path`. Writes to `<path>.tmp`, fsyncs, then
@@ -243,5 +277,52 @@ mod tests {
         let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
         // Never written — delete should succeed anyway.
         store.delete_entry(id).unwrap();
+    }
+
+    #[test]
+    fn scan_entry_ids_returns_all_written_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id1: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let id2: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAX".parse().unwrap();
+        store.write_entry(id1, &sample_doc()).unwrap();
+        store.write_entry(id2, &sample_doc()).unwrap();
+
+        let mut ids = store.scan_entry_ids();
+        ids.sort();
+        assert_eq!(ids, vec![id1, id2]);
+    }
+
+    #[test]
+    fn scan_entry_ids_skips_invalid_dir_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        store.write_entry(id, &sample_doc()).unwrap();
+
+        // Drop a junk directory
+        std::fs::create_dir_all(tmp.path().join("entries").join("not-a-ulid")).unwrap();
+
+        let ids = store.scan_entry_ids();
+        assert_eq!(ids, vec![id]); // junk dir skipped
+    }
+
+    #[test]
+    fn entry_mtime_returns_some_for_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        store.write_entry(id, &sample_doc()).unwrap();
+
+        let mtime = store.entry_mtime(id);
+        assert!(mtime.is_some());
+    }
+
+    #[test]
+    fn entry_mtime_returns_none_for_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        assert!(store.entry_mtime(id).is_none());
     }
 }
