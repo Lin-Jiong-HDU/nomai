@@ -707,6 +707,8 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         // Create 3 entries → 3 entry.created + 3 block.created = 6 events.
+        // Plan 5 Task 8: daemon startup also emits one `index.synced` event,
+        // bringing the total to 7 before any entry.create call.
         daemon
             .dispatch(req(
                 "entry.create",
@@ -730,14 +732,14 @@ mod tests {
         let list_resp = daemon.dispatch(req("events.list", json!({}))).await;
         let result = list_resp.result.unwrap();
         let items = result["items"].as_array().unwrap();
-        assert_eq!(items.len(), 6);
-        let last_event_id = items[5]["id"].as_str().unwrap().to_string();
+        assert_eq!(items.len(), 7);
+        let last_event_id = items[6]["id"].as_str().unwrap().to_string();
 
         // Purge events with id < last_event_id (exclusive).
         let purge_resp = daemon
             .dispatch(req("events.purge", json!({"before": last_event_id})))
             .await;
-        assert_eq!(purge_resp.result.unwrap()["deleted"], 5);
+        assert_eq!(purge_resp.result.unwrap()["deleted"], 6);
 
         // Verify only 1 event remains.
         let list_resp2 = daemon.dispatch(req("events.list", json!({}))).await;
@@ -752,8 +754,9 @@ mod tests {
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
 
-        // Create 3 entries → 6 events total (each entry.create emits
-        // entry.created + block.created).
+        // Create 3 entries → 6 entry events total (each entry.create emits
+        // entry.created + block.created). Plan 5 Task 8: daemon startup also
+        // emits one `index.synced` event, so the grand total is 7.
         for i in 0..3 {
             daemon
                 .dispatch(req(
@@ -772,12 +775,12 @@ mod tests {
         assert_eq!(p1_result["has_more"], true);
         let last_id = p1_result["items"][3]["id"].as_str().unwrap().to_string();
 
-        // Page 2: since = last_id from page 1
+        // Page 2: since = last_id from page 1 → 3 remaining events.
         let p2 = daemon
             .dispatch(req("events.list", json!({"limit": 4, "since": last_id})))
             .await;
         let p2_result = p2.result.unwrap();
-        assert_eq!(p2_result["items"].as_array().unwrap().len(), 2);
+        assert_eq!(p2_result["items"].as_array().unwrap().len(), 3);
         assert_eq!(p2_result["has_more"], false);
     }
 
@@ -2155,5 +2158,121 @@ mod tests {
             events_after >= events_before,
             "events table wiped by rebuild: before={events_before}, after={events_after}"
         );
+    }
+
+    // ----- daemon startup scan e2e test (Plan 5 Task 8) -----
+
+    #[tokio::test]
+    async fn daemon_startup_syncs_pre_populated_fs_to_index() {
+        // Spec §9.1: daemon startup runs `EntryService::sync_from_fs` once
+        // before serving RPCs. Pre-populate the FS with a .nomai file (via
+        // ContentStore directly, bypassing EntryService so the index starts
+        // empty), then construct a daemon and verify the entry is indexed.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+
+        // Build a content store in a temp dir, then construct EntryService
+        // against it (instead of for_test, which makes its own anonymous dir).
+        let tmp = tempfile::tempdir().unwrap();
+        let content_store = Arc::new(nomai_core::ContentStore::new(tmp.path().to_path_buf()));
+        nomai_core::storage::init_sqlite_extensions();
+        let conn = Arc::new(std::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        ));
+        let entries = Arc::new(EntryService::new(conn, content_store.clone()).unwrap());
+
+        // Drop a .nomai file directly via the content store (no INSERT, no
+        // EntryService::create) so the index is empty but the FS has one entry.
+        let external_id = ulid::Ulid::new();
+        let now: chrono::DateTime<chrono::Utc> = "2026-06-23T10:00:00Z".parse().unwrap();
+        let doc = nomai_core::NomaiDoc {
+            format_version: 1,
+            id: external_id,
+            title: "Pre-existing".into(),
+            tags: vec![],
+            attrs: Default::default(),
+            source: None,
+            created_at: now,
+            updated_at: now,
+            blocks: vec![nomai_core::nomai_format::Block {
+                r#type: nomai_core::nomai_format::BlockType::Note,
+                text: "dropped before boot\n".into(),
+                attrs: Default::default(),
+            }],
+        };
+        content_store.write_entry(external_id, &doc).unwrap();
+
+        // Precondition: index has no rows yet.
+        {
+            let conn = entries.conn_for_test();
+            let n: i64 = conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(n, 0);
+        }
+
+        // Construct the daemon. Daemon::for_test runs run_startup_sync at
+        // the end of construction, which must pick up the external file.
+        let embedder: Arc<dyn nomai_providers::EmbeddingProvider> =
+            Arc::new(nomai_providers::OpenAiCompatibleEmbed::new(
+                server.uri(),
+                "test-key",
+                "test-model",
+                DIM,
+            ));
+        let llm: Arc<dyn nomai_providers::LlmProvider> = Arc::new(
+            nomai_providers::OpenAiCompatibleLlm::new(server.uri(), "test-key", "test-model"),
+        );
+        let daemon = Daemon::for_test(
+            entries,
+            embedder,
+            llm,
+            "test-model".into(),
+            "test-model".into(),
+            DIM,
+        );
+
+        // The external entry is now retrievable via entry.get without any
+        // explicit index.sync call — startup scan indexed it.
+        let get_resp = daemon
+            .dispatch(req("entry.get", json!({"id": external_id.to_string()})))
+            .await;
+        assert!(get_resp.error.is_none(), "{:?}", get_resp.error);
+        let result = get_resp.result.unwrap();
+        assert_eq!(result["title"], "Pre-existing");
+        assert_eq!(result["blocks"][0]["text"], "dropped before boot");
+
+        // The startup scan emitted an `index.synced` event into the audit log.
+        let events: Vec<Value> = {
+            let conn = daemon.entries.conn_for_test();
+            let guard = conn.lock().unwrap();
+            let mut stmt = guard
+                .prepare("SELECT type, payload FROM events ORDER BY id")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    let t: String = row.get(0)?;
+                    let p: String = row.get(1)?;
+                    Ok(json!({"type": t, "payload": p}))
+                })
+                .unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        let synced: Vec<&Value> = events
+            .iter()
+            .filter(|e| e["type"] == "index.synced")
+            .collect();
+        assert_eq!(
+            synced.len(),
+            1,
+            "exactly one index.synced event: {events:?}"
+        );
+        let payload: Value = serde_json::from_str(synced[0]["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["added"], 1);
+        assert_eq!(payload["updated"], 0);
+        assert_eq!(payload["removed"], 0);
+        assert_eq!(payload["unchanged"], 0);
     }
 }
