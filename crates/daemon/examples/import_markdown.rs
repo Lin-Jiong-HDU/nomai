@@ -1,5 +1,5 @@
 //! Batch import a markdown file into nomai.
-//! Demonstrates: batch RPC + $ref + chunking (all application-layer composition).
+//! Demonstrates: batch RPC + blocks-based entry.create (paragraphs → blocks).
 //!
 //! Run: cargo run --example import_markdown -- path/to/file.md
 
@@ -18,38 +18,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_string();
 
     // Simple chunking: split by double-newline (paragraphs).
-    // Plan 3: entries are blocks-based. Put every paragraph in a single
-    // entry as one block per paragraph; skip separate chunk creation.
-    let paragraphs: Vec<&str> = content
+    // Plan 3: entries are blocks-based. Each paragraph becomes one block in
+    // a single entry.create — no separate chunk.create ops needed.
+    let blocks: Vec<serde_json::Value> = content
         .split("\n\n")
         .filter(|p| !p.trim().is_empty())
-        .collect();
-
-    let blocks: Vec<serde_json::Value> = paragraphs
-        .iter()
         .map(|p| json!({ "type": "note", "text": p }))
         .collect();
 
-    let mut ops = vec![json!({
+    let ops = vec![json!({
         "id": "e1",
         "method": "entry.create",
         "params": { "title": title, "blocks": blocks }
     })];
-
-    // Extra paragraphs were previously emitted as chunks; that role is now
-    // filled by multiple blocks within the same entry. We keep the rest of
-    // the batch flow unchanged for demonstration purposes — no chunks here.
-    for (ordinal, text) in paragraphs.iter().skip(1).enumerate() {
-        ops.push(json!({
-            "id": format!("c{ordinal}"),
-            "method": "chunk.create",
-            "params": {
-                "entry_id": { "$ref": "e1.id" },
-                "ordinal": ordinal,
-                "text": *text
-            }
-        }));
-    }
 
     let config = nomai_daemon::config::Config::load()?;
     let daemon = nomai_daemon::daemon::Daemon::new(config).await?;
@@ -71,16 +52,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let results = result["results"].as_array().unwrap();
     let rolled_back = result["rolled_back"].as_bool().unwrap();
     let entry_id = results[0]["result"]["id"].as_str().unwrap();
-    let chunk_count = results.len() - 1;
+    let block_count = blocks.len();
 
     println!("✓ Imported '{}' as entry {}", title, entry_id);
     println!(
-        "  {} chunks created, atomic={}, rolled_back={}",
-        chunk_count, !rolled_back, rolled_back
+        "  {} blocks created, atomic={}, rolled_back={}",
+        block_count, !rolled_back, rolled_back
     );
-    println!(
-        "  Embedding: 1 batch API call for {} texts",
-        1 + chunk_count
-    );
+    println!("  Embedding: 1 batch API call for {block_count} texts");
     Ok(())
 }

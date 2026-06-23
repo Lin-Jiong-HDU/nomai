@@ -89,8 +89,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match event_type {
             "entry.created" | "entry.updated" => {
-                // Body is now derived from blocks (Spec 6 Plan 3). Re-join
-                // block texts with "\n\n" to reconstruct the body.
+                // Entries store content as blocks; re-join the block texts
+                // with "\n\n" to reconstruct the markdown body.
                 let body = payload["blocks"]
                     .as_array()
                     .map(|blocks| {

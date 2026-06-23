@@ -76,8 +76,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. KNN top-K semantic search over entries.
     let hits = entries.semantic_search(&qvec, TOP_K)?;
 
-    // 5. Build context from title + derived body of each hit. Derived body
-    //    = block texts joined with "\n\n" (Spec 6 Plan 3).
+    // 5. Build context from the title and block texts of each hit. Entries
+    //    store content as blocks; join them with "\n\n" to reconstruct the
+    //    text body for the LLM.
     let context = hits
         .iter()
         .map(|h| {

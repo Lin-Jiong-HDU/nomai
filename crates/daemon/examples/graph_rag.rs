@@ -72,7 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Step 3: Build context + call LLM (pure application-layer composition).
-    //         Body is now derived from blocks (Spec 6 Plan 3); re-join here.
+    //         Entries store content as blocks; re-join the block texts with
+    //         "\n\n" to reconstruct the body for the LLM.
     let context: Vec<String> = entries
         .iter()
         .map(|e| {
