@@ -1,6 +1,7 @@
 //! Core service layer, data model, and storage for nomai.
 
 pub mod block_model;
+pub mod block_service;
 pub mod chunk_model;
 pub mod content_store;
 pub mod chunk_service;
@@ -16,6 +17,8 @@ pub mod storage;
 
 pub use chunk_model::{Chunk, ChunkListResult, ChunkSearchResult, CreateChunk, Granularity};
 pub use chunk_service::ChunkService;
+pub use block_model::{Block, BlockListResult, CreateBlock};
+pub use block_service::BlockService;
 pub use error::CoreError;
 pub use event_model::{Event, ListEventsQuery, ListEventsResult, ListOrder, PurgeQuery};
 pub use event_service::EventService;
@@ -25,7 +28,7 @@ pub use link_model::{
 pub use link_service::LinkService;
 pub use model::Entry;
 pub use nomai_format::{
-    Block, BlockType, NomaiDoc, ParseError, parse as parse_nomai, render as render_nomai,
+    BlockType, NomaiDoc, ParseError, parse as parse_nomai, render as render_nomai,
 };
 pub use service::{
     CreateEntry, EntryListQuery, EntryListResult, EntryService, FulltextSearchResult,
