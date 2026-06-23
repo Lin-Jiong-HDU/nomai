@@ -56,6 +56,9 @@ pub mod block {
     /// (chunks_ad trigger cleans vec_chunk_embeddings) and re-renders the
     /// entry's `.nomai` file.
     pub const UPDATE: &str = "block.update";
+    /// Plan 5: delete a block. The chunks_ad trigger cleans vec_chunk_embeddings
+    /// and re-renders the entry's `.nomai` file.
+    pub const DELETE: &str = "block.delete";
 }
 
 #[cfg(test)]
@@ -112,5 +115,6 @@ mod tests {
     fn block_namespace_methods() {
         assert_eq!(block::APPEND, "block.append");
         assert_eq!(block::UPDATE, "block.update");
+        assert_eq!(block::DELETE, "block.delete");
     }
 }

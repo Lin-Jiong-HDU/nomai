@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use nomai_core::nomai_format::{Block as ParserBlock, BlockType, NomaiDoc};
 use nomai_core::{CoreError, EntryService};
@@ -19,6 +19,7 @@ use crate::daemon::Daemon;
 use crate::handlers::entry::blocking;
 use crate::rpc::RpcHandler;
 use nomai_protocol::method::block::APPEND as BLOCK_APPEND;
+use nomai_protocol::method::block::DELETE as BLOCK_DELETE;
 use nomai_protocol::method::block::UPDATE as BLOCK_UPDATE;
 
 pub struct Append;
@@ -94,6 +95,38 @@ impl RpcHandler for Update {
         rerender_entry_nomai(&entries, block.entry_id).await?;
 
         serde_json::to_value(&block).map_err(|e| CoreError::Config(format!("serialize: {e}")))
+    }
+}
+
+pub struct Delete;
+
+#[async_trait]
+impl RpcHandler for Delete {
+    fn method(&self) -> &'static str {
+        BLOCK_DELETE
+    }
+    async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
+        #[derive(Deserialize)]
+        struct Params {
+            id: ulid::Ulid,
+        }
+        let p: Params = serde_json::from_value(params)
+            .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+
+        let entries: Arc<EntryService> = daemon.entries.clone();
+        let id = p.id;
+        let block = {
+            let entries = entries.clone();
+            blocking(move || entries.block_service().delete(id)).await??
+        };
+
+        // Re-render the entry's .nomai (block list changed). Runs in the
+        // same spawn_blocking pattern as Append/Update. The chunks_ad trigger
+        // (V9) cleans vec_chunk_embeddings when CASCADE removes the block's
+        // chunks; no manual loop needed here.
+        rerender_entry_nomai(&entries, block.entry_id).await?;
+
+        Ok(json!({"deleted": true, "id": id.to_string()}))
     }
 }
 

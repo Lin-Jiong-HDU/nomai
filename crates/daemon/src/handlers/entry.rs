@@ -109,35 +109,9 @@ impl RpcHandler for Delete {
         let p: Params = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
-        // Plan 4: chunks are block-addressed with CASCADE on block_id; deleting
-        // the entry CASCADEs blocks → chunks. Chunk embeddings live in
-        // vec_chunk_embeddings (vec0 has no FK CASCADE), so we clean them up
-        // explicitly here. Plan 5 may move this to a TRIGGER + retry job.
-        let entries = daemon.entries.clone();
-        let id_for_get = p.id;
-        let blocks = blocking(move || {
-            let entries = entries;
-            let entry = entries.get(id_for_get)?;
-            Ok(entry.blocks)
-        })
-        .await??;
-
-        let chunks = daemon.chunks.clone();
-        for block in blocks {
-            let chunks = chunks.clone();
-            let block_id = block.id;
-            let chunk_ids: Vec<ulid::Ulid> = blocking(move || {
-                let result = chunks.list(block_id)?;
-                Ok(result.items.into_iter().map(|c| c.id).collect::<Vec<_>>())
-            })
-            .await??;
-            for cid in chunk_ids {
-                let chunks = daemon.chunks.clone();
-                blocking(move || chunks.delete_embedding(cid)).await??;
-            }
-        }
-
-        // Now delete the entry — FK CASCADE removes blocks + chunks.
+        // Plan 5: deleting the entry CASCADEs blocks → chunks; the V9
+        // chunks_ad AFTER DELETE trigger cleans vec_chunk_embeddings when
+        // each chunk row goes away. No manual N+1 walk needed here.
         let entries = daemon.entries.clone();
         blocking(move || entries.delete(p.id)).await??;
         Ok(json!({ "deleted": true }))

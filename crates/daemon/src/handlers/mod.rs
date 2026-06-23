@@ -62,6 +62,8 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     m.insert(h.method(), Arc::new(h));
     let h = block::Update;
     m.insert(h.method(), Arc::new(h));
+    let h = block::Delete;
+    m.insert(h.method(), Arc::new(h));
 
     // events.*
     let h = events::List;
@@ -951,7 +953,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_delete_cascades_to_chunks_and_cleanups_embeddings() {
+    async fn entry_delete_cleans_chunk_embeddings_via_trigger() {
+        // Plan 5 Task 4: the V9 chunks_ad trigger now cleans
+        // vec_chunk_embeddings when chunks are CASCADE-deleted; the entry.delete
+        // handler no longer walks chunks and calls delete_embedding.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -978,23 +983,46 @@ mod tests {
             }
         }
 
-        // Precondition: chunk search finds 2.
+        // Precondition: chunk search finds 2; vec_chunk_embeddings has 2 rows.
         let pre = daemon
             .dispatch(req("search.semantic", json!({"query":"x","limit":10})))
             .await;
         assert_eq!(pre.result.unwrap()["items"].as_array().unwrap().len(), 2);
+        {
+            let conn = daemon.entries.conn_for_test();
+            let n: i64 = conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM vec_chunk_embeddings", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(n, 2);
+        }
 
-        // Delete the entry.
+        // Delete the entry — CASCADE removes blocks → chunks; chunks_ad trigger
+        // cleans vec_chunk_embeddings.
         daemon
             .dispatch(req("entry.delete", json!({"id": entry_id})))
             .await;
 
-        // After: chunk search returns 0 (CASCADE removed chunks; entry.delete
-        // handler cleaned up vec_chunk_embeddings rows).
+        // After: chunk search returns 0 because the trigger cleaned up
+        // vec_chunk_embeddings (no handler-side walk).
         let post = daemon
             .dispatch(req("search.semantic", json!({"query":"x","limit":10})))
             .await;
         assert_eq!(post.result.unwrap()["items"].as_array().unwrap().len(), 0);
+        {
+            let conn = daemon.entries.conn_for_test();
+            let n: i64 = conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM vec_chunk_embeddings", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(n, 0, "chunks_ad trigger should have cleaned embeddings");
+        }
 
         // entry.list should not return the deleted entry.
         let list = daemon
@@ -1081,9 +1109,9 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 23 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:2,
+        // 24 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
         // events:3, search:2, provider:1, cache:2, batch:1).
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 24);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1211,7 +1239,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 24); // 23 built-in + custom.echo
+        assert_eq!(tools.len(), 25); // 24 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
@@ -1825,6 +1853,133 @@ mod tests {
         let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
         let resp = daemon
             .dispatch(req("block.update", json!({"id": phantom, "text": "x"})))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1001); // NotFound
+    }
+
+    // ----- block.delete e2e tests (Plan 5 Task 4) -----
+
+    #[tokio::test]
+    async fn block_delete_removes_block_and_rerenders_nomai() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create entry with two blocks.
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"T","blocks":[
+                    {"type":"note","text":"first"},
+                    {"type":"claim","text":"second"}
+                ]}),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+        let entry_json = create_resp.result.unwrap();
+        let entry_id = entry_json["id"].as_str().unwrap().to_string();
+        let entry_ulid: ulid::Ulid = entry_id.parse().unwrap();
+        let block0_id = entry_json["blocks"][0]["id"].as_str().unwrap().to_string();
+        let block1_id = entry_json["blocks"][1]["id"].as_str().unwrap().to_string();
+
+        // Delete the first block.
+        let del_resp = daemon
+            .dispatch(req("block.delete", json!({"id": block0_id})))
+            .await;
+        assert!(del_resp.error.is_none(), "{:?}", del_resp.error);
+        let del_result = del_resp.result.unwrap();
+        assert_eq!(del_result["deleted"], true);
+        assert_eq!(del_result["id"], block0_id);
+
+        // entry.get now shows only the surviving block.
+        let get_resp = daemon
+            .dispatch(req("entry.get", json!({"id": entry_id})))
+            .await;
+        let blocks = get_resp.result.unwrap()["blocks"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["id"], block1_id);
+        assert_eq!(blocks[0]["type"], "claim");
+
+        // The .nomai file on disk was rewritten and round-trips.
+        let doc = daemon
+            .entries
+            .content_store()
+            .read_entry(entry_ulid)
+            .expect("rerendered .nomai must be readable");
+        assert_eq!(doc.blocks.len(), 1);
+        assert_eq!(doc.blocks[0].r#type.as_str(), "claim");
+    }
+
+    #[tokio::test]
+    async fn block_delete_cleans_chunk_embeddings_via_trigger() {
+        // Plan 5 Task 4: the V9 chunks_ad trigger must clean
+        // vec_chunk_embeddings when block.delete CASCADE-removes chunks.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"T","blocks":[{"type":"note","text":"body"}]}),
+            ))
+            .await;
+        let entry_json = create_resp.result.unwrap();
+        let block_id: ulid::Ulid = entry_json["blocks"][0]["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        // Write a chunk embedding directly.
+        let chunks = daemon.chunks.clone();
+        let chunk_id = chunks.list(block_id).unwrap().items[0].id;
+        chunks.write_embedding(chunk_id, &[1.0_f32; DIM]).unwrap();
+
+        // Precondition: the vec_chunk_embeddings row exists.
+        {
+            let conn = daemon.entries.conn_for_test();
+            let n: i64 = conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM vec_chunk_embeddings", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(n, 1);
+        }
+
+        // Delete the block — CASCADE removes chunks; chunks_ad trigger cleans
+        // vec_chunk_embeddings.
+        daemon
+            .dispatch(req("block.delete", json!({"id": block_id.to_string()})))
+            .await;
+
+        // The trigger should have removed the embedding row.
+        let n: i64 = {
+            let conn = daemon.entries.conn_for_test();
+            conn.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM vec_chunk_embeddings", [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(n, 0, "chunks_ad trigger should clean vec_chunk_embeddings");
+    }
+
+    #[tokio::test]
+    async fn block_delete_to_unknown_block_returns_not_found() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req("block.delete", json!({"id": phantom})))
             .await;
         let err = resp.error.unwrap();
         assert_eq!(err.code, 1001); // NotFound
