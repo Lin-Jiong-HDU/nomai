@@ -808,4 +808,53 @@ mod tests {
         let hits = chunks.semantic_search(&vec_1536(&[1.0]), 3, None).unwrap();
         assert_eq!(hits.len(), 3);
     }
+
+    #[test]
+    fn ensure_vec_chunk_embeddings_errors_on_corrupt_sql_not_panic() {
+        // Invariant: if `vec_chunk_embeddings` SQL is malformed (lacks
+        // `FLOAT[N]`), `ensure_vec_chunk_embeddings` must return `Err`, never
+        // panic. parse_vec_dim returns None on this SQL, and production code
+        // must surface that as `CoreError::Storage`.
+        crate::storage::init_sqlite_extensions();
+        let svc = ChunkService::for_test().unwrap();
+
+        // Strategy 1: DROP well-formed table + CREATE with `FLOAT` (no `[N]`).
+        // If vec0 rejects that at CREATE time, fall through to strategy 2.
+        {
+            let conn = svc.conn.lock().unwrap();
+            conn.execute_batch("DROP TABLE vec_chunk_embeddings")
+                .unwrap();
+            let created = conn.execute_batch(
+                "CREATE VIRTUAL TABLE vec_chunk_embeddings USING vec0(
+                    chunk_id TEXT PRIMARY KEY,
+                    embedding FLOAT distance_metric=cosine
+                )",
+            );
+            if created.is_err() {
+                // Strategy 2: replace the well-formed table with a plain
+                // (non-virtual) table whose SQL has no FLOAT[N] token.
+                conn.execute_batch(
+                    "CREATE TABLE vec_chunk_embeddings (
+                        chunk_id TEXT PRIMARY KEY,
+                        embedding BLOB
+                    )",
+                )
+                .unwrap();
+            }
+        }
+
+        // Must return Err, not panic.
+        let result = svc.ensure_vec_chunk_embeddings(1536);
+        assert!(
+            result.is_err(),
+            "expected Err on corrupt SQL, got {:?}",
+            result
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CoreError::Storage(_)),
+            "expected CoreError::Storage, got {:?}",
+            err
+        );
+    }
 }

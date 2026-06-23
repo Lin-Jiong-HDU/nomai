@@ -2531,6 +2531,147 @@ mod tests {
 
     // ----- Plan 6 Task 5: quiet boot emits no index.synced event -----
 
+    // ----- Plan 7 Task 3: full content storage lifecycle e2e regression -----
+
+    #[tokio::test]
+    async fn content_storage_full_lifecycle_e2e() {
+        // One walk through create → append → update → search(block_type) →
+        // verify → drop FS → verify drift → export_to_fs → verify clean.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // 1. Create entry with one @claim block.
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({
+                    "title": "Test claim",
+                    "blocks": [{"type": "claim", "text": "Earth orbits the sun."}]
+                }),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+        let entry_id = create_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let entry_ulid: ulid::Ulid = entry_id.parse().unwrap();
+
+        // 2. Append an @evidence block.
+        let append_resp = daemon
+            .dispatch(req(
+                "block.append",
+                json!({
+                    "entry_id": entry_id,
+                    "type": "evidence",
+                    "text": "Kepler observed elliptical orbits."
+                }),
+            ))
+            .await;
+        assert!(append_resp.error.is_none(), "{:?}", append_resp.error);
+        let evidence_id = append_resp.result.unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // 3. Update the @evidence text.
+        let update_resp = daemon
+            .dispatch(req(
+                "block.update",
+                json!({
+                    "id": evidence_id,
+                    "text": "Kepler's laws describe elliptical orbits with the sun at one focus."
+                }),
+            ))
+            .await;
+        assert!(update_resp.error.is_none(), "{:?}", update_resp.error);
+
+        // 4. entry.get reflects 2 blocks (claim + updated evidence).
+        let get_resp = daemon
+            .dispatch(req("entry.get", json!({"id": entry_id})))
+            .await;
+        assert!(get_resp.error.is_none(), "{:?}", get_resp.error);
+        let blocks = get_resp.result.unwrap()["blocks"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "claim");
+        assert_eq!(blocks[1]["type"], "evidence");
+        assert!(blocks[1]["text"].as_str().unwrap().contains("one focus"));
+
+        // 5. search.fulltext with block_type=claim matches "Earth".
+        let claim_search = daemon
+            .dispatch(req(
+                "search.fulltext",
+                json!({"query": "Earth", "block_type": "claim"}),
+            ))
+            .await;
+        assert!(claim_search.error.is_none(), "{:?}", claim_search.error);
+        let claim_hits = claim_search.result.unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(!claim_hits.is_empty(), "claim should match 'Earth'");
+
+        // Same query with block_type=evidence should NOT match the claim
+        // (the evidence block contains "Kepler", not "Earth").
+        let evidence_search = daemon
+            .dispatch(req(
+                "search.fulltext",
+                json!({"query": "Earth", "block_type": "evidence"}),
+            ))
+            .await;
+        assert!(
+            evidence_search.error.is_none(),
+            "{:?}",
+            evidence_search.error
+        );
+        let evidence_hits = evidence_search.result.unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(evidence_hits.is_empty(), "evidence doesn't contain 'Earth'");
+
+        // 6. index.verify should report consistent=1 (entry's .nomai matches
+        // the index with a fresh mtime).
+        let verify_resp = daemon.dispatch(req("index.verify", json!({}))).await;
+        assert!(verify_resp.error.is_none(), "{:?}", verify_resp.error);
+        assert_eq!(verify_resp.result.unwrap()["consistent"], 1);
+
+        // 7. Drop the .nomai file from FS to simulate corruption.
+        let content_store = daemon.entries.content_store().clone();
+        std::fs::remove_file(content_store.entry_file(entry_ulid)).unwrap();
+
+        // 8. index.verify should now report drift — the entry is no longer
+        // consistent because its .nomai is missing on disk.
+        let verify_after = daemon.dispatch(req("index.verify", json!({}))).await;
+        assert!(verify_after.error.is_none(), "{:?}", verify_after.error);
+        let consistent_after: u64 =
+            serde_json::from_value(verify_after.result.unwrap()["consistent"].clone()).unwrap();
+        assert_eq!(
+            consistent_after, 0,
+            "entry should no longer be consistent after FS drop"
+        );
+
+        // 9. system.export_to_fs regenerates the .nomai from DB state.
+        let export_resp = daemon.dispatch(req("system.export_to_fs", json!({}))).await;
+        assert!(export_resp.error.is_none(), "{:?}", export_resp.error);
+        let export_result = export_resp.result.unwrap();
+        let exported: u64 = serde_json::from_value(export_result["exported"].clone()).unwrap();
+        assert_eq!(exported, 1, "the dropped entry should be re-exported");
+        assert!(
+            content_store.entry_file(entry_ulid).exists(),
+            ".nomai should be regenerated"
+        );
+
+        // 10. index.verify should now be consistent again.
+        let verify_final = daemon.dispatch(req("index.verify", json!({}))).await;
+        assert!(verify_final.error.is_none(), "{:?}", verify_final.error);
+        assert_eq!(verify_final.result.unwrap()["consistent"], 1);
+    }
+
     #[tokio::test]
     async fn quiet_boot_emits_no_index_synced_event() {
         // setup_daemon uses EntryService::for_test — empty FS + empty index.
