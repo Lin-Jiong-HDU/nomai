@@ -64,6 +64,19 @@ impl ContentStore {
         let content = std::fs::read_to_string(&path)?;
         crate::nomai_format::parse(&content).map_err(CoreError::from)
     }
+
+    /// Recursively remove the entry's directory at `<root>/entries/<id>/`.
+    /// Idempotent: succeeds if the directory never existed. Returns
+    /// `CoreError::Io` if the path exists but cannot be removed (e.g. it's
+    /// a non-empty file instead of a directory, or permissions).
+    pub fn delete_entry(&self, entry_id: Ulid) -> Result<(), CoreError> {
+        let dir = self.entry_dir(entry_id);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(CoreError::Io(e)),
+        }
+    }
 }
 
 /// Atomically write `content` to `path`. Writes to `<path>.tmp`, fsyncs, then
@@ -205,5 +218,30 @@ mod tests {
 
         let err = store.read_entry(id).unwrap_err();
         assert!(matches!(err, CoreError::NomaiFormat(_)));
+    }
+
+    #[test]
+    fn delete_entry_removes_directory_and_contents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let doc = sample_doc();
+        store.write_entry(id, &doc).unwrap();
+        // Drop a sibling file to verify rm -rf semantics
+        let sibling = store.entry_dir(id).join("source.pdf");
+        std::fs::write(&sibling, b"fake pdf").unwrap();
+
+        store.delete_entry(id).unwrap();
+
+        assert!(!store.entry_dir(id).exists(), "entry dir should be gone");
+    }
+
+    #[test]
+    fn delete_entry_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        // Never written — delete should succeed anyway.
+        store.delete_entry(id).unwrap();
     }
 }
