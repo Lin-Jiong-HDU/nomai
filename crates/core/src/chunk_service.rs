@@ -38,7 +38,9 @@ impl ChunkService {
         crate::storage::init_sqlite_extensions();
         let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
         // Run migrations via EntryService so all tables exist.
-        crate::EntryService::new(conn.clone())?;
+        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", ulid::Ulid::new()));
+        let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
+        crate::EntryService::new(conn.clone(), content_store)?;
         Self::new(conn)
     }
 
@@ -372,7 +374,11 @@ mod tests {
         let e = entries
             .create(CreateEntry {
                 title: "container".into(),
-                body: "body".into(),
+                blocks: vec![crate::block_model::BlockInput {
+                    r#type: "note".into(),
+                    text: "body".into(),
+                    attrs: None,
+                }],
                 tags: None,
                 attrs: None,
                 source: None,
@@ -625,7 +631,11 @@ mod tests {
         let a = entries
             .create(CreateEntry {
                 title: "a".into(),
-                body: "x".into(),
+                blocks: vec![crate::block_model::BlockInput {
+                    r#type: "note".into(),
+                    text: "x".into(),
+                    attrs: None,
+                }],
                 tags: None,
                 attrs: None,
                 source: None,
@@ -634,7 +644,11 @@ mod tests {
         let b = entries
             .create(CreateEntry {
                 title: "b".into(),
-                body: "y".into(),
+                blocks: vec![crate::block_model::BlockInput {
+                    r#type: "note".into(),
+                    text: "y".into(),
+                    attrs: None,
+                }],
                 tags: None,
                 attrs: None,
                 source: None,
