@@ -61,7 +61,6 @@ pub struct SearchCacheStats {
 
 impl SearchCacheStats {
     /// Hits divided by total lookups; `0.0` when no lookups yet.
-    #[allow(dead_code)] // surfaced via cache.stats response in Task 7
     pub fn hit_rate(&self) -> f64 {
         let total = self.hits + self.misses;
         if total == 0 {
@@ -88,7 +87,6 @@ impl SearchCache {
 
     /// Current generation counter value. Spec §6 hook points call
     /// `bump_generation` to invalidate the cache.
-    #[allow(dead_code)] // read in Task 7 (cache.stats) / Tasks 4-6 (bump sites)
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
@@ -101,7 +99,7 @@ impl SearchCache {
 
     /// Number of entries currently held in the map (across all generations;
     /// old-generation entries linger until `clear`).
-    #[allow(clippy::len_without_is_empty, dead_code)] // surfaced via cache.stats in Task 7
+    #[allow(clippy::len_without_is_empty)] // surfaced via cache.stats in Task 7
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -110,7 +108,6 @@ impl SearchCache {
     /// after clear the map is empty, so the next lookup misses regardless
     /// of generation. Counters are intentionally not reset (matches
     /// emb_cache's `clear` semantics).
-    #[allow(dead_code)] // called from cache.clear in Task 7
     pub fn clear(&self) -> u64 {
         let cleared = self.map.len() as u64;
         self.map.clear();
@@ -177,7 +174,6 @@ impl SearchCache {
     }
 
     /// Snapshot of cache statistics.
-    #[allow(dead_code)] // surfaced via cache.stats in Task 7
     pub fn stats(&self) -> SearchCacheStats {
         SearchCacheStats {
             generation: self.generation.load(Ordering::Relaxed),

@@ -1542,7 +1542,8 @@ mod tests {
 
         let resp = daemon.dispatch(req("cache.stats", json!({}))).await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
-        let emb = &resp.result.unwrap()["embeddings"];
+        let result = resp.result.unwrap();
+        let emb = &result["embeddings"];
         assert_eq!(emb["model"], "test-model");
         assert_eq!(emb["dim"], DIM);
         assert_eq!(emb["rows"], 0);
@@ -1550,6 +1551,12 @@ mod tests {
         assert_eq!(emb["misses"], 0);
         assert!(emb["warn_rows"].as_u64().is_some());
         assert_eq!(emb["warning"], false);
+        // Spec 7: searches namespace present.
+        let s = &result["searches"];
+        assert_eq!(s["generation"], 0);
+        assert_eq!(s["entries"], 0);
+        assert_eq!(s["hits"], 0);
+        assert_eq!(s["misses"], 0);
     }
 
     #[tokio::test]
@@ -1601,13 +1608,16 @@ mod tests {
             .unwrap();
         }
 
+        // Default namespace = "embeddings" → only emb_cache cleared.
         let resp = daemon.dispatch(req("cache.clear", json!({}))).await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
-        assert!(result["cleared"].as_u64().unwrap() >= 2);
-        let by_model = result["by_model"].as_object().unwrap();
+        assert!(result["embeddings"]["cleared"].as_u64().unwrap() >= 2);
+        let by_model = result["embeddings"]["by_model"].as_object().unwrap();
         assert!(by_model.contains_key("test-model"));
         assert!(by_model.contains_key("other-model"));
+        // Searches namespace null (not touched by default clear).
+        assert!(result["searches"].is_null());
     }
 
     #[tokio::test]
@@ -1655,7 +1665,9 @@ mod tests {
             ))
             .await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
-        let cleared = resp.result.unwrap()["cleared"].as_u64().unwrap();
+        let cleared = resp.result.unwrap()["embeddings"]["cleared"]
+            .as_u64()
+            .unwrap();
         assert_eq!(cleared, 1, "only the 2026-01-01 row should be cleared");
 
         // Verify the remaining row is the newer one.
@@ -1692,11 +1704,84 @@ mod tests {
             .dispatch(req("cache.clear", json!({"keep_recent": 1})))
             .await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
-        let cleared = resp.result.unwrap()["cleared"].as_u64().unwrap();
+        let cleared = resp.result.unwrap()["embeddings"]["cleared"]
+            .as_u64()
+            .unwrap();
         assert_eq!(cleared, 3);
 
         let stats = daemon.dispatch(req("cache.stats", json!({}))).await;
         assert_eq!(stats.result.unwrap()["embeddings"]["rows"], 1);
+    }
+
+    #[tokio::test]
+    async fn cache_clear_with_namespace_searches_only() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+        let _ = seed_one_entry(&daemon, "warm").await;
+
+        // Warm search cache + drop one row into emb_cache.
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"warm","limit":10})))
+            .await;
+        {
+            let conn = daemon.entries.conn_for_test();
+            conn.lock().unwrap().execute(
+                "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params!["test-model", vec![1u8; 32], DIM, vec![0u8; DIM * 4], "2026-01-01T00:00:00Z"],
+            ).unwrap();
+        }
+
+        let resp = daemon
+            .dispatch(req("cache.clear", json!({"namespace": "searches"})))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert!(result["embeddings"].is_null(), "emb_cache untouched");
+        assert_eq!(result["searches"]["cleared"].as_u64().unwrap(), 1);
+
+        // Verify emb_cache still has its row.
+        let stats = daemon.dispatch(req("cache.stats", json!({}))).await;
+        assert_eq!(stats.result.unwrap()["embeddings"]["rows"], 1);
+    }
+
+    #[tokio::test]
+    async fn cache_clear_with_namespace_all_clears_both() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+        let _ = seed_one_entry(&daemon, "warm").await;
+
+        // Warm both caches.
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"warm","limit":10})))
+            .await;
+        {
+            let conn = daemon.entries.conn_for_test();
+            conn.lock().unwrap().execute(
+                "INSERT INTO emb_cache (model, body_hash, dim, embedding, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params!["test-model", vec![1u8; 32], DIM, vec![0u8; DIM * 4], "2026-01-01T00:00:00Z"],
+            ).unwrap();
+        }
+
+        let resp = daemon
+            .dispatch(req("cache.clear", json!({"namespace": "all"})))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert!(result["embeddings"]["cleared"].as_u64().unwrap() >= 1);
+        assert!(result["searches"]["cleared"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn cache_clear_rejects_unknown_namespace() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+        let resp = daemon
+            .dispatch(req("cache.clear", json!({"namespace": "bogus"})))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1003); // Validation
     }
 
     // ----- block.append e2e test (Plan 5 Task 2) -----
