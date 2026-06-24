@@ -13,7 +13,6 @@ use serde_json::Value;
 /// Which search RPC a cached result came from. Part of the cache key so
 /// the same query string hitting both RPCs doesn't collide.
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
-#[allow(dead_code)] // constructed in Task 3 (search handler wiring); tests exercise it now
 pub(crate) enum SearchRpc {
     Semantic,
     Fulltext,
@@ -129,7 +128,6 @@ impl SearchCache {
     ///
     /// Generic bounds (`F: FnOnce() -> Fut, Fut: Future`) let call sites
     /// pass `|| async move { ... }` async closures; verified by Task 2 tests.
-    #[allow(dead_code)] // wired into search handlers in Task 3
     pub(crate) async fn lookup_or_compute<F, Fut>(
         &self,
         rpc: SearchRpc,

@@ -2701,4 +2701,62 @@ mod tests {
             "empty boot should not emit index.synced event (got {n})"
         );
     }
+
+    // ----- Spec 7: search cache e2e -----
+
+    #[tokio::test]
+    async fn search_fulltext_caches_on_repeat() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"Rust","blocks":[{"type":"note","text":"rust programming language"}]}),
+            ))
+            .await;
+
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"rust","limit":10})))
+            .await;
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"rust","limit":10})))
+            .await;
+
+        let stats = daemon.search_cache.stats();
+        assert_eq!(stats.fulltext_hits, 1, "second fulltext call should hit");
+        assert_eq!(stats.fulltext_misses, 1);
+    }
+
+    #[tokio::test]
+    async fn search_semantic_caches_on_repeat() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"index": 0, "embedding": vec![1.0_f32; DIM]}]
+            })))
+            .mount(&server)
+            .await;
+        let daemon = setup_daemon(&server).await;
+
+        daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"X","blocks":[{"type":"note","text":"some body"}]}),
+            ))
+            .await;
+
+        let _ = daemon
+            .dispatch(req("search.semantic", json!({"query":"q","limit":10})))
+            .await;
+        let _ = daemon
+            .dispatch(req("search.semantic", json!({"query":"q","limit":10})))
+            .await;
+
+        let stats = daemon.search_cache.stats();
+        assert_eq!(stats.semantic_hits, 1, "second semantic call should hit");
+        assert_eq!(stats.semantic_misses, 1);
+    }
 }

@@ -10,6 +10,7 @@ use nomai_providers::EmbeddingProvider;
 use crate::daemon::Daemon;
 use crate::handlers::entry::blocking;
 use crate::rpc::RpcHandler;
+use crate::search_cache::SearchRpc;
 
 fn default_search_limit() -> u32 {
     10
@@ -50,15 +51,37 @@ impl RpcHandler for Fulltext {
         let query = p.query;
         let limit = p.limit;
         let block_type = p.block_type;
-        let results =
-            blocking(move || entries.fulltext_search(&query, limit, block_type.as_deref()))
-                .await??;
-
-        let items: Vec<Value> = results
-            .iter()
-            .map(|r| json!({ "entry": r.entry, "score": r.score }))
-            .collect();
-        Ok(json!({ "items": items }))
+        // Snapshot the strings we need inside the compute closure. `query`
+        // is moved; `block_type` is cloned because we need to also pass an
+        // `Option<&str>` to lookup_or_compute below.
+        let bt_for_compute = block_type.clone();
+        let cached = daemon
+            .search_cache
+            .lookup_or_compute(
+                SearchRpc::Fulltext,
+                &query,
+                limit,
+                block_type.as_deref(),
+                || {
+                    let entries = entries.clone();
+                    let bt = bt_for_compute.clone();
+                    let query_for_closure = query.clone();
+                    async move {
+                        let items_inner = blocking(move || {
+                            entries.fulltext_search(&query_for_closure, limit, bt.as_deref())
+                        })
+                        .await??;
+                        // Map to JSON value items matching the existing wire
+                        // format.
+                        Ok(items_inner
+                            .into_iter()
+                            .map(|r| json!({ "entry": r.entry, "score": r.score }))
+                            .collect::<Vec<_>>())
+                    }
+                },
+            )
+            .await?;
+        Ok(json!({ "items": cached.as_ref() }))
     }
 }
 
@@ -72,24 +95,43 @@ impl RpcHandler for Semantic {
         let p: SemanticParams = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
-        // Embed query, then KNN over chunk embeddings.
         let query_str = p.query;
-        let embeddings = daemon.cache.embed(&[&query_str]).await?;
-        let qvec = embeddings
-            .into_iter()
-            .next()
-            .ok_or_else(|| CoreError::Config("empty embedding response".into()))?;
-
-        let chunks = daemon.chunks.clone();
         let limit = p.limit;
         let block_type = p.block_type;
-        let results =
-            blocking(move || chunks.semantic_search(&qvec, limit as usize, block_type.as_deref()))
-                .await??;
-        let items: Vec<Value> = results
-            .iter()
-            .map(|r| json!({ "chunk": r.chunk, "score": r.score }))
-            .collect();
-        Ok(json!({ "items": items }))
+        let bt_for_compute = block_type.clone();
+
+        let cache = daemon.search_cache.clone();
+        let embed = daemon.cache.clone();
+        let chunks = daemon.chunks.clone();
+        let cached = cache
+            .lookup_or_compute(
+                SearchRpc::Semantic,
+                &query_str,
+                limit,
+                block_type.as_deref(),
+                || {
+                    let embed = embed.clone();
+                    let chunks = chunks.clone();
+                    let query_owned = query_str.clone();
+                    let bt = bt_for_compute.clone();
+                    async move {
+                        let embeddings = embed.embed(&[&query_owned]).await?;
+                        let qvec = embeddings
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| CoreError::Config("empty embedding response".into()))?;
+                        let items_inner = blocking(move || {
+                            chunks.semantic_search(&qvec, limit as usize, bt.as_deref())
+                        })
+                        .await??;
+                        Ok(items_inner
+                            .into_iter()
+                            .map(|r| json!({ "chunk": r.chunk, "score": r.score }))
+                            .collect::<Vec<_>>())
+                    }
+                },
+            )
+            .await?;
+        Ok(json!({ "items": cached.as_ref() }))
     }
 }
