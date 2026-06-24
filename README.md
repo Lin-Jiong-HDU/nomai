@@ -1,6 +1,6 @@
 # nomai
 
-**A Nomai-inspired personal knowledge core.** Storage, indexing, and retrieval primitives over JSON-RPC on stdio — bring your own UI.
+**A substrate for personal knowledge.** Typed blocks + links + events + chunks, exposed as JSON-RPC primitives over stdio — build your RAG, LLM wiki, or agent memory on top.
 
 > Named after the Nomai from _Outer Wilds_ — an alien race who wove a network of knowledge across their star system. nomai the project aims to be the substrate on which your knowledge tools are built, not the tool itself.
 
