@@ -2853,4 +2853,104 @@ mod tests {
 
         assert_eq!(daemon.search_cache.generation(), gen_before + 1);
     }
+
+    #[tokio::test]
+    async fn block_append_invalidates_search_cache() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+        let entry_id = seed_one_entry(&daemon, "host").await;
+
+        // Warm the cache.
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"host","limit":10})))
+            .await;
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"host","limit":10})))
+            .await;
+        let gen_before = daemon.search_cache.generation();
+
+        daemon
+            .dispatch(req(
+                "block.append",
+                json!({"entry_id": entry_id, "type": "note", "text": "appended"}),
+            ))
+            .await;
+
+        assert_eq!(daemon.search_cache.generation(), gen_before + 1);
+    }
+
+    #[tokio::test]
+    async fn block_update_invalidates_search_cache() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"t","blocks":[{"type":"note","text":"original"}]}),
+            ))
+            .await;
+        let block_id = create_resp.result.unwrap()["blocks"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let _ = daemon
+            .dispatch(req(
+                "search.fulltext",
+                json!({"query":"original","limit":10}),
+            ))
+            .await;
+        let _ = daemon
+            .dispatch(req(
+                "search.fulltext",
+                json!({"query":"original","limit":10}),
+            ))
+            .await;
+        let gen_before = daemon.search_cache.generation();
+
+        daemon
+            .dispatch(req(
+                "block.update",
+                json!({"id": block_id, "text": "rewritten"}),
+            ))
+            .await;
+
+        assert_eq!(daemon.search_cache.generation(), gen_before + 1);
+    }
+
+    #[tokio::test]
+    async fn block_delete_invalidates_search_cache() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let create_resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"t","blocks":[
+                    {"type":"note","text":"first"},
+                    {"type":"note","text":"second"}
+                ]}),
+            ))
+            .await;
+        let entry_json = create_resp.result.unwrap();
+        let block0 = entry_json["blocks"][0]["id"].as_str().unwrap().to_string();
+
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"first","limit":10})))
+            .await;
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"first","limit":10})))
+            .await;
+        let gen_before = daemon.search_cache.generation();
+
+        daemon
+            .dispatch(req("block.delete", json!({"id": block0})))
+            .await;
+
+        assert_eq!(daemon.search_cache.generation(), gen_before + 1);
+    }
 }

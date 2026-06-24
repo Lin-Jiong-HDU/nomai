@@ -55,6 +55,9 @@ impl RpcHandler for Append {
         // spawn_blocking pattern as the rest of this handler family.
         rerender_entry_nomai(&entries, entry_id).await?;
 
+        // Spec 7: invalidate search cache.
+        daemon.search_cache.bump_generation();
+
         serde_json::to_value(&block).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
 }
@@ -94,6 +97,9 @@ impl RpcHandler for Update {
         // changed). Runs in the same spawn_blocking pattern as Append.
         rerender_entry_nomai(&entries, block.entry_id).await?;
 
+        // Spec 7: invalidate search cache.
+        daemon.search_cache.bump_generation();
+
         serde_json::to_value(&block).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
 }
@@ -125,6 +131,9 @@ impl RpcHandler for Delete {
         // (V9) cleans vec_chunk_embeddings when CASCADE removes the block's
         // chunks; no manual loop needed here.
         rerender_entry_nomai(&entries, block.entry_id).await?;
+
+        // Spec 7: invalidate search cache.
+        daemon.search_cache.bump_generation();
 
         Ok(json!({"deleted": true, "id": id.to_string()}))
     }
