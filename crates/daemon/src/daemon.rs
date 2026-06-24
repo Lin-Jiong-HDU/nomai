@@ -33,6 +33,11 @@ pub struct Daemon {
     // Used by search.semantic (Task 7); keep despite no current reader.
     #[allow(dead_code)]
     pub(crate) embedding_dim: usize,
+    /// Configured chunk target size (characters). Stored for symmetry with
+    /// `embedding_dim` and future introspection RPCs; the value has already
+    /// been baked into the `EntryService` block_service at construction.
+    #[allow(dead_code)]
+    pub(crate) chunk_target_size: usize,
     pub(crate) handlers: HashMap<&'static str, Arc<dyn RpcHandler>>,
 }
 
@@ -59,7 +64,9 @@ impl Daemon {
         // Run migrations + ensure vec_chunk_embeddings exist (Plan 4:
         // entry-level vec_embeddings was dropped in V8; chunk-level is the
         // sole embedding surface).
-        let entries = Arc::new(EntryService::new(conn.clone(), content_store)?);
+        let chunk_target_size = config.chunking.target_size;
+        eprintln!("info: chunk_target_size={chunk_target_size} chars");
+        let entries = Arc::new(EntryService::new(conn.clone(), content_store, chunk_target_size)?);
         let links = Arc::new(LinkService::new(conn.clone())?);
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
@@ -122,6 +129,7 @@ impl Daemon {
             embedding_model: config.embedding.model,
             llm_model: config.llm.model,
             embedding_dim: config.embedding.dim,
+            chunk_target_size,
             handlers: crate::handlers::registry(),
         })
     }
@@ -134,6 +142,7 @@ impl Daemon {
         embedding_model: String,
         llm_model: String,
         embedding_dim: usize,
+        chunk_target_size: usize,
     ) -> Self {
         // Reconstruct the shared connection from EntryService. Since
         // EntryService holds Arc<Mutex<Connection>>, we expose a test-only
@@ -165,6 +174,7 @@ impl Daemon {
             embedding_model,
             llm_model,
             embedding_dim,
+            chunk_target_size,
             handlers: crate::handlers::registry(),
         }
     }
@@ -229,10 +239,15 @@ impl Daemon {
         embedder: Arc<dyn EmbeddingProvider>,
         llm: Arc<dyn LlmProvider>,
         embedding_dim: usize,
+        chunk_target_size: usize,
         cache_model: impl Into<String>,
         warn_rows: u64,
     ) -> Result<Self, CoreError> {
-        let entries = Arc::new(EntryService::new(conn.clone(), content_store)?);
+        let entries = Arc::new(EntryService::new(
+            conn.clone(),
+            content_store,
+            chunk_target_size,
+        )?);
         let links = Arc::new(LinkService::new(conn.clone())?);
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
@@ -249,6 +264,7 @@ impl Daemon {
             embedding_model: String::new(),
             llm_model: String::new(),
             embedding_dim,
+            chunk_target_size,
             handlers,
         })
     }

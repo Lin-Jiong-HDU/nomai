@@ -289,6 +289,7 @@ mod tests {
             "test-embed".into(),
             "test-llm".into(),
             8,
+            1024,
         );
         daemon.chunks.ensure_vec_chunk_embeddings(8).unwrap();
         daemon
