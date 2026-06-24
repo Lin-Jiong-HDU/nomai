@@ -23,6 +23,7 @@ Early alpha. API surface is stabilizing but may change before 1.0. Currently sin
 - **MCP server**: native Model Context Protocol compatibility — Claude Desktop / Cursor / any MCP client can connect directly
 - **Plugin registry**: `RpcHandler` trait + `register_handler` — add custom RPCs without forking
 - **Embedding cache**: transparent `CachedEmbedder` wrapper persists `(model, blake3(body)) → embedding` in SQLite — repeated bodies skip the network API call entirely (zero invalidate logic; embeddings are deterministic)
+- **Search results cache**: transparent in-memory cache for `search.semantic` / `search.fulltext` results — same query twice hits the cache, skips the FTS5/KNN work. Generation-based invalidation: every `entry.*` / `block.*` mutation bumps the cache generation atomically, so cached results are always consistent with current state.
 - **lib + daemon dual mode**: embed `nomai-core` directly, or run `nomai-daemon` as a stdio service
 
 ## The five primitives

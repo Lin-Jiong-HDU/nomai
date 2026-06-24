@@ -30,6 +30,7 @@ For project overview and install, see the [README](../README.md) first.
 - [Configuration](#configuration)
 - [Retrieval modes](#retrieval-modes)
 - [Embedding cache](#embedding-cache)
+- [Search results cache](#search-results-cache)
 - [Lib mode (embed nomai-core)](#lib-mode)
 - [Custom RPCs](#custom-rpcs)
 - [What's next](#whats-next)
@@ -318,21 +319,41 @@ Each `BatchOp` has `{id?: string, method: string, params: object}`. The `id` fie
 
 ### cache.{#cache}
 
-Embedding cache introspection and management. The cache is a transparent wrapper around the configured embedding provider; it persists `(model, blake3(body)) → embedding` in the `emb_cache` SQLite table so identical bodies never trigger duplicate API calls.
+Embedding cache and search results cache introspection/management. The embedding cache is a transparent wrapper around the configured embedding provider; it persists `(model, blake3(body)) → embedding` in the `emb_cache` SQLite table so identical bodies never trigger duplicate API calls. The search cache is an in-memory wrapper around `search.semantic` / `search.fulltext` that skips the FTS5/KNN work when the same query is repeated within the current generation.
 
-| Method        | Params                                                                               | Returns                                                                     |
-| ------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
-| `cache.stats` | —                                                                                    | `{embeddings: {model, dim, rows, hits, misses, hit_rate, warn_rows, warning}}` |
-| `cache.clear` | `{model?: string, before?: RFC3339, keep_recent?: N}` — all optional, freely combined | `{cleared: N, by_model: {<model>: N, ...}}`                                 |
+| Method        | Params                                                                                                                                 | Returns                                                                                                                              |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `cache.stats` | —                                                                                                                                      | `{embeddings: {...}, searches: {generation, entries, hits, misses, hit_rate, by_rpc: {semantic: {hits, misses}, fulltext: {hits, misses}}}}` |
+| `cache.clear` | `{namespace?: "embeddings" \| "searches" \| "all", model?: string, before?: RFC3339, keep_recent?: N}` — all optional, freely combined | `{embeddings: {cleared, by_model} \| null, searches: {cleared} \| null}`                                                             |
 
-**`cache.stats` fields**:
+**`cache.stats` — `embeddings` block fields**:
 
 - `hit_rate` is `hits / (hits + misses)` over the daemon's lifetime
 - `rows` is the current `COUNT(*)` in `emb_cache` for the configured model
 - `warn_rows` is the configured soft-capacity threshold (default 100_000, see `[cache]` in [Configuration](#configuration))
 - `warning` is `true` when `rows > warn_rows` — the cache is **never** auto-evicted, this flag only signals that you may want to run `cache.clear`
 
-**`cache.clear` filters** — all optional and freely combinable:
+**`cache.stats` — `searches` block fields**:
+
+- `generation` is the current invalidation generation (monotonically increasing; every `entry.*` / `block.*` / `index.*` mutation bumps it atomically)
+- `entries` is the number of cached search results currently held in memory
+- `hits` / `misses` are lifetime counters across both `search.semantic` and `search.fulltext`
+- `hit_rate` is `hits / (hits + misses)` over the daemon's lifetime (0.0 when both are zero)
+- `by_rpc.semantic.{hits,misses}` and `by_rpc.fulltext.{hits,misses}` break the counters out per RPC kind
+
+Cached search results are keyed by `(generation, rpc, query_hash, limit, block_type_hash)`. Any mutation (`entry.create`/`update`/`delete`, `chunk.create`/`delete`, `block.append`/`update`/`delete`, `link.create`/`delete`, `index.sync`/`rebuild`) bumps `generation`, which invalidates every cached result atomically — the next search recomputes from current state. See [Search results cache](#search-results-cache) below.
+
+**`cache.clear` — `namespace` parameter** (default `"embeddings"`, for backward compatibility):
+
+| Namespace    | Effect                                                                                                                                                          |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `embeddings` | Default. Clears the `emb_cache` SQLite table subject to the filters below. `searches` is left untouched; `result.searches` is `null`.                            |
+| `searches`   | Clears the in-memory search cache (drops all `entries`). `model`/`before`/`keep_recent` are ignored. `result.embeddings` is `null`; `result.searches = {cleared}`. |
+| `all`        | Clears both. `result.embeddings` and `result.searches` are both populated.                                                                                       |
+
+Omitting `namespace` entirely is equivalent to `{"namespace": "embeddings"}` — existing clients see the same `{cleared, by_model}` shape they always did (now nested under `result.embeddings`).
+
+**`cache.clear` — embedding filters** (only consulted when `namespace ∈ {embeddings, all}`):
 
 | Filter        | Effect                                                                    | Example                              |
 | ------------- | ------------------------------------------------------------------------- | ------------------------------------ |
@@ -340,11 +361,11 @@ Embedding cache introspection and management. The cache is a transparent wrapper
 | `before`      | Delete only rows created strictly before this RFC3339 timestamp.          | `{"before": "2026-01-01T00:00:00Z"}` |
 | `keep_recent` | Keep only the N most-recent rows (by `created_at DESC`); delete the rest. | `{"keep_recent": 1000}`              |
 
-Combinations: `{"model": "emb-3", "before": "..."}` clears `emb-3` rows older than the cutoff; `{"keep_recent": 1000}` clears every model except the global 1000 newest rows. The response always includes `by_model` so you can see which namespaces were affected.
+Combinations: `{"model": "emb-3", "before": "..."}` clears `emb-3` rows older than the cutoff; `{"keep_recent": 1000}` clears every model except the global 1000 newest rows. When embeddings are cleared, the response always includes `by_model` so you can see which namespaces were affected.
 
 Counters (`hits` / `misses`) are **not** reset by `cache.clear` — they reflect lifetime activity, not current contents. Restart the daemon to reset them.
 
-See [Embedding cache](#embedding-cache) below for the caching model and design rationale.
+See [Embedding cache](#embedding-cache) below for the caching model and design rationale, and [Search results cache](#search-results-cache) for the search cache.
 
 ---
 
@@ -483,11 +504,11 @@ Every embedding API call is cached transparently in the `emb_cache` SQLite table
 | `warn_rows` | Configured soft-capacity threshold (`[cache] warn_rows`, default 100K) |
 | `warning`   | `true` when `rows > warn_rows` — monitor this in your health checks    |
 
-`cache.clear` removes rows from `emb_cache` but does not reset `hits` / `misses` — those reflect lifetime cache activity, not current contents. To reset, restart the daemon.
+`cache.clear({namespace: "embeddings"})` (the default) removes rows from `emb_cache` but does not reset `hits` / `misses` — those reflect lifetime cache activity, not current contents. To reset, restart the daemon.
 
 **Capacity and eviction**: the cache **grows without bound** and is **never auto-evicted**. This is deliberate — eviction would force a re-computation that costs real API money (the same body re-embedded). Instead, configure `warn_rows` as a soft threshold; when `cache.stats` reports `warning: true`, run `cache.clear` with the filter that fits your situation:
 
-- `cache.clear({model: "old-model"})` — old model leftover after a config switch
+- `cache.clear({model: "old-model"})` — old model leftover after a config switch (`namespace` defaults to `"embeddings"`)
 - `cache.clear({before: "2026-01-01T00:00:00Z"})` — bulk-clear stale rows
 - `cache.clear({keep_recent: 10000})` — trim to the most recent 10K rows
 
@@ -500,16 +521,62 @@ Each row is ~8KB at 2048 dims (`dim × 4 bytes + 32B hash + metadata`), so 100K 
 **What is NOT cached**:
 
 - LLM completions (`llm.complete`) — non-deterministic with temperature > 0
-- Fulltext search results — FTS5 is fast enough; YAGNI
 - Entry / chunk objects — SQLite's own page cache covers B-tree nodes
+
+(Search results from `search.semantic` / `search.fulltext` **are** cached — see [Search results cache](#search-results-cache) below.)
 
 **Cache layering**:
 
-| Layer               | Caches                            | Owned by                 |
-| ------------------- | --------------------------------- | ------------------------ |
-| SQLite page cache   | B-tree nodes (disk I/O avoidance) | SQLite (`cache_size`)    |
-| **emb_cache table** | **`(model, body) → vector`**      | **nomai (this section)** |
-| In-memory LRU       | (future, YAGNI)                   | —                        |
+| Layer                 | Caches                                       | Owned by                          |
+| --------------------- | -------------------------------------------- | --------------------------------- |
+| SQLite page cache     | B-tree nodes (disk I/O avoidance)            | SQLite (`cache_size`)             |
+| **emb_cache table**   | **`(model, body) → vector`**                 | **nomai (this section)**          |
+| **search cache**      | **`(rpc, query, limit, ...) → results`**     | **nomai ([Search results cache](#search-results-cache))** |
+| In-memory LRU         | (future, YAGNI)                              | —                                 |
+
+---
+
+## Search results cache{#search-results-cache}
+
+Every `search.semantic` and `search.fulltext` call is wrapped in a transparent in-memory cache. Same query (same RPC, same query text, same limit, same block-type filter) within the current generation returns the previous result without re-running FTS5 or KNN. The cache is invalidated wholesale on any mutation.
+
+**Why cache**: search results are deterministic functions of `(query, current index state)` for any given generation. Within a read-heavy workload (the common case for a knowledge base — many queries between writes), the same query is often repeated by different agents/sessions, and re-running it just re-runs the same SQLite work. The cache turns the second call into a hash-map lookup.
+
+**Where it applies** — both read RPCs:
+
+- `search.semantic` (entry and chunk granularity)
+- `search.fulltext`
+
+**Transparency**: the cache wraps the search handlers inside `Daemon::dispatch`. Clients see no API change — same params in, same result out, just faster on a hit.
+
+**Invalidation — generation counter**: the daemon holds a monotonically increasing `generation` counter. Every mutation that could change search results bumps it atomically:
+
+| Hook point | When it bumps |
+| ---------- | ------------- |
+| `entry.create` / `entry.update` / `entry.delete` | After the entry write lands |
+| `chunk.create` / `chunk.delete` | After the chunk write lands |
+| `block.append` / `block.update` / `block.delete` | After the block write lands |
+| `link.create` / `link.delete` | After the link write lands |
+| `index.sync` / `index.rebuild` | After the index refreshes |
+
+Cached entries are keyed by the current `generation`, so a bump effectively drops them all — the next search misses and recomputes from current state. There is no per-entry invalidation logic and no staleness window: a cached result is, by construction, consistent with the most recent mutation the daemon has applied.
+
+**Hit semantics** (mirrored in `cache.stats` → `searches`):
+
+| Field                          | Meaning                                                                |
+| ------------------------------ | ---------------------------------------------------------------------- |
+| `generation`                   | Current generation (bumps on every mutation)                           |
+| `entries`                      | Cached results currently held in memory                                |
+| `hits` / `misses`              | Lifetime counters across both RPCs                                     |
+| `hit_rate`                     | `hits / (hits + misses)`, or 0.0 when both are zero                    |
+| `by_rpc.semantic.{hits,misses}`   | Counters for `search.semantic`                                      |
+| `by_rpc.fulltext.{hits,misses}`   | Counters for `search.fulltext`                                      |
+
+**Capacity**: in-memory, unbounded, never auto-evicted (only invalidated by generation bumps). A single cached entry is small (a key + a JSON result array), and a busy read workload produces a bounded working set of distinct queries — typical deployments won't see meaningful growth. If you want to drop everything, run `cache.clear({namespace: "searches"})`.
+
+**Cache key**: `(generation, rpc, query_hash, limit, block_type_hash)`. Two calls hit the cache only if all five match — different limit, different granularity, or a different generation all miss.
+
+**Counter reset**: `hits` / `misses` are **not** reset by `cache.clear({namespace: "searches"})` — they reflect lifetime activity. Restart the daemon to reset them.
 
 ---
 
@@ -637,13 +704,15 @@ The `batch` RPC lets you compose multiple mutations atomically (see [RPC referen
 
 ## What's next
 
-nomai's kernel roadmap (Spec 1-5) is complete:
+nomai's kernel roadmap (Spec 1-7) is complete:
 
 - **Spec 1** — Plugin Registry + MCP compatibility (done)
 - **Spec 2** — Batch RPC with $ref + atomic transactions (done)
 - **Spec 3** — Lib API + Daemon accessors + from_services (done)
 - **Spec 4** — Application-layer examples (done)
 - **Spec 5** — Embedding cache (`emb_cache` + `CachedEmbedder` + `cache.stats` / `cache.clear`) (done)
+- **Spec 6** — Content storage (block-addressed chunks, FTS5 per block) (done)
+- **Spec 7** — Search results cache (`search.semantic` / `search.fulltext` in-memory cache + generation-based invalidation) (done)
 
 Future work (not yet started):
 
