@@ -51,7 +51,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn = Arc::new(std::sync::Mutex::new(Connection::open_in_memory()?));
     let tmp_store_dir = std::env::temp_dir().join(format!("nomai-example-{}", ulid::Ulid::new()));
     let content_store = Arc::new(ContentStore::new(tmp_store_dir));
-    let entries = Arc::new(EntryService::new(conn.clone(), content_store.clone(), 1024)?);
+    let entries = Arc::new(EntryService::new(
+        conn.clone(),
+        content_store.clone(),
+        1024,
+    )?);
 
     // 3. Seed some data
     entries.create(nomai_core::CreateEntry {

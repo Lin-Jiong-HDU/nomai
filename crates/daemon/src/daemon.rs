@@ -66,7 +66,11 @@ impl Daemon {
         // sole embedding surface).
         let chunk_target_size = config.chunking.target_size;
         eprintln!("info: chunk_target_size={chunk_target_size} chars");
-        let entries = Arc::new(EntryService::new(conn.clone(), content_store, chunk_target_size)?);
+        let entries = Arc::new(EntryService::new(
+            conn.clone(),
+            content_store,
+            chunk_target_size,
+        )?);
         let links = Arc::new(LinkService::new(conn.clone())?);
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
@@ -232,7 +236,7 @@ impl Daemon {
     /// right namespace. `warn_rows` is the soft capacity threshold at which
     /// `cache.stats` starts returning `warning: true` (use `100_000` as a
     /// sensible default).
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub fn from_services(
         conn: Arc<std::sync::Mutex<Connection>>,
         content_store: Arc<ContentStore>,

@@ -29,10 +29,7 @@ impl BlockService {
     /// `chunking::chunk_text` when deriving chunks from block text. Defaults
     /// to 1024 in `EntryService::for_test` and daemon examples; production
     /// callers thread `config.chunking.target_size` through.
-    pub fn new(
-        conn: Arc<Mutex<Connection>>,
-        chunk_target_size: usize,
-    ) -> Result<Self, CoreError> {
+    pub fn new(conn: Arc<Mutex<Connection>>, chunk_target_size: usize) -> Result<Self, CoreError> {
         {
             let mut guard = conn.lock().unwrap();
             guard
