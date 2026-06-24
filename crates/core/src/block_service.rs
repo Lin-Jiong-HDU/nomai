@@ -1013,4 +1013,43 @@ mod tests {
             "expected CoreError::Storage, got {result:?}"
         );
     }
+
+    #[test]
+    fn chunk_target_size_splits_block_when_set_below_default() {
+        // Regression guard: the value threaded through BlockService::new must
+        // actually reach chunking::chunk_text. Before config-ification, this
+        // was a hardcoded 1024 and a tiny target would have had no effect.
+        crate::storage::init_sqlite_extensions();
+        let conn = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
+        let tmp = tempfile::tempdir().unwrap();
+        let content_store = Arc::new(crate::content_store::ContentStore::new_with_cleanup(
+            tmp.path().to_path_buf(),
+            tmp,
+        ));
+        crate::EntryService::new(conn.clone(), content_store, 50).unwrap();
+        let svc = BlockService::new(conn, 50).unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+
+        // 200 chars, no paragraph or sentence boundaries → chunk_text's
+        // hard-cut path produces 4 chunks of 50 chars each.
+        let long_text = "x".repeat(200);
+        let block = svc
+            .append(entry_id, "note".into(), long_text, None)
+            .unwrap();
+
+        let chunks = crate::chunk_service::ChunkService::new(svc.conn.clone()).unwrap();
+        let result = chunks.list(block.id).unwrap();
+        assert!(
+            result.total > 1,
+            "expected multiple chunks with target_size=50, got {}",
+            result.total
+        );
+        for chunk in &result.items {
+            assert!(
+                chunk.text.chars().count() <= 50,
+                "chunk text exceeded target_size: {} chars",
+                chunk.text.chars().count()
+            );
+        }
+    }
 }
