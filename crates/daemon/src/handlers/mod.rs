@@ -2953,4 +2953,55 @@ mod tests {
 
         assert_eq!(daemon.search_cache.generation(), gen_before + 1);
     }
+
+    #[tokio::test]
+    async fn index_sync_no_change_does_not_invalidate() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+        let _ = seed_one_entry(&daemon, "x").await;
+
+        // Warm cache.
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"x","limit":10})))
+            .await;
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"x","limit":10})))
+            .await;
+        let gen_before = daemon.search_cache.generation();
+
+        // Sync with no FS drift → must NOT bump.
+        let resp = daemon.dispatch(req("index.sync", json!({}))).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        assert_eq!(
+            daemon.search_cache.generation(),
+            gen_before,
+            "no-op sync should not bump generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_rebuild_always_invalidates() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+        let _ = seed_one_entry(&daemon, "x").await;
+
+        // Warm cache.
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"x","limit":10})))
+            .await;
+        let gen_before = daemon.search_cache.generation();
+
+        // Rebuild — even with no changes, must bump (safe default).
+        let resp = daemon.dispatch(req("index.rebuild", json!({}))).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        assert_eq!(
+            daemon.search_cache.generation(),
+            gen_before + 1,
+            "rebuild should always bump"
+        );
+    }
 }

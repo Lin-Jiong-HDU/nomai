@@ -39,6 +39,13 @@ impl RpcHandler for Sync {
         // pass takes per-entry locks internally; we don't hold any lock here.
         let entries: Arc<EntryService> = daemon.entries.clone();
         let result: SyncResult = { blocking(move || entries.sync_from_fs()).await?? };
+
+        // Spec 7: only bump if FS drift was reconciled; no-op syncs are
+        // common and bumping them wastes the cache.
+        if result.added + result.updated + result.removed > 0 {
+            daemon.search_cache.bump_generation();
+        }
+
         serde_json::to_value(&result).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
 }
@@ -55,6 +62,11 @@ impl RpcHandler for Rebuild {
         // rebuild takes per-entry locks internally during the reindex phase.
         let entries: Arc<EntryService> = daemon.entries.clone();
         let result: RebuildResult = { blocking(move || entries.rebuild_index()).await?? };
+
+        // Spec 7: rebuild always invalidates — even an empty FS rebuild
+        // wipes the derived index, so cached results are stale by definition.
+        daemon.search_cache.bump_generation();
+
         serde_json::to_value(&result).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
 }
