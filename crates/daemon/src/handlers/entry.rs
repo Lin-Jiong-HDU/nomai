@@ -41,6 +41,9 @@ impl RpcHandler for Create {
         // are managed via BlockService::create_in_tx + a separate background
         // embedder. For v1, entry.create no longer triggers embedding work.
 
+        // Spec 7: invalidate search cache (new entry affects both search RPCs).
+        daemon.search_cache.bump_generation();
+
         serde_json::to_value(&entry).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
 }
@@ -91,6 +94,9 @@ impl RpcHandler for Update {
         // updated automatically when blocks change. No embedding re-trigger
         // is needed at this layer.
 
+        // Spec 7: invalidate search cache (fulltext returns entry snapshot).
+        daemon.search_cache.bump_generation();
+
         serde_json::to_value(&updated).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
 }
@@ -114,6 +120,10 @@ impl RpcHandler for Delete {
         // each chunk row goes away. No manual N+1 walk needed here.
         let entries = daemon.entries.clone();
         blocking(move || entries.delete(p.id)).await??;
+
+        // Spec 7: invalidate search cache.
+        daemon.search_cache.bump_generation();
+
         Ok(json!({ "deleted": true }))
     }
 }

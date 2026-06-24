@@ -2759,4 +2759,98 @@ mod tests {
         assert_eq!(stats.semantic_hits, 1, "second semantic call should hit");
         assert_eq!(stats.semantic_misses, 1);
     }
+
+    async fn seed_one_entry(daemon: &Daemon, title: &str) -> String {
+        let resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":title,"blocks":[{"type":"note","text":title}]}),
+            ))
+            .await;
+        resp.result.unwrap()["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn entry_create_invalidates_search_cache() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // First search (empty result): miss.
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"foo","limit":10})))
+            .await;
+        // Second search: hit (cache populated).
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"foo","limit":10})))
+            .await;
+        let stats_before = daemon.search_cache.stats();
+        assert_eq!(stats_before.fulltext_hits, 1);
+
+        // Create an entry → bump generation.
+        let _id = seed_one_entry(&daemon, "foo entry").await;
+
+        // Third search: should miss again (generation bumped).
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"foo","limit":10})))
+            .await;
+        let stats_after = daemon.search_cache.stats();
+        assert_eq!(
+            stats_after.generation,
+            stats_before.generation + 1,
+            "create should bump generation"
+        );
+        assert!(
+            stats_after.fulltext_misses > stats_before.fulltext_misses,
+            "post-bump search should miss"
+        );
+    }
+
+    #[tokio::test]
+    async fn entry_update_invalidates_search_cache() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+        let id = seed_one_entry(&daemon, "orig").await;
+
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"orig","limit":10})))
+            .await;
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"orig","limit":10})))
+            .await;
+        let gen_before = daemon.search_cache.generation();
+
+        daemon
+            .dispatch(req("entry.update", json!({"id": id, "title": "renamed"})))
+            .await;
+
+        assert_eq!(
+            daemon.search_cache.generation(),
+            gen_before + 1,
+            "entry.update should bump"
+        );
+    }
+
+    #[tokio::test]
+    async fn entry_delete_invalidates_search_cache() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+        let id = seed_one_entry(&daemon, "x").await;
+
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"x","limit":10})))
+            .await;
+        let _ = daemon
+            .dispatch(req("search.fulltext", json!({"query":"x","limit":10})))
+            .await;
+        let gen_before = daemon.search_cache.generation();
+
+        daemon
+            .dispatch(req("entry.delete", json!({"id": id})))
+            .await;
+
+        assert_eq!(daemon.search_cache.generation(), gen_before + 1);
+    }
 }

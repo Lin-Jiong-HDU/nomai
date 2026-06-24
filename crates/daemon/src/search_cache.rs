@@ -95,7 +95,6 @@ impl SearchCache {
 
     /// Atomically bump generation. Prior cached keys become unfindable
     /// (their embedded `generation` no longer matches any new lookup).
-    #[allow(dead_code)] // called from mutation handlers in Tasks 4-6
     pub fn bump_generation(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
     }
