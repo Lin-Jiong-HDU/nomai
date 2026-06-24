@@ -304,7 +304,7 @@ impl EntryService {
                 text: block_input.text,
                 attrs: block_input.attrs,
             };
-            let block = self.block_service.create_in_tx(conn, create_block)?;
+            let block = self.block_service.create_in_tx(conn, create_block, false)?;
             stored_blocks.push(block);
         }
 
@@ -595,9 +595,11 @@ impl EntryService {
             )?;
 
             // Re-create each block. BlockService::create_in_tx auto-derives
-            // chunks and emits block.created events. The `blocks_ai` trigger
-            // populates fts_blocks; the chunks_ad trigger is in place to
-            // clean embeddings on the next DELETE.
+            // chunks. emit_event=false: reindex is an internal sync from FS
+            // (not a user action), so block.created events would be noise.
+            // The `blocks_ai` trigger still populates fts_blocks; the
+            // chunks_ad trigger is in place to clean embeddings on the next
+            // DELETE.
             for (ordinal, parser_block) in doc.blocks.iter().enumerate() {
                 let create = crate::block_model::CreateBlock {
                     entry_id,
@@ -606,7 +608,7 @@ impl EntryService {
                     text: parser_block.text.trim_end_matches('\n').to_string(),
                     attrs: Some(serde_json::Value::Object(parser_block.attrs.clone())),
                 };
-                self.block_service.create_in_tx(&conn, create)?;
+                self.block_service.create_in_tx(&conn, create, false)?;
             }
             Ok(())
         })();
@@ -2131,23 +2133,27 @@ mod tests {
                 .unwrap();
         }
 
-        // Count events before (entry.created + block.created = 2).
+        // Count events before. After P3-M7, entry.create only emits
+        // entry.created (the entry.created payload embeds the full blocks
+        // vector; block.created is suppressed to avoid N+1 amplification),
+        // so events_before == 1 for a single-block seed.
         let events_before: i64 = {
             let guard = conn.lock().unwrap();
             guard
                 .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
                 .unwrap()
         };
-        assert!(events_before >= 2);
+        assert!(events_before >= 1);
 
         drop(conn);
         let _result = svc.rebuild_index().unwrap();
 
         let conn = svc.conn_for_test();
         // events table must not have been wiped. The pre-existing events
-        // from create() survive; reindex_one may have appended new
-        // block.created events for the re-created block(s), so the count
-        // is >= events_before, never less.
+        // from create() survive. After P3-M7, reindex_one also passes
+        // emit_event=false to BlockService::create_in_tx (internal sync,
+        // not user action), so events_after == events_before exactly;
+        // the >= assertion allows for future event types.
         let events_after: i64 = {
             let guard = conn.lock().unwrap();
             guard

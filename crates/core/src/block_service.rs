@@ -51,7 +51,7 @@ impl BlockService {
     pub fn create(&self, params: CreateBlock) -> Result<Block, CoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch("BEGIN")?;
-        let result = self.create_in_tx(&conn, params);
+        let result = self.create_in_tx(&conn, params, true);
         match result {
             Ok(block) => {
                 conn.execute_batch("COMMIT")?;
@@ -68,7 +68,12 @@ impl BlockService {
     /// Does NOT lock self.conn. Does NOT call self methods that lock conn.
     ///
     /// FK + UNIQUE ConstraintViolation → `CoreError::Validation` per spec §6.3.
-    pub fn create_in_tx(&self, conn: &Connection, params: CreateBlock) -> Result<Block, CoreError> {
+    pub fn create_in_tx(
+        &self,
+        conn: &Connection,
+        params: CreateBlock,
+        emit_event: bool,
+    ) -> Result<Block, CoreError> {
         use chrono::Utc;
 
         let attrs = params
@@ -135,21 +140,29 @@ impl BlockService {
             .map_err(crate::storage::map_constraint_violation)?;
         }
 
-        let event_id = Ulid::new();
-        let event_payload = serde_json::to_value(&block).expect("block serializes");
-        conn.execute(
-            "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                event_id.to_string(),
-                "block.created",
-                "block",
-                block.id.to_string(),
-                event_payload.to_string(),
-                Utc::now().to_rfc3339(),
-            ],
-        )
-        .map_err(crate::storage::map_constraint_violation)?;
+        // `block.created` event emission is gated on `emit_event`. Callers
+        // that already emit an aggregate `entry.created` payload (which
+        // embeds the full blocks vector) pass `false` to avoid N+1 event
+        // amplification: one block.created per block + one entry.created
+        // = N+1 events for a single entry.create. Direct user actions
+        // (BlockService::create, BlockService::append) pass `true`.
+        if emit_event {
+            let event_id = Ulid::new();
+            let event_payload = serde_json::to_value(&block).expect("block serializes");
+            conn.execute(
+                "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    event_id.to_string(),
+                    "block.created",
+                    "block",
+                    block.id.to_string(),
+                    event_payload.to_string(),
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .map_err(crate::storage::map_constraint_violation)?;
+        }
 
         Ok(block)
     }
@@ -226,6 +239,7 @@ impl BlockService {
                 text,
                 attrs,
             },
+            true,
         )
     }
 

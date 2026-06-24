@@ -713,10 +713,12 @@ mod tests {
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
 
-        // Create 3 entries → 3 entry.created + 3 block.created = 6 events.
-        // Plan 6 Task 5: daemon startup emits `index.synced` only when the
-        // boot scan changes something; setup_daemon's empty FS means no
-        // boot event, so the total is 6 before any entry.create call.
+        // Create 3 entries → 3 entry.created events total. After P3-M7,
+        // entry.create suppresses block.created emission (the entry.created
+        // payload already embeds the full blocks vector). Plan 6 Task 5:
+        // daemon startup emits `index.synced` only when the boot scan
+        // changes something; setup_daemon's empty FS means no boot event,
+        // so the total is 3 before any entry.create call.
         daemon
             .dispatch(req(
                 "entry.create",
@@ -740,14 +742,14 @@ mod tests {
         let list_resp = daemon.dispatch(req("events.list", json!({}))).await;
         let result = list_resp.result.unwrap();
         let items = result["items"].as_array().unwrap();
-        assert_eq!(items.len(), 6);
-        let last_event_id = items[5]["id"].as_str().unwrap().to_string();
+        assert_eq!(items.len(), 3);
+        let last_event_id = items[2]["id"].as_str().unwrap().to_string();
 
         // Purge events with id < last_event_id (exclusive).
         let purge_resp = daemon
             .dispatch(req("events.purge", json!({"before": last_event_id})))
             .await;
-        assert_eq!(purge_resp.result.unwrap()["deleted"], 5);
+        assert_eq!(purge_resp.result.unwrap()["deleted"], 2);
 
         // Verify only 1 event remains.
         let list_resp2 = daemon.dispatch(req("events.list", json!({}))).await;
@@ -762,10 +764,10 @@ mod tests {
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
 
-        // Create 3 entries → 6 entry events total (each entry.create emits
-        // entry.created + block.created). Plan 6 Task 5: daemon startup
+        // Create 3 entries → 3 entry events total. After P3-M7, entry.create
+        // suppresses block.created emission. Plan 6 Task 5: daemon startup
         // emits `index.synced` only when the boot scan changes something;
-        // setup_daemon's empty FS means no boot event, so total = 6.
+        // setup_daemon's empty FS means no boot event, so total = 3.
         for i in 0..3 {
             daemon
                 .dispatch(req(
@@ -775,21 +777,21 @@ mod tests {
                 .await;
         }
 
-        // Page 1: limit=4
+        // Page 1: limit=2
         let p1 = daemon
-            .dispatch(req("events.list", json!({"limit": 4})))
+            .dispatch(req("events.list", json!({"limit": 2})))
             .await;
         let p1_result = p1.result.unwrap();
-        assert_eq!(p1_result["items"].as_array().unwrap().len(), 4);
+        assert_eq!(p1_result["items"].as_array().unwrap().len(), 2);
         assert_eq!(p1_result["has_more"], true);
-        let last_id = p1_result["items"][3]["id"].as_str().unwrap().to_string();
+        let last_id = p1_result["items"][1]["id"].as_str().unwrap().to_string();
 
-        // Page 2: since = last_id from page 1 → 2 remaining events.
+        // Page 2: since = last_id from page 1 → 1 remaining event.
         let p2 = daemon
-            .dispatch(req("events.list", json!({"limit": 4, "since": last_id})))
+            .dispatch(req("events.list", json!({"limit": 2, "since": last_id})))
             .await;
         let p2_result = p2.result.unwrap();
-        assert_eq!(p2_result["items"].as_array().unwrap().len(), 2);
+        assert_eq!(p2_result["items"].as_array().unwrap().len(), 1);
         assert_eq!(p2_result["has_more"], false);
     }
 
