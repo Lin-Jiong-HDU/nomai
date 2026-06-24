@@ -151,6 +151,7 @@ mod tests {
             "test-model".into(),
             "test-model".into(),
             DIM,
+            1024,
         );
         // Ensure vec_chunk_embeddings table exists for chunk semantic search
         // (Daemon::for_test does not auto-create it; the production constructor
@@ -2434,7 +2435,7 @@ mod tests {
         let conn = Arc::new(std::sync::Mutex::new(
             rusqlite::Connection::open_in_memory().unwrap(),
         ));
-        let entries = Arc::new(EntryService::new(conn, content_store.clone()).unwrap());
+        let entries = Arc::new(EntryService::new(conn, content_store.clone(), 1024).unwrap());
 
         // Drop a .nomai file directly via the content store (no INSERT, no
         // EntryService::create) so the index is empty but the FS has one entry.
@@ -2487,6 +2488,7 @@ mod tests {
             "test-model".into(),
             "test-model".into(),
             DIM,
+            1024,
         );
 
         // The external entry is now retrievable via entry.get without any

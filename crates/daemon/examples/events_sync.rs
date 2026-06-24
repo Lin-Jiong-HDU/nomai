@@ -53,6 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         embedder,
         llm,
         8,
+        1024,
         "example-model",
         100_000,
     )?;

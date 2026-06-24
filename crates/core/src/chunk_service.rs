@@ -42,7 +42,7 @@ impl ChunkService {
             tmp.path().to_path_buf(),
             tmp,
         ));
-        crate::EntryService::new(conn.clone(), content_store)?;
+        crate::EntryService::new(conn.clone(), content_store, 1024)?;
         Self::new(conn)
     }
 
@@ -309,7 +309,7 @@ mod tests {
                 source: None,
             })
             .unwrap();
-        let blocks = crate::BlockService::new(conn.clone()).unwrap();
+        let blocks = crate::BlockService::new(conn.clone(), 1024).unwrap();
         let block_list = blocks.list(entry.id).unwrap();
         (entry.id, block_list.items[0].id, conn)
     }
@@ -444,7 +444,7 @@ mod tests {
                 source: None,
             })
             .unwrap();
-        let blocks = crate::BlockService::new(conn.clone()).unwrap();
+        let blocks = crate::BlockService::new(conn.clone(), 1024).unwrap();
         let block_a = blocks.list(a.id).unwrap().items[0].id;
         let block_b = blocks.list(b.id).unwrap().items[0].id;
 
@@ -750,7 +750,7 @@ mod tests {
                 source: None,
             })
             .unwrap();
-        let blocks = crate::BlockService::new(conn.clone()).unwrap();
+        let blocks = crate::BlockService::new(conn.clone(), 1024).unwrap();
         let claim_block = blocks.list(a.id).unwrap().items[0].id;
         let note_block = blocks.list(b.id).unwrap().items[0].id;
 

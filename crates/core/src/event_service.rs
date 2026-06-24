@@ -42,7 +42,7 @@ impl EventService {
             tmp.path().to_path_buf(),
             tmp,
         ));
-        crate::EntryService::new(conn.clone(), content_store)?;
+        crate::EntryService::new(conn.clone(), content_store, 1024)?;
         Self::new(conn)
     }
 

@@ -17,13 +17,19 @@ use crate::storage;
 
 pub struct BlockService {
     conn: Arc<Mutex<Connection>>,
+    chunk_target_size: usize,
 }
 
 impl BlockService {
     /// Take ownership of a connection and ensure migrations applied.
     /// Idempotent. Does NOT take the connection's lock at construction time
     /// beyond what `run_migrations` requires.
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Result<Self, CoreError> {
+    ///
+    /// `chunk_target_size` is the character budget passed to
+    /// `chunking::chunk_text` when deriving chunks from block text. Defaults
+    /// to 1024 in `EntryService::for_test` and daemon examples; production
+    /// callers thread `config.chunking.target_size` through.
+    pub fn new(conn: Arc<Mutex<Connection>>, chunk_target_size: usize) -> Result<Self, CoreError> {
         {
             let mut guard = conn.lock().unwrap();
             guard
@@ -31,7 +37,10 @@ impl BlockService {
                 .map_err(CoreError::Storage)?;
             storage::run_migrations(&mut guard)?;
         }
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            chunk_target_size,
+        })
     }
 
     /// In-memory DB for unit tests. Runs EntryService migrations so the
@@ -47,8 +56,8 @@ impl BlockService {
             tmp.path().to_path_buf(),
             tmp,
         ));
-        crate::EntryService::new(conn.clone(), content_store)?;
-        Self::new(conn)
+        crate::EntryService::new(conn.clone(), content_store, 1024)?;
+        Self::new(conn, 1024)
     }
 
     pub fn create(&self, params: CreateBlock) -> Result<Block, CoreError> {
@@ -117,7 +126,7 @@ impl BlockService {
         // Derive chunks from block text (Spec §10). One chunk per output of
         // `chunking::chunk_text`. `attrs` inherits `block.attrs` plus the
         // `parent_block_type` marker used by downstream search filters.
-        let chunk_texts = crate::chunking::chunk_text(&block.text, 1024);
+        let chunk_texts = crate::chunking::chunk_text(&block.text, self.chunk_target_size);
         let mut chunk_attrs = block.attrs.clone();
         if let Some(obj) = chunk_attrs.as_object_mut() {
             obj.insert(
@@ -326,7 +335,7 @@ impl BlockService {
                 "DELETE FROM chunks WHERE block_id = ?1",
                 params![id.to_string()],
             )?;
-            let chunk_texts = crate::chunking::chunk_text(&new_text, 1024);
+            let chunk_texts = crate::chunking::chunk_text(&new_text, self.chunk_target_size);
             let mut chunk_attrs = new_attrs.clone();
             if let Some(obj) = chunk_attrs.as_object_mut() {
                 obj.insert(
@@ -946,7 +955,7 @@ mod tests {
             tmp.path().to_path_buf(),
             tmp,
         ));
-        let entries = EntryService::new(svc.conn.clone(), content_store).unwrap();
+        let entries = EntryService::new(svc.conn.clone(), content_store, 1024).unwrap();
         let entry = entries
             .create(CreateEntry {
                 title: "x".into(),
@@ -1000,5 +1009,44 @@ mod tests {
             matches!(result, Err(CoreError::Storage(_))),
             "expected CoreError::Storage, got {result:?}"
         );
+    }
+
+    #[test]
+    fn chunk_target_size_splits_block_when_set_below_default() {
+        // Regression guard: the value threaded through BlockService::new must
+        // actually reach chunking::chunk_text. Before config-ification, this
+        // was a hardcoded 1024 and a tiny target would have had no effect.
+        crate::storage::init_sqlite_extensions();
+        let conn = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
+        let tmp = tempfile::tempdir().unwrap();
+        let content_store = Arc::new(crate::content_store::ContentStore::new_with_cleanup(
+            tmp.path().to_path_buf(),
+            tmp,
+        ));
+        crate::EntryService::new(conn.clone(), content_store, 50).unwrap();
+        let svc = BlockService::new(conn, 50).unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+
+        // 200 chars, no paragraph or sentence boundaries → chunk_text's
+        // hard-cut path produces 4 chunks of 50 chars each.
+        let long_text = "x".repeat(200);
+        let block = svc
+            .append(entry_id, "note".into(), long_text, None)
+            .unwrap();
+
+        let chunks = crate::chunk_service::ChunkService::new(svc.conn.clone()).unwrap();
+        let result = chunks.list(block.id).unwrap();
+        assert!(
+            result.total > 1,
+            "expected multiple chunks with target_size=50, got {}",
+            result.total
+        );
+        for chunk in &result.items {
+            assert!(
+                chunk.text.chars().count() <= 50,
+                "chunk text exceeded target_size: {} chars",
+                chunk.text.chars().count()
+            );
+        }
     }
 }

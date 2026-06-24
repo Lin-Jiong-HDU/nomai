@@ -178,6 +178,7 @@ impl EntryService {
     pub fn new(
         conn: Arc<Mutex<Connection>>,
         content_store: Arc<crate::content_store::ContentStore>,
+        chunk_target_size: usize,
     ) -> Result<Self, CoreError> {
         {
             let mut guard = conn.lock().unwrap();
@@ -186,7 +187,10 @@ impl EntryService {
                 .map_err(CoreError::Storage)?;
             storage::run_migrations(&mut guard)?;
         }
-        let block_service = Arc::new(crate::block_service::BlockService::new(conn.clone())?);
+        let block_service = Arc::new(crate::block_service::BlockService::new(
+            conn.clone(),
+            chunk_target_size,
+        )?);
         Ok(Self {
             conn,
             content_store,
@@ -1162,7 +1166,7 @@ impl EntryService {
             tmp.path().to_path_buf(),
             tmp,
         ));
-        Self::new(conn, content_store)
+        Self::new(conn, content_store, 1024)
     }
 
     /// Test-only accessor for the shared connection.

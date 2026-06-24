@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let content_store = Arc::new(nomai_core::ContentStore::new(knowledge_root));
     // EntryService is constructed to run migrations + share the connection;
     // not called directly in this example (Plan 4: chunks drive search).
-    let _entries = EntryService::new(conn.clone(), content_store)?;
+    let _entries = EntryService::new(conn.clone(), content_store, 1024)?;
     let chunks = nomai_core::ChunkService::new(conn.clone())?;
     chunks.ensure_vec_chunk_embeddings(config.embedding.dim)?;
 

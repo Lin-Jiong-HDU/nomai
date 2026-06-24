@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let content_store = Arc::new(ContentStore::new(knowledge_root));
 
     let conn = Arc::new(std::sync::Mutex::new(Connection::open_in_memory()?));
-    let entries = EntryService::new(conn.clone(), content_store.clone())?;
+    let entries = EntryService::new(conn.clone(), content_store.clone(), 1024)?;
 
     println!("=== Create entry with one @claim block ===\n");
     let entry = entries.create(CreateEntry {

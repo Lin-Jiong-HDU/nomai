@@ -14,6 +14,8 @@ pub struct Config {
     pub llm: LlmConfig,
     #[serde(default)]
     pub cache: CacheConfig,
+    #[serde(default)]
+    pub chunking: ChunkingConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +73,29 @@ impl Default for CacheConfig {
 
 fn default_warn_rows() -> u64 {
     100_000
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ChunkingConfig {
+    /// Target chunk size in **characters** (not tokens). Block text is split
+    /// by `chunking::chunk_text`: paragraph → sentence → hard cut. See
+    /// `crates/core/src/chunking.rs`. Default 1024 keeps the pre-config
+    /// behavior; raise it (e.g. 2048) when using a larger embedding model
+    /// with a higher token budget, lower it for finer retrieval granularity.
+    pub target_size: usize,
+}
+
+impl Default for ChunkingConfig {
+    fn default() -> Self {
+        Self {
+            target_size: default_chunk_target_size(),
+        }
+    }
+}
+
+fn default_chunk_target_size() -> usize {
+    1024
 }
 
 #[derive(Debug, Error)]
@@ -185,6 +210,8 @@ model = "gpt-4o-mini"
         assert_eq!(config.embedding.dim, 1536);
         assert_eq!(config.llm.model, "gpt-4o-mini");
         assert_eq!(config.data.db_path, PathBuf::from("/tmp/test.sqlite"));
+        // [chunking] section absent → default 1024 (backward compat).
+        assert_eq!(config.chunking.target_size, 1024);
 
         restore("TEST_OPENAI_KEY", old_emb);
         restore("TEST_OPENAI_KEY", old_llm);
@@ -236,6 +263,34 @@ model = "x"
         let config = Config::load_from(tmp.path()).unwrap();
         // Default db_path ends with "db.sqlite".
         assert!(config.data.db_path.to_string_lossy().ends_with("db.sqlite"));
+        restore("TEST_OPENAI_KEY", old);
+    }
+
+    #[test]
+    fn chunking_section_accepts_custom_target_size() {
+        let _guard = lock();
+        let old = unset("TEST_OPENAI_KEY");
+        // SAFETY: tests are single-threaded within this module.
+        unsafe { std::env::set_var("TEST_OPENAI_KEY", "sk") };
+        let toml_text = r#"
+[embedding]
+base_url = "https://example.com/v1"
+api_key_env = "TEST_OPENAI_KEY"
+model = "x"
+dim = 8
+
+[llm]
+base_url = "https://example.com/v1"
+api_key_env = "TEST_OPENAI_KEY"
+model = "x"
+
+[chunking]
+target_size = 2048
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), toml_text).unwrap();
+        let config = Config::load_from(tmp.path()).unwrap();
+        assert_eq!(config.chunking.target_size, 2048);
         restore("TEST_OPENAI_KEY", old);
     }
 }

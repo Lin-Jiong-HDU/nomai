@@ -214,7 +214,7 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 | `block.get`    | `id`                                    | `Block`             | 1001 if not found                             |
 | `block.list`   | `entry_id`                              | `{items, total}`    | Sorted by `ordinal` ascending                 |
 
-Each mutation rewrites the parent entry's `.nomai` file automatically (no separate RPC needed). Chunk re-derivation is automatic on `text` change.
+Each mutation rewrites the parent entry's `.nomai` file automatically (no separate RPC needed). Chunk re-derivation is automatic on `text` change. Chunks are split at `config.chunking.target_size` characters (default 1024) via paragraph → sentence → hard-cut fallback.
 
 **`@connection` blocks**: setting `type: "connection"` requires `attrs: { target: "<entry_id>", relation: "<string>" }`. These blocks also populate the `links` table — `link.neighbors` will see the typed edge.
 
@@ -421,6 +421,9 @@ model       = "your-model"
 
 [cache]
 warn_rows   = 100000            # soft cap; cache.stats returns warning=true above
+
+[chunking]
+target_size = 1024              # chunk char budget; paragraph → sentence → hard cut
 ```
 
 **API keys are referenced by env var name**, never stored in the config file. Set the env vars in your shell:
@@ -431,6 +434,8 @@ set -Ux NOMAI_LLM_API_KEY "sk-..."
 ```
 
 **Changing `dim`**: requires deleting `db.sqlite` and re-creating all entries/embeddings. The dimension is fixed at table-creation time.
+
+**Changing `chunking.target_size`**: takes effect on the next `entry.create` / `block.append` / `block.update`. Existing chunks keep the old size until you run `index.rebuild` (which re-derives chunks from `.nomai` files). Mixed sizes within a knowledge base are fine for retrieval but cause KNN distance variance — prefer one size per deployment.
 
 **Compatible endpoints**: any OpenAI-compatible `/v1/embeddings` and `/v1/chat/completions` endpoint works — OpenAI, DeepSeek, Moonshot, Zhipu GLM, local Ollama, etc.
 
@@ -552,8 +557,19 @@ nomai-providers = { path = "..." }
 ```rust
 use nomai_daemon::daemon::Daemon;
 
-// Construct without config.toml — pass services directly
-let mut daemon = Daemon::from_services(conn, embedder, llm, 2048)?;
+// Construct without config.toml — pass services directly. Full signature:
+// from_services(conn, content_store, embedder, llm,
+//               embedding_dim, chunk_target_size, cache_model, warn_rows)
+let mut daemon = Daemon::from_services(
+    conn,
+    content_store,
+    embedder,
+    llm,
+    2048,    // embedding_dim
+    1024,    // chunk_target_size (chars)
+    "embedding-3",
+    100_000,
+)?;
 
 // Register custom RPCs (see Custom RPCs section below)
 daemon.register_handler(std::sync::Arc::new(MyHandler));
@@ -601,7 +617,7 @@ daemon.llm()      // &Arc<dyn LlmProvider>
 
 ### Lib-mode construction
 
-Use `Daemon::from_services(conn, embedder, llm, dim)` to build a Daemon without a `config.toml` file. This is the entry point for embedding nomai into your own binary.
+Use `Daemon::from_services(conn, content_store, embedder, llm, embedding_dim, chunk_target_size, cache_model, warn_rows)` to build a Daemon without a `config.toml` file. This is the entry point for embedding nomai into your own binary.
 
 ### Example
 
