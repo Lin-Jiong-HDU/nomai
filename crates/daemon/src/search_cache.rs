@@ -87,6 +87,10 @@ impl SearchCache {
 
     /// Current generation counter value. Spec §6 hook points call
     /// `bump_generation` to invalidate the cache.
+    // Public API for lib-mode users / future RPCs that want raw generation
+    // without the full stats snapshot. `stats()` reads the atomic directly
+    // rather than going through this method, so it has no in-tree caller.
+    #[allow(dead_code)]
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
@@ -99,6 +103,10 @@ impl SearchCache {
 
     /// Number of entries currently held in the map (across all generations;
     /// old-generation entries linger until `clear`).
+    // Public API for lib-mode users / future RPCs that want raw len without
+    // the full stats snapshot. `stats()` casts `self.map.len()` directly
+    // rather than going through this method, so it has no in-tree caller.
+    #[allow(dead_code)]
     #[allow(clippy::len_without_is_empty)] // surfaced via cache.stats in Task 7
     pub fn len(&self) -> usize {
         self.map.len()
