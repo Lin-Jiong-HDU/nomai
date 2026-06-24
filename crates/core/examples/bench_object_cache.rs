@@ -54,7 +54,7 @@ fn main() {
     ));
     let tmp_dir = std::env::temp_dir().join(format!("nomai-bench-{}", ulid::Ulid::new()));
     let content_store = Arc::new(nomai_core::ContentStore::new(tmp_dir));
-    let entries = Arc::new(EntryService::new(conn.clone(), content_store).unwrap());
+    let entries = Arc::new(EntryService::new(conn.clone(), content_store, 1024).unwrap());
     let links = Arc::new(LinkService::new(conn.clone()).unwrap());
 
     // ----- Seed: 1000 entries + hub-and-spoke + chain -----
@@ -108,7 +108,7 @@ fn main() {
     chunks.ensure_vec_chunk_embeddings(8).unwrap();
     for (i, id) in ids.iter().enumerate() {
         // Each entry has one block; list its chunks and write an embedding.
-        let blocks_svc = Arc::new(nomai_core::BlockService::new(conn.clone()).unwrap());
+        let blocks_svc = Arc::new(nomai_core::BlockService::new(conn.clone(), 1024).unwrap());
         let block_list = blocks_svc.list(*id).unwrap();
         let chunk_list = chunks.list(block_list.items[0].id).unwrap();
         let chunk_id = chunk_list.items[0].id;

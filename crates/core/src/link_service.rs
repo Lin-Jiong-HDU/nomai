@@ -52,7 +52,7 @@ impl LinkService {
             tmp.path().to_path_buf(),
             tmp,
         ));
-        crate::EntryService::new(conn.clone(), content_store)?;
+        crate::EntryService::new(conn.clone(), content_store, 1024)?;
         Self::new(conn)
     }
 
@@ -445,7 +445,7 @@ mod tests {
             tmp.path().to_path_buf(),
             tmp,
         ));
-        let entries = EntryService::new(conn.clone(), content_store).unwrap();
+        let entries = EntryService::new(conn.clone(), content_store, 1024).unwrap();
         let links = LinkService::new(conn).unwrap();
         (entries, links)
     }

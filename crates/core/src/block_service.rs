@@ -17,13 +17,22 @@ use crate::storage;
 
 pub struct BlockService {
     conn: Arc<Mutex<Connection>>,
+    chunk_target_size: usize,
 }
 
 impl BlockService {
     /// Take ownership of a connection and ensure migrations applied.
     /// Idempotent. Does NOT take the connection's lock at construction time
     /// beyond what `run_migrations` requires.
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Result<Self, CoreError> {
+    ///
+    /// `chunk_target_size` is the character budget passed to
+    /// `chunking::chunk_text` when deriving chunks from block text. Defaults
+    /// to 1024 in `EntryService::for_test` and daemon examples; production
+    /// callers thread `config.chunking.target_size` through.
+    pub fn new(
+        conn: Arc<Mutex<Connection>>,
+        chunk_target_size: usize,
+    ) -> Result<Self, CoreError> {
         {
             let mut guard = conn.lock().unwrap();
             guard
@@ -31,7 +40,10 @@ impl BlockService {
                 .map_err(CoreError::Storage)?;
             storage::run_migrations(&mut guard)?;
         }
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            chunk_target_size,
+        })
     }
 
     /// In-memory DB for unit tests. Runs EntryService migrations so the
@@ -47,8 +59,8 @@ impl BlockService {
             tmp.path().to_path_buf(),
             tmp,
         ));
-        crate::EntryService::new(conn.clone(), content_store)?;
-        Self::new(conn)
+        crate::EntryService::new(conn.clone(), content_store, 1024)?;
+        Self::new(conn, 1024)
     }
 
     pub fn create(&self, params: CreateBlock) -> Result<Block, CoreError> {
@@ -117,7 +129,7 @@ impl BlockService {
         // Derive chunks from block text (Spec §10). One chunk per output of
         // `chunking::chunk_text`. `attrs` inherits `block.attrs` plus the
         // `parent_block_type` marker used by downstream search filters.
-        let chunk_texts = crate::chunking::chunk_text(&block.text, 1024);
+        let chunk_texts = crate::chunking::chunk_text(&block.text, self.chunk_target_size);
         let mut chunk_attrs = block.attrs.clone();
         if let Some(obj) = chunk_attrs.as_object_mut() {
             obj.insert(
@@ -326,7 +338,7 @@ impl BlockService {
                 "DELETE FROM chunks WHERE block_id = ?1",
                 params![id.to_string()],
             )?;
-            let chunk_texts = crate::chunking::chunk_text(&new_text, 1024);
+            let chunk_texts = crate::chunking::chunk_text(&new_text, self.chunk_target_size);
             let mut chunk_attrs = new_attrs.clone();
             if let Some(obj) = chunk_attrs.as_object_mut() {
                 obj.insert(
@@ -946,7 +958,7 @@ mod tests {
             tmp.path().to_path_buf(),
             tmp,
         ));
-        let entries = EntryService::new(svc.conn.clone(), content_store).unwrap();
+        let entries = EntryService::new(svc.conn.clone(), content_store, 1024).unwrap();
         let entry = entries
             .create(CreateEntry {
                 title: "x".into(),
