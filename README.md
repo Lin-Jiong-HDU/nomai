@@ -38,7 +38,7 @@ Early alpha. API surface is stabilizing but may change before 1.0. Currently sin
 
 ## Quick start
 
-```fish
+```bash
 # Build
 cargo build --release --bin nomai-daemon
 
@@ -57,9 +57,11 @@ api_key_env = "NOMAI_LLM_API_KEY"
 model       = "your-model"
 EOF
 
-# Set API keys (fish example)
-set -Ux GLM_API_KEY "..."
-set -Ux NOMAI_LLM_API_KEY "..."
+# Set API keys
+# fish:   set -Ux GLM_API_KEY "..."
+# bash/zsh:
+export GLM_API_KEY="..."
+export NOMAI_LLM_API_KEY="..."
 
 # First RPC
 echo '{"jsonrpc":"2.0","id":1,"method":"entry.create","params":{"title":"Hello","blocks":[{"type":"note","text":"world"}]}}' \
@@ -173,4 +175,4 @@ Before pushing: `cargo fmt && cargo clippy --workspace --all-targets -- -D warni
 
 ## License
 
-TBD (early stage — pick before public release).
+[Apache-2.0](LICENSE) — see `LICENSE` for the full text.

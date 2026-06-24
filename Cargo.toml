@@ -11,6 +11,10 @@ members = [
 edition = "2024"
 version = "0.1.0"
 rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/Lin-Jiong-HDU/nomai"
+homepage = "https://github.com/Lin-Jiong-HDU/nomai"
+authors = ["JohnLin <linjiong2020@outlook.com>"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -3,6 +3,13 @@ name = "nomai-protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "JSON-RPC 2.0 wire types, error codes, and method enum for nomai"
+keywords = ["json-rpc", "nomai", "knowledge", "mcp"]
+categories = ["data-structures"]
 
 [dependencies]
 serde = { workspace = true }
