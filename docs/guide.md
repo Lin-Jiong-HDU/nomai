@@ -341,7 +341,7 @@ Embedding cache and search results cache introspection/management. The embedding
 - `hit_rate` is `hits / (hits + misses)` over the daemon's lifetime (0.0 when both are zero)
 - `by_rpc.semantic.{hits,misses}` and `by_rpc.fulltext.{hits,misses}` break the counters out per RPC kind
 
-Cached search results are keyed by `(generation, rpc, query_hash, limit, block_type_hash)`. Any mutation (`entry.create`/`update`/`delete`, `chunk.create`/`delete`, `block.append`/`update`/`delete`, `link.create`/`delete`, `index.sync`/`rebuild`) bumps `generation`, which invalidates every cached result atomically — the next search recomputes from current state. See [Search results cache](#search-results-cache) below.
+Cached search results are keyed by `(generation, rpc, query_hash, limit, block_type_hash)`. Any `entry.*` / `block.*` / `index.*` mutation (`entry.create`/`update`/`delete`, `block.append`/`update`/`delete`, `index.sync`/`rebuild`) bumps `generation`, which invalidates every cached result atomically — the next search recomputes from current state. `chunk.*` and `link.*` do not bump. See [Search results cache](#search-results-cache) below.
 
 **`cache.clear` — `namespace` parameter** (default `"embeddings"`, for backward compatibility):
 
@@ -554,10 +554,8 @@ Every `search.semantic` and `search.fulltext` call is wrapped in a transparent i
 | Hook point | When it bumps |
 | ---------- | ------------- |
 | `entry.create` / `entry.update` / `entry.delete` | After the entry write lands |
-| `chunk.create` / `chunk.delete` | After the chunk write lands |
 | `block.append` / `block.update` / `block.delete` | After the block write lands |
-| `link.create` / `link.delete` | After the link write lands |
-| `index.sync` / `index.rebuild` | After the index refreshes |
+| `index.sync` / `index.rebuild` | After the index refreshes (`index.sync` only when it actually mutates) |
 
 Cached entries are keyed by the current `generation`, so a bump effectively drops them all — the next search misses and recomputes from current state. There is no per-entry invalidation logic and no staleness window: a cached result is, by construction, consistent with the most recent mutation the daemon has applied.
 
