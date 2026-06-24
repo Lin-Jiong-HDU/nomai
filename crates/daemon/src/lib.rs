@@ -5,3 +5,4 @@ pub mod daemon;
 pub mod handlers;
 pub mod io;
 pub mod rpc;
+pub mod search_cache;

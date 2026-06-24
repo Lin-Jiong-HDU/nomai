@@ -9,6 +9,7 @@ mod daemon;
 mod handlers;
 mod io;
 mod rpc;
+mod search_cache;
 
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();

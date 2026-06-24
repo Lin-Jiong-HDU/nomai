@@ -27,6 +27,10 @@ pub struct Daemon {
     /// typed `cache` (for `cache.stats` / `cache.clear` RPCs) and via the
     /// `EmbeddingProvider` trait (transparent delegation to inner).
     pub(crate) cache: Arc<CachedEmbedder>,
+    /// In-memory search-results cache (Spec 7). Bumped on every mutation
+    /// that affects search results; see `search_cache::SearchCache`.
+    #[allow(dead_code)] // read in Task 3 (search handler wiring)
+    pub(crate) search_cache: Arc<crate::search_cache::SearchCache>,
     pub(crate) llm: Arc<dyn LlmProvider>,
     pub(crate) embedding_model: String,
     pub(crate) llm_model: String,
@@ -129,6 +133,7 @@ impl Daemon {
             events,
             chunks,
             cache,
+            search_cache: Arc::new(crate::search_cache::SearchCache::new()),
             llm,
             embedding_model: config.embedding.model,
             llm_model: config.llm.model,
@@ -174,6 +179,7 @@ impl Daemon {
             events,
             chunks,
             cache,
+            search_cache: Arc::new(crate::search_cache::SearchCache::new()),
             llm,
             embedding_model,
             llm_model,
@@ -264,6 +270,7 @@ impl Daemon {
             events,
             chunks,
             cache,
+            search_cache: Arc::new(crate::search_cache::SearchCache::new()),
             llm,
             embedding_model: String::new(),
             llm_model: String::new(),
