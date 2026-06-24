@@ -42,8 +42,11 @@ impl BlockService {
         // registered before the connection is opened.
         crate::storage::init_sqlite_extensions();
         let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
-        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", ulid::Ulid::new()));
-        let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
+        let tmp = tempfile::tempdir()?;
+        let content_store = Arc::new(crate::content_store::ContentStore::new_with_cleanup(
+            tmp.path().to_path_buf(),
+            tmp,
+        ));
         crate::EntryService::new(conn.clone(), content_store)?;
         Self::new(conn)
     }
@@ -938,8 +941,11 @@ mod tests {
         // The FK on blocks.entry_id is ON DELETE CASCADE. Verify EntryService::delete
         // removes the entry's blocks.
         let svc = BlockService::for_test().unwrap();
-        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", ulid::Ulid::new()));
-        let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
+        let tmp = tempfile::tempdir().unwrap();
+        let content_store = Arc::new(crate::content_store::ContentStore::new_with_cleanup(
+            tmp.path().to_path_buf(),
+            tmp,
+        ));
         let entries = EntryService::new(svc.conn.clone(), content_store).unwrap();
         let entry = entries
             .create(CreateEntry {

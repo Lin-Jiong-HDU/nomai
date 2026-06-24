@@ -37,8 +37,11 @@ impl EventService {
         crate::storage::init_sqlite_extensions();
         let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
         // Run migrations via EntryService so all tables exist.
-        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", ulid::Ulid::new()));
-        let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
+        let tmp = tempfile::tempdir()?;
+        let content_store = Arc::new(crate::content_store::ContentStore::new_with_cleanup(
+            tmp.path().to_path_buf(),
+            tmp,
+        ));
         crate::EntryService::new(conn.clone(), content_store)?;
         Self::new(conn)
     }

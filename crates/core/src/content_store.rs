@@ -16,16 +16,41 @@ use crate::error::CoreError;
 
 /// Filesystem-backed content store. Root path is constructor-injected; no
 /// global state. Methods are sync (FS ops are short, lock contention is OK).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ContentStore {
     root: PathBuf,
+    /// Optional cleanup guard. When `Some`, the guard's `TempDir` owns the
+    /// root path and deletes it on drop. Production callers use `new` (guard
+    /// = `None`); test callers that would otherwise leak `nomai-test-*`
+    /// directories under `std::env::temp_dir()` use `new_with_cleanup`.
+    _cleanup: Option<tempfile::TempDir>,
 }
 
 impl ContentStore {
     /// Create a store rooted at `root`. The directory need not exist yet;
     /// callers should ensure `root` is writable when invoking write methods.
+    ///
+    /// Production path: the caller owns `root` and is responsible for its
+    /// lifecycle (typically it's a user-managed knowledge base directory that
+    /// must outlive the daemon). `_cleanup` is `None`.
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            _cleanup: None,
+        }
+    }
+
+    /// Test-only constructor that takes ownership of a `TempDir` cleanup
+    /// guard. The returned store holds the guard; when the store (or its
+    /// enclosing `Arc`) is dropped, the temp directory is deleted
+    /// recursively. Callers should pass `tempfile::tempdir()?.into_path()`
+    /// or equivalent — the guard expects the directory to already exist.
+    #[doc(hidden)]
+    pub fn new_with_cleanup(root: PathBuf, cleanup: tempfile::TempDir) -> Self {
+        Self {
+            root,
+            _cleanup: Some(cleanup),
+        }
     }
 
     /// Path to the directory holding one entry's files: `<root>/entries/<ULID>/`.

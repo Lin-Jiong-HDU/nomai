@@ -47,8 +47,11 @@ impl LinkService {
         crate::storage::init_sqlite_extensions();
         let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
         // Run migrations via EntryService so both entries and links tables exist.
-        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", ulid::Ulid::new()));
-        let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
+        let tmp = tempfile::tempdir()?;
+        let content_store = Arc::new(crate::content_store::ContentStore::new_with_cleanup(
+            tmp.path().to_path_buf(),
+            tmp,
+        ));
         crate::EntryService::new(conn.clone(), content_store)?;
         Self::new(conn)
     }
@@ -437,8 +440,11 @@ mod tests {
     fn setup() -> (EntryService, LinkService) {
         crate::storage::init_sqlite_extensions();
         let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
-        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", ulid::Ulid::new()));
-        let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
+        let tmp = tempfile::tempdir().unwrap();
+        let content_store = Arc::new(crate::content_store::ContentStore::new_with_cleanup(
+            tmp.path().to_path_buf(),
+            tmp,
+        ));
         let entries = EntryService::new(conn.clone(), content_store).unwrap();
         let links = LinkService::new(conn).unwrap();
         (entries, links)

@@ -1150,8 +1150,18 @@ impl EntryService {
     pub fn for_test() -> Result<Self, CoreError> {
         crate::storage::init_sqlite_extensions();
         let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
-        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", Ulid::new()));
-        let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
+        // tempfile::tempdir() creates a fresh dir under std::env::temp_dir()
+        // and returns a guard that deletes it on drop. Handing ownership to
+        // ContentStore via new_with_cleanup means every EntryService::for_test
+        // call site (and the sibling LinkService / BlockService / ChunkService
+        // / EventService for_test methods that chain through it) cleans up
+        // automatically — no more leaking nomai-test-<ULID> dirs across test
+        // runs.
+        let tmp = tempfile::tempdir()?;
+        let content_store = Arc::new(crate::content_store::ContentStore::new_with_cleanup(
+            tmp.path().to_path_buf(),
+            tmp,
+        ));
         Self::new(conn, content_store)
     }
 
