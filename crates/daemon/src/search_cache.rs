@@ -6,12 +6,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
+use nomai_core::CoreError;
+use serde::Serialize;
 use serde_json::Value;
 
 /// Which search RPC a cached result came from. Part of the cache key so
 /// the same query string hitting both RPCs doesn't collide.
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
-#[allow(dead_code)] // constructed in Task 3 (search handler wiring)
+#[allow(dead_code)] // constructed in Task 3 (search handler wiring); tests exercise it now
 pub(crate) enum SearchRpc {
     Semantic,
     Fulltext,
@@ -21,7 +23,6 @@ pub(crate) enum SearchRpc {
 /// lookup time; bumping the counter invalidates every prior key without
 /// iterating the map. See spec §4.1.
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
-#[allow(dead_code)] // constructed in Task 2 (lookup_or_compute)
 pub(crate) struct Key {
     pub(crate) generation: u64,
     pub(crate) rpc: SearchRpc,
@@ -32,15 +33,44 @@ pub(crate) struct Key {
 
 /// Cached value. `Arc` so a hit path is one atomic increment (no deep
 /// clone of the `Vec<Value>`).
-#[allow(dead_code)] // constructed in Task 2 (lookup_or_compute)
 pub(crate) type CachedResults = Arc<Vec<Value>>;
 
 /// In-process search-results cache. Lives in the daemon; core is unaware.
 pub struct SearchCache {
-    #[allow(dead_code)] // written in Task 2 (lookup_or_compute)
     map: DashMap<Key, CachedResults>,
-    #[allow(dead_code)] // read in Task 7 (cache.stats) / Tasks 4-6 (bump sites)
     generation: AtomicU64,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    semantic_hits: AtomicU64,
+    semantic_misses: AtomicU64,
+    fulltext_hits: AtomicU64,
+    fulltext_misses: AtomicU64,
+}
+
+/// Snapshot of cache statistics returned by `SearchCache::stats`. Spec §7.1.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchCacheStats {
+    pub generation: u64,
+    pub entries: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub semantic_hits: u64,
+    pub semantic_misses: u64,
+    pub fulltext_hits: u64,
+    pub fulltext_misses: u64,
+}
+
+impl SearchCacheStats {
+    /// Hits divided by total lookups; `0.0` when no lookups yet.
+    #[allow(dead_code)] // surfaced via cache.stats response in Task 7
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.hits + self.misses;
+        if total == 0 {
+            0.0
+        } else {
+            self.hits as f64 / total as f64
+        }
+    }
 }
 
 impl SearchCache {
@@ -48,6 +78,12 @@ impl SearchCache {
         Self {
             map: DashMap::new(),
             generation: AtomicU64::new(0),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            semantic_hits: AtomicU64::new(0),
+            semantic_misses: AtomicU64::new(0),
+            fulltext_hits: AtomicU64::new(0),
+            fulltext_misses: AtomicU64::new(0),
         }
     }
 
@@ -82,6 +118,92 @@ impl SearchCache {
         self.map.clear();
         cleared
     }
+
+    /// Look up a cached result by `(rpc, query, limit, block_type)`. On hit,
+    /// returns the cached `Arc<Vec<Value>>` (one atomic increment). On miss,
+    /// invokes `compute()`, persists the result, and returns it. Failures
+    /// from `compute()` propagate and are NOT cached.
+    ///
+    /// `block_type: Option<&str>` — `None` means no filter; `Some(s)` is
+    /// hashed so the key is fixed-size. None vs Some("") are distinct.
+    ///
+    /// Generic bounds (`F: FnOnce() -> Fut, Fut: Future`) let call sites
+    /// pass `|| async move { ... }` async closures; verified by Task 2 tests.
+    #[allow(dead_code)] // wired into search handlers in Task 3
+    pub(crate) async fn lookup_or_compute<F, Fut>(
+        &self,
+        rpc: SearchRpc,
+        query: &str,
+        limit: u32,
+        block_type: Option<&str>,
+        compute: F,
+    ) -> Result<CachedResults, CoreError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<Value>, CoreError>>,
+    {
+        let key = Key {
+            generation: self.generation.load(Ordering::Relaxed),
+            rpc,
+            query_hash: blake3::hash(query.as_bytes()).into(),
+            limit,
+            // `blake3::Hash::as_bytes()` is always 32 bytes (a structural
+            // invariant of blake3), so slicing `[..8]` and `try_into()` into
+            // a `[u8; 8]` cannot fail. The `expect` documents the invariant;
+            // we never reach it on user paths.
+            block_type_hash: block_type.map(|s| {
+                let h = blake3::hash(s.as_bytes());
+                let bytes: [u8; 8] = h.as_bytes()[..8]
+                    .try_into()
+                    .expect("blake3 yields 32 bytes");
+                u64::from_le_bytes(bytes)
+            }),
+        };
+
+        // 1. Lookup. Ref drops at end of block so compute() doesn't hold
+        //    a DashMap shard lock (DashMap Ref isn't Send across .await).
+        {
+            if let Some(entry) = self.map.get(&key) {
+                self.bump_counter(rpc, /*hit=*/ true);
+                return Ok(Arc::clone(&entry));
+            }
+        }
+
+        // 2. Miss → compute (no lock held).
+        self.bump_counter(rpc, /*hit=*/ false);
+        let items = Arc::new(compute().await?);
+
+        // 3. Store. Concurrent compute on same key: last writer wins. Both
+        //    produce identical values for a deterministic function.
+        self.map.insert(key, Arc::clone(&items));
+        Ok(items)
+    }
+
+    /// Snapshot of cache statistics.
+    #[allow(dead_code)] // surfaced via cache.stats in Task 7
+    pub fn stats(&self) -> SearchCacheStats {
+        SearchCacheStats {
+            generation: self.generation.load(Ordering::Relaxed),
+            entries: self.map.len() as u64,
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            semantic_hits: self.semantic_hits.load(Ordering::Relaxed),
+            semantic_misses: self.semantic_misses.load(Ordering::Relaxed),
+            fulltext_hits: self.fulltext_hits.load(Ordering::Relaxed),
+            fulltext_misses: self.fulltext_misses.load(Ordering::Relaxed),
+        }
+    }
+
+    fn bump_counter(&self, rpc: SearchRpc, hit: bool) {
+        let (total, per_rpc) = match (rpc, hit) {
+            (SearchRpc::Semantic, true) => (&self.hits, &self.semantic_hits),
+            (SearchRpc::Semantic, false) => (&self.misses, &self.semantic_misses),
+            (SearchRpc::Fulltext, true) => (&self.hits, &self.fulltext_hits),
+            (SearchRpc::Fulltext, false) => (&self.misses, &self.fulltext_misses),
+        };
+        total.fetch_add(1, Ordering::Relaxed);
+        per_rpc.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl Default for SearchCache {
@@ -114,5 +236,215 @@ mod tests {
         let cache = SearchCache::new();
         assert_eq!(cache.clear(), 0);
         assert_eq!(cache.len(), 0);
+    }
+
+    use serde_json::json;
+
+    fn mk_cache() -> SearchCache {
+        SearchCache::new()
+    }
+
+    #[tokio::test]
+    async fn lookup_miss_then_hit() {
+        let cache = mk_cache();
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let cc = call_count.clone();
+        let r1 = cache
+            .lookup_or_compute(SearchRpc::Fulltext, "rust", 10, None, || {
+                let cc = cc.clone();
+                async move {
+                    cc.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok(vec![json!({"score": 0.5})])
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(r1.len(), 1);
+
+        let cc2 = call_count.clone();
+        let r2 = cache
+            .lookup_or_compute(SearchRpc::Fulltext, "rust", 10, None, || {
+                let cc = cc2.clone();
+                async move {
+                    cc.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok(vec![json!({"score": 0.5})])
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(r2.len(), 1);
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "compute_fn called once total (second was a hit)"
+        );
+    }
+
+    #[tokio::test]
+    async fn bump_generation_invalidates_old_keys() {
+        let cache = mk_cache();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let run = |_c: std::sync::Arc<std::sync::atomic::AtomicU32>| {
+            let _cache_ref = &cache; // borrow for closure
+            // We need owned access; use a helper below instead.
+            unreachable!()
+        };
+        let _ = run; // suppress unused warning; real logic below
+        // First call: miss, populates cache.
+        let c1 = calls.clone();
+        let _ = cache
+            .lookup_or_compute(SearchRpc::Fulltext, "q", 5, None, || {
+                let c1 = c1.clone();
+                async move {
+                    c1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok(vec![])
+                }
+            })
+            .await
+            .unwrap();
+        // Bump.
+        cache.bump_generation();
+        // Same query, new generation → miss again.
+        let c2 = calls.clone();
+        let _ = cache
+            .lookup_or_compute(SearchRpc::Fulltext, "q", 5, None, || {
+                let c2 = c2.clone();
+                async move {
+                    c2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok(vec![])
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "compute_fn should fire twice after bump"
+        );
+    }
+
+    #[tokio::test]
+    async fn compute_failure_not_cached() {
+        use nomai_core::CoreError;
+        let cache = mk_cache();
+        let err: Result<Vec<serde_json::Value>, CoreError> =
+            Err(CoreError::Storage(rusqlite::Error::ExecuteReturnedResults));
+        let _ = cache
+            .lookup_or_compute(SearchRpc::Fulltext, "q", 5, None, || async { err })
+            .await;
+        // Map empty: failure was not cached.
+        assert_eq!(cache.len(), 0);
+        let stats = cache.stats();
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.hits, 0);
+    }
+
+    #[tokio::test]
+    async fn key_distinct_for_different_rpc() {
+        let cache = mk_cache();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        for rpc in [SearchRpc::Semantic, SearchRpc::Fulltext] {
+            let c = calls.clone();
+            let _ = cache
+                .lookup_or_compute(rpc, "same", 5, None, || {
+                    let c = c.clone();
+                    async move {
+                        c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Ok(vec![])
+                    }
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "different rpc → 2 distinct keys → 2 compute calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn key_distinct_for_different_limit() {
+        let cache = mk_cache();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        for limit in [5u32, 50u32] {
+            let c = calls.clone();
+            let _ = cache
+                .lookup_or_compute(SearchRpc::Fulltext, "q", limit, None, || {
+                    let c = c.clone();
+                    async move {
+                        c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Ok(vec![])
+                    }
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "different limit → 2 distinct keys → 2 compute calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn key_distinct_for_different_block_type() {
+        let cache = mk_cache();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        for bt in [None, Some("note"), Some("claim")] {
+            let c = calls.clone();
+            let _ = cache
+                .lookup_or_compute(SearchRpc::Fulltext, "q", 5, bt, || {
+                    let c = c.clone();
+                    async move {
+                        c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Ok(vec![])
+                    }
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            3,
+            "None vs Some(note) vs Some(claim) → 3 distinct keys"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_empties_map_but_preserves_generation() {
+        let cache = mk_cache();
+        cache.bump_generation();
+        let gen_before = cache.generation();
+        // Populate.
+        let _ = cache
+            .lookup_or_compute(SearchRpc::Fulltext, "q", 5, None, || async {
+                Ok(vec![json!(1)])
+            })
+            .await
+            .unwrap();
+        assert_eq!(cache.len(), 1);
+        let cleared = cache.clear();
+        assert_eq!(cleared, 1);
+        assert_eq!(cache.len(), 0);
+        assert_eq!(
+            cache.generation(),
+            gen_before,
+            "clear does NOT bump generation"
+        );
+    }
+
+    #[test]
+    fn stats_reflects_hits_misses() {
+        let cache = mk_cache();
+        let stats = cache.stats();
+        assert_eq!(stats.generation, 0);
+        assert_eq!(stats.entries, 0);
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.semantic_hits, 0);
+        assert_eq!(stats.semantic_misses, 0);
+        assert_eq!(stats.fulltext_hits, 0);
+        assert_eq!(stats.fulltext_misses, 0);
     }
 }
