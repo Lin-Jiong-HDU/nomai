@@ -37,8 +37,11 @@ impl ChunkService {
     pub fn for_test() -> Result<Self, CoreError> {
         crate::storage::init_sqlite_extensions();
         let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
-        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", Ulid::new()));
-        let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
+        let tmp = tempfile::tempdir()?;
+        let content_store = Arc::new(crate::content_store::ContentStore::new_with_cleanup(
+            tmp.path().to_path_buf(),
+            tmp,
+        ));
         crate::EntryService::new(conn.clone(), content_store)?;
         Self::new(conn)
     }
@@ -257,18 +260,14 @@ fn row_to_chunk(row: &rusqlite::Row<'_>, _offset: usize) -> rusqlite::Result<Chu
         .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
 
     Ok(Chunk {
-        id: id_str.parse().expect("ULID stored in DB is always valid"),
-        block_id: block_id_str
-            .parse()
-            .expect("ULID stored in DB is always valid"),
+        id: crate::storage::from_text(0, &id_str, ulid::Ulid::from_string)?,
+        block_id: crate::storage::from_text(1, &block_id_str, ulid::Ulid::from_string)?,
         ordinal,
         text,
         attrs,
-        created_at: DateTime::parse_from_rfc3339(&created_str)
-            .expect("RFC3339 stored in DB is always valid")
+        created_at: crate::storage::from_text(5, &created_str, DateTime::parse_from_rfc3339)?
             .with_timezone(&Utc),
-        updated_at: DateTime::parse_from_rfc3339(&updated_str)
-            .expect("RFC3339 stored in DB is always valid")
+        updated_at: crate::storage::from_text(6, &updated_str, DateTime::parse_from_rfc3339)?
             .with_timezone(&Utc),
     })
 }
@@ -855,6 +854,33 @@ mod tests {
             matches!(err, CoreError::Storage(_)),
             "expected CoreError::Storage, got {:?}",
             err
+        );
+    }
+
+    #[test]
+    fn list_returns_err_not_panic_on_corrupt_ulid() {
+        // Plan 6 followup (P2-5): corrupted ULID in DB must surface as
+        // Err(CoreError::Storage), not panic the daemon.
+        let (_entry_id, block_id, conn) = seed_entry_and_block();
+        let chunks = ChunkService::new(conn.clone()).unwrap();
+        // seed_entry_and_block auto-derives 1 chunk under the block.
+        let chunk_list = chunks.list(block_id).unwrap();
+        assert_eq!(chunk_list.total, 1);
+        let chunk_id = chunk_list.items[0].id;
+        {
+            let guard = conn.lock().unwrap();
+            guard
+                .execute(
+                    "UPDATE chunks SET id = 'NOT-A-ULID' WHERE id = ?1",
+                    params![chunk_id.to_string()],
+                )
+                .unwrap();
+        }
+        let result = chunks.list(block_id);
+        assert!(result.is_err(), "expected Err on corrupt ULID, got Ok");
+        assert!(
+            matches!(result, Err(CoreError::Storage(_))),
+            "expected CoreError::Storage, got {result:?}"
         );
     }
 }

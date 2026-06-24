@@ -42,8 +42,11 @@ impl BlockService {
         // registered before the connection is opened.
         crate::storage::init_sqlite_extensions();
         let conn = Arc::new(Mutex::new(Connection::open_in_memory()?));
-        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", ulid::Ulid::new()));
-        let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
+        let tmp = tempfile::tempdir()?;
+        let content_store = Arc::new(crate::content_store::ContentStore::new_with_cleanup(
+            tmp.path().to_path_buf(),
+            tmp,
+        ));
         crate::EntryService::new(conn.clone(), content_store)?;
         Self::new(conn)
     }
@@ -51,7 +54,7 @@ impl BlockService {
     pub fn create(&self, params: CreateBlock) -> Result<Block, CoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch("BEGIN")?;
-        let result = self.create_in_tx(&conn, params);
+        let result = self.create_in_tx(&conn, params, true);
         match result {
             Ok(block) => {
                 conn.execute_batch("COMMIT")?;
@@ -68,7 +71,12 @@ impl BlockService {
     /// Does NOT lock self.conn. Does NOT call self methods that lock conn.
     ///
     /// FK + UNIQUE ConstraintViolation → `CoreError::Validation` per spec §6.3.
-    pub fn create_in_tx(&self, conn: &Connection, params: CreateBlock) -> Result<Block, CoreError> {
+    pub fn create_in_tx(
+        &self,
+        conn: &Connection,
+        params: CreateBlock,
+        emit_event: bool,
+    ) -> Result<Block, CoreError> {
         use chrono::Utc;
 
         let attrs = params
@@ -135,21 +143,29 @@ impl BlockService {
             .map_err(crate::storage::map_constraint_violation)?;
         }
 
-        let event_id = Ulid::new();
-        let event_payload = serde_json::to_value(&block).expect("block serializes");
-        conn.execute(
-            "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                event_id.to_string(),
-                "block.created",
-                "block",
-                block.id.to_string(),
-                event_payload.to_string(),
-                Utc::now().to_rfc3339(),
-            ],
-        )
-        .map_err(crate::storage::map_constraint_violation)?;
+        // `block.created` event emission is gated on `emit_event`. Callers
+        // that already emit an aggregate `entry.created` payload (which
+        // embeds the full blocks vector) pass `false` to avoid N+1 event
+        // amplification: one block.created per block + one entry.created
+        // = N+1 events for a single entry.create. Direct user actions
+        // (BlockService::create, BlockService::append) pass `true`.
+        if emit_event {
+            let event_id = Ulid::new();
+            let event_payload = serde_json::to_value(&block).expect("block serializes");
+            conn.execute(
+                "INSERT INTO events (id, type, target_type, target_id, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    event_id.to_string(),
+                    "block.created",
+                    "block",
+                    block.id.to_string(),
+                    event_payload.to_string(),
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .map_err(crate::storage::map_constraint_violation)?;
+        }
 
         Ok(block)
     }
@@ -226,6 +242,7 @@ impl BlockService {
                 text,
                 attrs,
             },
+            true,
         )
     }
 
@@ -478,19 +495,15 @@ pub(crate) fn row_to_block(row: &rusqlite::Row<'_>, _offset: usize) -> rusqlite:
         serde_json::from_str(&attrs_str).unwrap_or(serde_json::Value::Object(Default::default()));
 
     Ok(Block {
-        id: id_str.parse().expect("ULID stored in DB is always valid"),
-        entry_id: entry_id_str
-            .parse()
-            .expect("ULID stored in DB is always valid"),
+        id: crate::storage::from_text(0, &id_str, ulid::Ulid::from_string)?,
+        entry_id: crate::storage::from_text(1, &entry_id_str, ulid::Ulid::from_string)?,
         ordinal,
         r#type: ty,
         text,
         attrs,
-        created_at: DateTime::parse_from_rfc3339(&created_str)
-            .expect("RFC3339 stored in DB is always valid")
+        created_at: crate::storage::from_text(6, &created_str, DateTime::parse_from_rfc3339)?
             .with_timezone(&Utc),
-        updated_at: DateTime::parse_from_rfc3339(&updated_str)
-            .expect("RFC3339 stored in DB is always valid")
+        updated_at: crate::storage::from_text(7, &updated_str, DateTime::parse_from_rfc3339)?
             .with_timezone(&Utc),
     })
 }
@@ -928,8 +941,11 @@ mod tests {
         // The FK on blocks.entry_id is ON DELETE CASCADE. Verify EntryService::delete
         // removes the entry's blocks.
         let svc = BlockService::for_test().unwrap();
-        let tmp_dir = std::env::temp_dir().join(format!("nomai-test-{}", ulid::Ulid::new()));
-        let content_store = Arc::new(crate::content_store::ContentStore::new(tmp_dir));
+        let tmp = tempfile::tempdir().unwrap();
+        let content_store = Arc::new(crate::content_store::ContentStore::new_with_cleanup(
+            tmp.path().to_path_buf(),
+            tmp,
+        ));
         let entries = EntryService::new(svc.conn.clone(), content_store).unwrap();
         let entry = entries
             .create(CreateEntry {
@@ -953,5 +969,36 @@ mod tests {
         entries.delete(entry.id).unwrap();
 
         assert_eq!(svc.list(entry.id).unwrap().total, 0);
+    }
+
+    #[test]
+    fn list_returns_err_not_panic_on_corrupt_ulid() {
+        // Plan 6 followup (P2-5): corrupted ULID in DB must surface as
+        // Err(CoreError::Storage), not panic the daemon.
+        //
+        // We INSERT a row with a malformed id directly via SQL rather than
+        // UPDATE-ing an existing row: UPDATE would violate the chunks.block_id
+        // FK (BlockService::create_in_tx auto-derives a chunk that references
+        // the block id). A fresh INSERT with the parent entry satisfies the
+        // only relevant FK (blocks.entry_id) and leaves no chunk referencing
+        // the corrupt id.
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = svc.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO blocks (id, entry_id, ordinal, type, text, attrs, created_at, updated_at)
+                 VALUES ('NOT-A-ULID', ?1, 0, 'note', 'x', '{}', ?2, ?2)",
+                params![entry_id.to_string(), now],
+            )
+            .unwrap();
+        }
+        let result = svc.list(entry_id);
+        assert!(result.is_err(), "expected Err on corrupt ULID, got Ok");
+        assert!(
+            matches!(result, Err(CoreError::Storage(_))),
+            "expected CoreError::Storage, got {result:?}"
+        );
     }
 }
