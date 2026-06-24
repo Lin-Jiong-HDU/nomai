@@ -478,19 +478,15 @@ pub(crate) fn row_to_block(row: &rusqlite::Row<'_>, _offset: usize) -> rusqlite:
         serde_json::from_str(&attrs_str).unwrap_or(serde_json::Value::Object(Default::default()));
 
     Ok(Block {
-        id: id_str.parse().expect("ULID stored in DB is always valid"),
-        entry_id: entry_id_str
-            .parse()
-            .expect("ULID stored in DB is always valid"),
+        id: crate::storage::from_text(0, &id_str, ulid::Ulid::from_string)?,
+        entry_id: crate::storage::from_text(1, &entry_id_str, ulid::Ulid::from_string)?,
         ordinal,
         r#type: ty,
         text,
         attrs,
-        created_at: DateTime::parse_from_rfc3339(&created_str)
-            .expect("RFC3339 stored in DB is always valid")
+        created_at: crate::storage::from_text(6, &created_str, DateTime::parse_from_rfc3339)?
             .with_timezone(&Utc),
-        updated_at: DateTime::parse_from_rfc3339(&updated_str)
-            .expect("RFC3339 stored in DB is always valid")
+        updated_at: crate::storage::from_text(7, &updated_str, DateTime::parse_from_rfc3339)?
             .with_timezone(&Utc),
     })
 }
@@ -953,5 +949,36 @@ mod tests {
         entries.delete(entry.id).unwrap();
 
         assert_eq!(svc.list(entry.id).unwrap().total, 0);
+    }
+
+    #[test]
+    fn list_returns_err_not_panic_on_corrupt_ulid() {
+        // Plan 6 followup (P2-5): corrupted ULID in DB must surface as
+        // Err(CoreError::Storage), not panic the daemon.
+        //
+        // We INSERT a row with a malformed id directly via SQL rather than
+        // UPDATE-ing an existing row: UPDATE would violate the chunks.block_id
+        // FK (BlockService::create_in_tx auto-derives a chunk that references
+        // the block id). A fresh INSERT with the parent entry satisfies the
+        // only relevant FK (blocks.entry_id) and leaves no chunk referencing
+        // the corrupt id.
+        let svc = BlockService::for_test().unwrap();
+        let entry_id = seed_entry(svc.conn.clone());
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = svc.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO blocks (id, entry_id, ordinal, type, text, attrs, created_at, updated_at)
+                 VALUES ('NOT-A-ULID', ?1, 0, 'note', 'x', '{}', ?2, ?2)",
+                params![entry_id.to_string(), now],
+            )
+            .unwrap();
+        }
+        let result = svc.list(entry_id);
+        assert!(result.is_err(), "expected Err on corrupt ULID, got Ok");
+        assert!(
+            matches!(result, Err(CoreError::Storage(_))),
+            "expected CoreError::Storage, got {result:?}"
+        );
     }
 }

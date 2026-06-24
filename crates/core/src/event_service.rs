@@ -142,11 +142,13 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
     let payload_json: String = row.get(4)?;
     let created_at_str: String = row.get(5)?;
 
-    let id = from_text(0, &id_str, Ulid::from_string)?;
-    let target_id = from_text(3, &target_id_str, Ulid::from_string)?;
-    let payload: serde_json::Value = from_text(4, &payload_json, |s| serde_json::from_str(s))?;
-    let created_at = from_text(5, &created_at_str, chrono::DateTime::parse_from_rfc3339)?
-        .with_timezone(&chrono::Utc);
+    let id = crate::storage::from_text(0, &id_str, Ulid::from_string)?;
+    let target_id = crate::storage::from_text(3, &target_id_str, Ulid::from_string)?;
+    let payload: serde_json::Value =
+        crate::storage::from_text(4, &payload_json, |s| serde_json::from_str(s))?;
+    let created_at =
+        crate::storage::from_text(5, &created_at_str, chrono::DateTime::parse_from_rfc3339)?
+            .with_timezone(&chrono::Utc);
 
     Ok(Event {
         id,
@@ -155,19 +157,6 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         target_id,
         payload,
         created_at,
-    })
-}
-
-fn from_text<T, E>(
-    idx: usize,
-    s: &str,
-    f: impl for<'a> FnOnce(&'a str) -> Result<T, E>,
-) -> rusqlite::Result<T>
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    f(s).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, Box::new(e))
     })
 }
 

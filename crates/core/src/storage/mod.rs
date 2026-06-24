@@ -37,6 +37,24 @@ pub fn map_constraint_violation(e: rusqlite::Error) -> crate::error::CoreError {
     }
 }
 
+/// Parse a text column value via a fallible closure, returning
+/// `rusqlite::Error::FromSqlConversionFailure` on parse failure instead of
+/// panicking. Used by `row_to_*` helpers across services so that corrupted
+/// ULIDs / RFC3339 timestamps / JSON in the DB surface as `Err` rather than
+/// crashing the daemon.
+pub(crate) fn from_text<T, E>(
+    idx: usize,
+    s: &str,
+    f: impl for<'a> FnOnce(&'a str) -> Result<T, E>,
+) -> rusqlite::Result<T>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    f(s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
 /// Register the sqlite-vec extension globally so any subsequently-opened
 /// `Connection` supports `vec0` virtual tables. Idempotent and safe to call
 /// multiple times.
