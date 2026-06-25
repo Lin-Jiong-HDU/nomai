@@ -98,12 +98,33 @@ impl EventService {
         let rows = stmt.query_map(params_refs.as_slice(), row_to_event)?;
         let mut items: Vec<Event> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
 
+        // Spec 8 Plan 1 / F-events-1: total count of matching events
+        // (same WHERE filter, no LIMIT). Re-prepare with COUNT(*) and
+        // the same params minus the limit param. params_vec_with_limit's
+        // last element is the limit, so borrow all but the last.
+        let count_sql = format!("SELECT COUNT(*) FROM events {where_sql}");
+        let count_params: Vec<&dyn rusqlite::ToSql> = params_vec_with_limit
+            .iter()
+            .take(params_vec_with_limit.len().saturating_sub(1))
+            .map(|p| p.as_ref())
+            .collect();
+        let total: u64 = conn
+            .query_row(&count_sql, count_params.as_slice(), |row| {
+                let n: i64 = row.get(0)?;
+                Ok(n)
+            })
+            .map(|n| n as u64)?;
+
         let has_more = items.len() as u32 > query.limit;
         if has_more {
             items.truncate(query.limit as usize);
         }
 
-        Ok(ListEventsResult { items, has_more })
+        Ok(ListEventsResult {
+            items,
+            has_more,
+            total,
+        })
     }
 
     pub fn get(&self, id: Ulid) -> Result<Event, CoreError> {
@@ -419,6 +440,69 @@ mod tests {
             .unwrap();
         assert_eq!(result2.items.len(), 2);
         assert!(!result2.has_more);
+    }
+
+    #[test]
+    fn list_returns_total_count_matching_filter() {
+        let svc = EventService::for_test().unwrap();
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FA0",
+            "entry.created",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            json!({}),
+        );
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FA1",
+            "entry.created",
+            "entry",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            json!({}),
+        );
+        insert_event(
+            &svc,
+            "01ARZ3NDEKTSV4RRFFQ69G5FA2",
+            "link.created",
+            "link",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            json!({}),
+        );
+
+        // No filter: total = 3
+        let r = svc
+            .list(ListEventsQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.items.len(), 3);
+        assert_eq!(r.total, 3);
+        assert!(!r.has_more);
+
+        // Filter by type=entry.created: total = 2 (filter applied to COUNT too)
+        let r = svc
+            .list(ListEventsQuery {
+                type_: Some("entry.created".into()),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.items.len(), 2);
+        assert_eq!(r.total, 2);
+
+        // Filter + limit: total stays 2, but items limited to 1, has_more true
+        let r = svc
+            .list(ListEventsQuery {
+                type_: Some("entry.created".into()),
+                limit: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.items.len(), 1);
+        assert_eq!(r.total, 2);
+        assert!(r.has_more);
     }
 
     #[test]

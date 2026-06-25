@@ -669,6 +669,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn events_list_returns_total() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create 2 entries (each emits entry.created + block.created; total
+        // events >= 2). Verify the total field reflects all matching events.
+        daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"a","blocks":[{"type":"note","text":"x"}]}),
+            ))
+            .await;
+        daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"b","blocks":[{"type":"note","text":"y"}]}),
+            ))
+            .await;
+
+        let resp = daemon.dispatch(req("events.list", json!({}))).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let total = resp.result.unwrap()["total"].as_u64().unwrap();
+        // At minimum, the two entry.created events.
+        assert!(total >= 2);
+        // Default limit=100 > event count, so has_more is false.
+        let resp2 = daemon.dispatch(req("events.list", json!({}))).await;
+        assert_eq!(resp2.result.unwrap()["has_more"].as_bool(), Some(false));
+    }
+
+    #[tokio::test]
     async fn events_get_returns_event_by_id() {
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
