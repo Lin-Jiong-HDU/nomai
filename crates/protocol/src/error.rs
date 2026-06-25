@@ -51,6 +51,8 @@ mod tests {
         assert_eq!(PROVIDER_ERROR, 1002);
         assert_eq!(VALIDATION_ERROR, 1003);
         assert_eq!(CONFIG_ERROR, 1004);
+        assert_eq!(FS_ERROR, 1005);
+        assert_eq!(NOMAI_FORMAT_ERROR, 1006);
     }
 
     #[test]
