@@ -29,7 +29,6 @@ pub struct Daemon {
     pub(crate) cache: Arc<CachedEmbedder>,
     /// In-memory search-results cache (Spec 7). Bumped on every mutation
     /// that affects search results; see `search_cache::SearchCache`.
-    #[allow(dead_code)] // read in Task 3 (search handler wiring)
     pub(crate) search_cache: Arc<crate::search_cache::SearchCache>,
     pub(crate) llm: Arc<dyn LlmProvider>,
     pub(crate) embedding_model: String,
