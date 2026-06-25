@@ -362,6 +362,101 @@ impl Daemon {
     }
 }
 
+/// Builder for `Daemon`. Spec 8 Plan 2 / F-lib-2: provides a fluent
+/// alternative to `Daemon::from_services`'s 8 positional arguments.
+/// `Daemon::from_services` is kept for backward compatibility.
+///
+/// All fields are required; `build()` returns `Err(CoreError::Config)` if any
+/// field is unset (caught by `Option::ok_or`).
+#[allow(dead_code)] // lib-mode extension point; binary daemon doesn't use this
+pub struct DaemonBuilder {
+    conn: Option<Arc<std::sync::Mutex<Connection>>>,
+    content_store: Option<Arc<ContentStore>>,
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
+    llm: Option<Arc<dyn LlmProvider>>,
+    embedding_dim: Option<usize>,
+    chunk_target_size: Option<usize>,
+    cache_model: Option<String>,
+    warn_rows: Option<u64>,
+}
+
+#[allow(dead_code)] // lib-mode extension point; binary daemon doesn't use this
+impl DaemonBuilder {
+    pub fn new() -> Self {
+        Self {
+            conn: None,
+            content_store: None,
+            embedder: None,
+            llm: None,
+            embedding_dim: None,
+            chunk_target_size: None,
+            cache_model: None,
+            warn_rows: None,
+        }
+    }
+
+    pub fn conn(mut self, v: Arc<std::sync::Mutex<Connection>>) -> Self {
+        self.conn = Some(v);
+        self
+    }
+    pub fn content_store(mut self, v: Arc<ContentStore>) -> Self {
+        self.content_store = Some(v);
+        self
+    }
+    pub fn embedder(mut self, v: Arc<dyn EmbeddingProvider>) -> Self {
+        self.embedder = Some(v);
+        self
+    }
+    pub fn llm(mut self, v: Arc<dyn LlmProvider>) -> Self {
+        self.llm = Some(v);
+        self
+    }
+    pub fn embedding_dim(mut self, v: usize) -> Self {
+        self.embedding_dim = Some(v);
+        self
+    }
+    pub fn chunk_target_size(mut self, v: usize) -> Self {
+        self.chunk_target_size = Some(v);
+        self
+    }
+    pub fn cache_model(mut self, v: impl Into<String>) -> Self {
+        self.cache_model = Some(v.into());
+        self
+    }
+    pub fn warn_rows(mut self, v: u64) -> Self {
+        self.warn_rows = Some(v);
+        self
+    }
+
+    pub fn build(self) -> Result<Daemon, CoreError> {
+        Daemon::from_services(
+            self.conn
+                .ok_or_else(|| CoreError::Config("DaemonBuilder: conn required".into()))?,
+            self.content_store
+                .ok_or_else(|| CoreError::Config("DaemonBuilder: content_store required".into()))?,
+            self.embedder
+                .ok_or_else(|| CoreError::Config("DaemonBuilder: embedder required".into()))?,
+            self.llm
+                .ok_or_else(|| CoreError::Config("DaemonBuilder: llm required".into()))?,
+            self.embedding_dim
+                .ok_or_else(|| CoreError::Config("DaemonBuilder: embedding_dim required".into()))?,
+            self.chunk_target_size.ok_or_else(|| {
+                CoreError::Config("DaemonBuilder: chunk_target_size required".into())
+            })?,
+            self.cache_model
+                .ok_or_else(|| CoreError::Config("DaemonBuilder: cache_model required".into()))?,
+            self.warn_rows
+                .ok_or_else(|| CoreError::Config("DaemonBuilder: warn_rows required".into()))?,
+        )
+    }
+}
+
+impl Default for DaemonBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn expand_db_path(path: &std::path::Path) -> Result<std::path::PathBuf, CoreError> {
     let s = path.to_string_lossy();
     let expanded = if s.starts_with('~') {
@@ -465,5 +560,79 @@ mod tests {
         let expanded = expand_knowledge_root(&nested).unwrap();
         assert!(expanded.exists());
         assert!(expanded.is_dir());
+    }
+
+    #[tokio::test]
+    async fn daemon_builder_constructs_with_all_fields_set() {
+        use nomai_providers::{EmbeddingProvider, LlmProvider};
+
+        // Reuse EntryService::for_test for sqlite-vec init + migrations.
+        // We pull the conn + content_store back out via public accessors.
+        let entries = Arc::new(EntryService::for_test().unwrap());
+        let conn = entries.conn_for_test();
+        let content_store = entries.content_store().clone();
+
+        struct NullEmbed;
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for NullEmbed {
+            async fn embed(
+                &self,
+                _texts: &[&str],
+            ) -> Result<Vec<Vec<f32>>, nomai_protocol::ProviderError> {
+                Ok(vec![])
+            }
+            fn dim(&self) -> usize {
+                8
+            }
+            fn name(&self) -> &str {
+                "null"
+            }
+        }
+        struct NullLlm;
+        #[async_trait::async_trait]
+        impl LlmProvider for NullLlm {
+            async fn complete(
+                &self,
+                _req: nomai_providers::CompletionRequest,
+            ) -> Result<nomai_providers::CompletionResponse, nomai_protocol::ProviderError>
+            {
+                Err(nomai_protocol::ProviderError::new(
+                    nomai_protocol::ProviderErrorKind::Unknown,
+                    "null",
+                    None,
+                ))
+            }
+            fn name(&self) -> &str {
+                "null"
+            }
+        }
+
+        let daemon = DaemonBuilder::new()
+            .conn(conn)
+            .content_store(content_store)
+            .embedder(Arc::new(NullEmbed))
+            .llm(Arc::new(NullLlm))
+            .embedding_dim(8)
+            .chunk_target_size(1024)
+            .cache_model("test-model")
+            .warn_rows(100_000)
+            .build()
+            .unwrap();
+
+        // Sanity: handlers registry is populated (same as from_services path).
+        assert!(daemon.handlers.contains_key("entry.create"));
+    }
+
+    #[test]
+    fn daemon_builder_errors_when_required_field_missing() {
+        // Daemon: !Debug, so we cannot use Result::unwrap_err. Match instead.
+        let result = DaemonBuilder::new().build();
+        match result {
+            Ok(_) => panic!("expected Config error, got Ok(Daemon)"),
+            Err(err) => {
+                assert!(matches!(err, nomai_core::CoreError::Config(_)));
+                assert!(err.to_string().contains("conn required"));
+            }
+        }
     }
 }
