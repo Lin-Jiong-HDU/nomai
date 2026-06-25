@@ -23,7 +23,7 @@ pub use chunk_model::{Chunk, ChunkListResult, ChunkSearchResult, DimReconciliati
 pub use chunk_service::ChunkService;
 pub use content_store::ContentStore;
 pub use error::CoreError;
-pub use event_model::{Event, ListEventsQuery, ListEventsResult, ListOrder, PurgeQuery};
+pub use event_model::{Event, EventListOrder, ListEventsQuery, ListEventsResult, PurgeQuery};
 pub use event_service::EventService;
 pub use link_model::{
     CreateLink, Direction, Link, ListLinkQuery, ListLinkResult, NeighborsQuery, NeighborsResult,
@@ -34,8 +34,8 @@ pub use nomai_format::{
     BlockType, NomaiDoc, ParseError, parse as parse_nomai, render as render_nomai,
 };
 pub use service::{
-    CreateEntry, EntryListQuery, EntryListResult, EntryService, ExportResult, FulltextSearchResult,
-    RebuildResult, SyncResult, UpdateEntry, VerifyResult,
+    CreateEntry, EntryListOrder, EntryListQuery, EntryListResult, EntryService, ExportResult,
+    FulltextSearchResult, RebuildResult, SyncResult, UpdateEntry, VerifyResult,
 };
 
 #[cfg(test)]

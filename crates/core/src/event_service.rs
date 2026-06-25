@@ -10,7 +10,7 @@ use rusqlite::{Connection, params};
 use ulid::Ulid;
 
 use crate::error::CoreError;
-use crate::event_model::{Event, ListEventsQuery, ListEventsResult, ListOrder, PurgeQuery};
+use crate::event_model::{Event, EventListOrder, ListEventsQuery, ListEventsResult, PurgeQuery};
 use crate::storage;
 
 pub struct EventService {
@@ -76,8 +76,8 @@ impl EventService {
         };
 
         let order_dir = match query.order {
-            ListOrder::Asc => "ASC",
-            ListOrder::Desc => "DESC",
+            EventListOrder::Asc => "ASC",
+            EventListOrder::Desc => "DESC",
         };
 
         // LIMIT N+1 trick: fetch one extra to detect has_more.
@@ -198,7 +198,7 @@ impl EventService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event_model::{ListEventsQuery, ListOrder};
+    use crate::event_model::{EventListOrder, ListEventsQuery};
     use serde_json::{Value, json};
     use ulid::Ulid;
 
@@ -288,7 +288,7 @@ mod tests {
 
         let result = svc
             .list(ListEventsQuery {
-                order: ListOrder::Desc,
+                order: EventListOrder::Desc,
                 ..Default::default()
             })
             .unwrap();

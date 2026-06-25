@@ -117,7 +117,7 @@ fn parse_block_type(s: &str) -> Result<crate::nomai_format::BlockType, CoreError
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ListOrder {
+pub enum EntryListOrder {
     #[default]
     CreatedDesc,
     CreatedAsc,
@@ -134,7 +134,7 @@ pub struct EntryListQuery {
     #[serde(default)]
     pub offset: u32,
     #[serde(default)]
-    pub order: ListOrder,
+    pub order: EntryListOrder,
     /// When `Some(true)`, populate `blocks` on each returned entry. Default
     /// `None` (skip) for cheap list queries; set `Some(true)` when callers
     /// need block content without N+1 follow-up `entry.get` calls.
@@ -152,7 +152,7 @@ impl Default for EntryListQuery {
             tag: None,
             limit: default_limit(),
             offset: 0,
-            order: ListOrder::default(),
+            order: EntryListOrder::default(),
             include_blocks: None,
         }
     }
@@ -999,10 +999,10 @@ impl EntryService {
 
     pub fn list(&self, query: EntryListQuery) -> Result<EntryListResult, CoreError> {
         let order_clause = match query.order {
-            ListOrder::CreatedDesc => "created_at DESC",
-            ListOrder::CreatedAsc => "created_at ASC",
-            ListOrder::UpdatedDesc => "updated_at DESC",
-            ListOrder::UpdatedAsc => "updated_at ASC",
+            EntryListOrder::CreatedDesc => "created_at DESC",
+            EntryListOrder::CreatedAsc => "created_at ASC",
+            EntryListOrder::UpdatedDesc => "updated_at DESC",
+            EntryListOrder::UpdatedAsc => "updated_at ASC",
         };
 
         let conn = self.conn.lock().unwrap();
@@ -1325,7 +1325,7 @@ mod tests {
     use ulid::Ulid;
 
     use crate::block_model::BlockInput;
-    use crate::service::{EntryListQuery, ListOrder, UpdateEntry};
+    use crate::service::{EntryListOrder, EntryListQuery, UpdateEntry};
 
     /// Build a single-note block with the given text.
     fn note_block(text: impl Into<String>) -> BlockInput {
@@ -1531,7 +1531,7 @@ mod tests {
                 tag: None,
                 limit: 2,
                 offset: 0,
-                order: ListOrder::CreatedAsc,
+                order: EntryListOrder::CreatedAsc,
                 include_blocks: None,
             })
             .unwrap();
@@ -1543,7 +1543,7 @@ mod tests {
                 tag: None,
                 limit: 2,
                 offset: 2,
-                order: ListOrder::CreatedAsc,
+                order: EntryListOrder::CreatedAsc,
                 include_blocks: None,
             })
             .unwrap();
@@ -1562,7 +1562,7 @@ mod tests {
                 tag: Some("red".into()),
                 limit: 50,
                 offset: 0,
-                order: ListOrder::CreatedAsc,
+                order: EntryListOrder::CreatedAsc,
                 include_blocks: None,
             })
             .unwrap();
