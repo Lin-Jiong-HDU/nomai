@@ -1060,6 +1060,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn entry_list_returns_has_more_when_paginated() {
+        // Spec 8 Plan 1 / F-entry-4: entry.list now returns has_more so
+        // consumers can tell whether more entries exist beyond offset+limit.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        for i in 0..3 {
+            daemon
+                .dispatch(req(
+                    "entry.create",
+                    json!({
+                        "title": format!("t{i}"),
+                        "blocks": [{"type": "note", "text": "x"}],
+                    }),
+                ))
+                .await;
+        }
+
+        let resp = daemon
+            .dispatch(req("entry.list", json!({"limit": 2})))
+            .await;
+        let result = resp.result.unwrap();
+        assert_eq!(result["items"].as_array().unwrap().len(), 2);
+        assert_eq!(result["total"].as_u64().unwrap(), 3);
+        assert!(
+            result["has_more"].as_bool().unwrap(),
+            "has_more must be true when total > returned"
+        );
+    }
+
+    #[tokio::test]
     async fn search_semantic_with_block_type_filter() {
         // Plan 4: block_type filter is the successor to the old granularity.
         let server = MockServer::start().await;

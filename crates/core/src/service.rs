@@ -162,6 +162,9 @@ impl Default for EntryListQuery {
 pub struct EntryListResult {
     pub items: Vec<Entry>,
     pub total: u64,
+    /// True when `total > offset + items.len()` (more entries remain
+    /// unfetched). Spec 8 Plan 1 / F-entry-4.
+    pub has_more: bool,
 }
 
 #[derive(Debug)]
@@ -1054,7 +1057,12 @@ impl EntryService {
             }
         }
 
-        Ok(EntryListResult { items, total })
+        let has_more = (query.offset as u64 + items.len() as u64) < total;
+        Ok(EntryListResult {
+            items,
+            total,
+            has_more,
+        })
     }
 
     /// Fulltext search over `fts_blocks` (per-block FTS5). Optional
@@ -1560,6 +1568,113 @@ mod tests {
             .unwrap();
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.total, 2);
+    }
+
+    // ----- has_more tests (Spec 8 Plan 1 / F-entry-4) -----
+
+    #[test]
+    fn list_sets_has_more_true_when_more_entries_exist() {
+        let svc = EntryService::for_test().unwrap();
+        // Insert 3 entries.
+        for i in 0..3 {
+            svc.create(CreateEntry {
+                title: format!("t{i}"),
+                blocks: vec![BlockInput {
+                    r#type: "note".into(),
+                    text: "x".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+        }
+
+        let result = svc
+            .list(EntryListQuery {
+                limit: 2,
+                offset: 0,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.total, 3);
+        assert!(
+            result.has_more,
+            "has_more must be true when total > offset + returned"
+        );
+    }
+
+    #[test]
+    fn list_sets_has_more_false_when_all_returned() {
+        let svc = EntryService::for_test().unwrap();
+        for i in 0..3 {
+            svc.create(CreateEntry {
+                title: format!("t{i}"),
+                blocks: vec![BlockInput {
+                    r#type: "note".into(),
+                    text: "x".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+        }
+
+        let result = svc
+            .list(EntryListQuery {
+                limit: 10,
+                offset: 0,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(result.items.len(), 3);
+        assert_eq!(result.total, 3);
+        assert!(!result.has_more);
+    }
+
+    #[test]
+    fn list_has_more_with_offset_pagination() {
+        let svc = EntryService::for_test().unwrap();
+        for i in 0..5 {
+            svc.create(CreateEntry {
+                title: format!("t{i}"),
+                blocks: vec![BlockInput {
+                    r#type: "note".into(),
+                    text: "x".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+            })
+            .unwrap();
+        }
+
+        // Page 1: limit=2, offset=0 → 2 items, has_more (5 total).
+        let p1 = svc
+            .list(EntryListQuery {
+                limit: 2,
+                offset: 0,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(p1.items.len(), 2);
+        assert!(p1.has_more);
+
+        // Page 3: limit=2, offset=4 → 1 item, no has_more (5 total, fetched all).
+        let p3 = svc
+            .list(EntryListQuery {
+                limit: 2,
+                offset: 4,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(p3.items.len(), 1);
+        assert!(!p3.has_more);
     }
 
     // `FulltextSearchResult` is brought into scope via the `use super::*;`

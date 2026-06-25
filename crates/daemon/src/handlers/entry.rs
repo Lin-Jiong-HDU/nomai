@@ -146,6 +146,7 @@ impl RpcHandler for List {
         Ok(json!({
             "items": result.items,
             "total": result.total,
+            "has_more": result.has_more,
         }))
     }
 }
