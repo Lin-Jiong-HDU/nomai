@@ -53,4 +53,10 @@ mod integration_tests {
         // Spec 8 Plan 2 / F-lib-1: parser Block re-exported as NomaiBlock.
         let _ = std::marker::PhantomData::<NomaiBlock>;
     }
+
+    // Spec 8 Plan 2 / F-lib-1 (final-review I3): prove NomaiBlock IS the parser
+    // `nomai_format::Block`, not the storage `block_model::Block`. PhantomData
+    // alone couldn't distinguish — both are valid types named via the alias.
+    // If the alias ever drifts to `block_model::Block`, this stops compiling.
+    const _: fn(crate::nomai_format::Block) -> NomaiBlock = |b| b;
 }

@@ -1337,6 +1337,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_op_error_includes_data_field_for_not_found() {
+        // Spec 8 Plan 2 / F-batch-4 (final-review I2): wire-format guard.
+        // When a batch op fails with a CoreError variant that carries context
+        // (here: NotFound(id)), the resulting RPC error must include a `data`
+        // object on the per-op error. The batch handler routes the failing op's
+        // CoreError to the top-level error (atomic rollback), so the wire-visible
+        // `data` field appears on `resp.error.data`. If `core_error_to_rpc_ref`
+        // ever stops enriching NotFound with `data.id`, this test fails.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req(
+                "batch",
+                json!({
+                    "ops": [
+                        {"id": "op1", "method": "entry.delete", "params": {"id": phantom_id}}
+                    ]
+                }),
+            ))
+            .await;
+
+        // Atomic rollback surfaces the underlying op failure at top level.
+        let err = resp
+            .error
+            .expect("batch with failing op must return top-level error");
+        assert_eq!(
+            err.code, 1001,
+            "NotFound code from entry.delete on phantom id"
+        );
+
+        // The wire-format change introduced in F-batch-4: `data` is present and
+        // carries the NotFound id. Old consumers ignore this field; new ones can
+        // read the offending id without scraping the message string.
+        let data = err
+            .data
+            .expect("per-op NotFound error must include `data` field");
+        assert_eq!(
+            data["id"]
+                .as_str()
+                .expect("data.id is the phantom ulid string"),
+            phantom_id,
+            "data.id should match the entry.delete target id"
+        );
+    }
+
+    #[tokio::test]
     async fn batch_rejects_read_method() {
         let server = MockServer::start().await;
         let daemon = setup_daemon(&server).await;

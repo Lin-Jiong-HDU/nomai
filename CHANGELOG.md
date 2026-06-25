@@ -21,6 +21,9 @@ a major bump (2.0). See "Migration from 0.1.0" below.
 - `nomai_core::NomaiBlock` alias for `nomai_format::Block` (Spec 8 Plan 2 / F-lib-1)
 - `nomai_daemon::DaemonBuilder` fluent constructor (Spec 8 Plan 2 / F-lib-2)
 - `nomai_protocol::method::cache::{STATS, CLEAR}` constants (Spec 8 Plan 2 / F-cache-1)
+- Batch per-op error objects in the `results` array now include a `data` field
+  when the underlying CoreError carries context (Spec 8 Plan 2 / F-batch-4).
+  Previously omitted.
 
 ### Changed (lib-side breaking)
 
@@ -28,12 +31,6 @@ a major bump (2.0). See "Migration from 0.1.0" below.
 - `nomai_core::service::ListOrder` renamed to `EntryListOrder`; now re-exported at crate root (Spec 8 Plan 2 / F-events-2)
 - `nomai_daemon::handlers::registry()` moved to `handlers::registry::registry()` (Spec 8 Plan 2 / F-lib-3); short path `handlers::registry()` preserved via re-export
 - `batch::error_to_rpc` removed; use `rpc::core_error_to_rpc_ref` (Spec 8 Plan 2 / F-batch-4)
-- **Batch per-op error objects now include a `data` field** when the underlying
-  `CoreError` carries context (Spec 8 Plan 2 / F-batch-4). For example, a batch
-  `entry.get` op that hits a 1001 NotFound now reports
-  `{ok: false, error: {code: 1001, message: "...", data: {id: "..."}}}`.
-  Previously the `data` field was omitted. Clients that did not inspect `data`
-  are unaffected.
 
 ### Documentation
 
