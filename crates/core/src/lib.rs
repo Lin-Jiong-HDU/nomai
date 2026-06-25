@@ -31,7 +31,8 @@ pub use link_model::{
 pub use link_service::LinkService;
 pub use model::Entry;
 pub use nomai_format::{
-    BlockType, NomaiDoc, ParseError, parse as parse_nomai, render as render_nomai,
+    Block as NomaiBlock, BlockType, NomaiDoc, ParseError, parse as parse_nomai,
+    render as render_nomai,
 };
 pub use service::{
     CreateEntry, EntryListOrder, EntryListQuery, EntryListResult, EntryService, ExportResult,
@@ -40,7 +41,7 @@ pub use service::{
 
 #[cfg(test)]
 mod integration_tests {
-    use crate::{Block, BlockService, ContentStore, CreateBlock};
+    use crate::{Block, BlockService, ContentStore, CreateBlock, NomaiBlock};
 
     #[test]
     fn new_types_are_accessible_from_crate_root() {
@@ -49,5 +50,7 @@ mod integration_tests {
         let _ = std::marker::PhantomData::<CreateBlock>;
         let _ = std::marker::PhantomData::<BlockService>;
         let _ = std::marker::PhantomData::<ContentStore>;
+        // Spec 8 Plan 2 / F-lib-1: parser Block re-exported as NomaiBlock.
+        let _ = std::marker::PhantomData::<NomaiBlock>;
     }
 }
