@@ -727,6 +727,19 @@ Run: `cargo run --example custom_rpc`
 
 The `batch` RPC lets you compose multiple mutations atomically (see [RPC reference](#batch) above). Custom handlers participate in the ecosystem but are not callable from within `batch` ops (only built-in mutations are batch-eligible).
 
+## Migration from 0.x to 1.0
+
+1.0 freezes the API surface. The full breaking-change list and migration
+steps live in [CHANGELOG.md](../CHANGELOG.md#migration-from-010). Quick
+summary:
+
+- **RPC consumers**: no breaking changes (all 1.0 RPC additions are additive).
+- **lib consumers**: rename `ListOrder` imports (see CHANGELOG §"Changed").
+- **Daemon lib-mode users**: optional switch to `DaemonBuilder`.
+
+See also Spec 8 (`docs/superpowers/specs/2026-06-25-pre-1-0-api-freeze-pass-design.md`)
+for the full freeze-pass audit.
+
 ## What's next
 
 nomai's kernel roadmap (Spec 1-7) is complete:
