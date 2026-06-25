@@ -1024,9 +1024,13 @@ mod tests {
 
         // Delete the entry — CASCADE removes blocks → chunks; chunks_ad trigger
         // cleans vec_chunk_embeddings.
-        daemon
+        let del_resp = daemon
             .dispatch(req("entry.delete", json!({"id": entry_id})))
             .await;
+        // F-entry-1: entry.delete ack carries the id (mirrors block.delete).
+        let del_result = del_resp.result.unwrap();
+        assert_eq!(del_result["deleted"], true);
+        assert_eq!(del_result["id"], entry_id);
 
         // After: chunk search returns 0 because the trigger cleaned up
         // vec_chunk_embeddings (no handler-side walk).
