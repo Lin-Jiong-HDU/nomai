@@ -200,8 +200,8 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 | `entry.create` | `title`, `blocks: [{type, text, attrs?}]`, `tags?`, `attrs?`, `source?` | `Entry` | Auto-embeds block texts if non-empty                                              |
 | `entry.get`    | `id`                                                  | `Entry`             | 1001 if not found                                                                 |
 | `entry.update` | `id`, `title?`, `blocks?`, `tags?`, `attrs?`, `source?` | `Entry`           | Re-embeds if blocks change; clears embedding if blocks become empty               |
-| `entry.delete` | `id`                                                  | `{"deleted": true}` | Cascades to links + chunks + chunk embeddings                                     |
-| `entry.list`   | `tag?`, `limit?`(50), `offset?`(0), `order?`          | `{items, total}`    | `order`: `created_desc`(default) / `created_asc` / `updated_desc` / `updated_asc` |
+| `entry.delete` | `id`                                                  | `{"deleted": true, "id": "<ulid>"}` | Cascades to links + chunks + chunk embeddings. `id` added in 1.0 (Spec 8 Plan 1 / F-entry-1) for consistency with `block.delete` |
+| `entry.list`   | `tag?`, `limit?`(50), `offset?`(0), `order?`          | `{items, total, has_more}`    | `order`: `created_desc`(default) / `created_asc` / `updated_desc` / `updated_asc`. `has_more` (added in 1.0, Spec 8 Plan 1 / F-entry-4) is true when `total > offset + items.len()` |
 
 **Block input shape**: `BlockInput` is `{ type: String, text: String, attrs?: Value }`. Valid types: `claim`, `evidence`, `question`, `source`, `note`, `connection` (the `@connection` type requires `target` and `relation` attrs).
 
@@ -213,7 +213,7 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 | `block.update` | `id`, `type?`, `text?`, `attrs?`        | `Block`             | Re-chunks if text changed                     |
 | `block.delete` | `id`                                    | `{"deleted": true}` | 1001 if not found                             |
 | `block.get`    | `id`                                    | `Block`             | 1001 if not found                             |
-| `block.list`   | `entry_id`                              | `{items, total}`    | Sorted by `ordinal` ascending                 |
+| `block.list`   | `entry_id`                              | `{items, total}`    | Sorted by `ordinal` ascending. Added in 1.0 (Spec 8 Plan 1 / F-block-1) for namespace completeness |
 
 Each mutation rewrites the parent entry's `.nomai` file automatically (no separate RPC needed). Chunk re-derivation is automatic on `text` change. Chunks are split at `config.chunking.target_size` characters (default 1024) via paragraph → sentence → hard-cut fallback.
 
@@ -246,7 +246,7 @@ Daemon runs `index.sync` automatically at boot. If FS differs from the index (e.
 
 | Method         | Params                                                                                                           | Returns             | Notes               |
 | -------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------- | ------------------- |
-| `events.list`  | `since?`(ULID, exclusive), `type?`, `target_type?`, `target_id?`, `limit?`(100), `order?`("asc"=default\|"desc") | `{items, has_more}` | Client-cursor model |
+| `events.list`  | `since?`(ULID, exclusive), `type?`, `target_type?`, `target_id?`, `limit?`(100), `order?`("asc"=default\|"desc") | `{items, has_more, total}` | Client-cursor model. `total` (added in 1.0, Spec 8 Plan 1 / F-events-1) is the total event count matching the filters |
 | `events.get`   | `id`                                                                                                             | `Event`             | 1001 if not found   |
 | `events.purge` | `before`(ULID, exclusive), `type?`                                                                               | `{deleted: N}`      | For retention       |
 
@@ -611,6 +611,12 @@ let entry = entries.create(nomai_core::CreateEntry {
 })?;
 ```
 
+**Re-exported types** (Spec 8 Plan 2):
+
+- `EntryListOrder` (replaces the old `ListOrder`) — order enum for `entry.list`: `CreatedDesc` (default) / `CreatedAsc` / `UpdatedDesc` / `UpdatedAsc`.
+- `EventListOrder` (replaces the old `ListOrder`) — order enum for `events.list`: `Asc` (default) / `Desc`.
+- `NomaiBlock` — alias for the parser's `Block` type (Spec 8 Plan 2 / F-lib-1), re-exported from `nomai_core` so lib-mode callers don't have to depend on the parser crate directly. Use it when reading or constructing blocks outside the service layer.
+
 ### Option 2: nomai-daemon (full Daemon with RPC dispatch + MCP + batch)
 
 ```toml
@@ -642,6 +648,27 @@ daemon.register_handler(std::sync::Arc::new(MyHandler));
 // Dispatch any RPC (batch, search, CRUD, MCP tools/call, etc.)
 let resp = daemon.dispatch(req).await;
 ```
+
+**`DaemonBuilder`** (Spec 8 Plan 2 / F-lib-2) — fluent alternative to `from_services`'s 8 positional arguments:
+
+```rust
+use nomai_daemon::DaemonBuilder;
+
+let mut daemon = DaemonBuilder::new()
+    .conn(conn)
+    .content_store(content_store)
+    .embedder(embedder)
+    .llm(llm)
+    .embedding_dim(2048)
+    .chunk_target_size(1024)
+    .cache_model("embedding-3")
+    .warn_rows(100_000)
+    .build()?;
+```
+
+All eight fields are required; `build()` returns `Err(CoreError::Config)` if any field is unset. `Daemon::from_services` is kept for backward compatibility.
+
+**RPC method constants** (Spec 8 Plan 2 / F-cache-1): `nomai_protocol::method` exposes named constants for every RPC method string, including `cache::STATS` and `cache::CLEAR`. Use them in dispatch match-arms instead of string literals to avoid typos.
 
 See `crates/daemon/examples/` for complete working examples:
 

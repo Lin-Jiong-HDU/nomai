@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (1.0 API surface — Spec 8 Plan 1 + Plan 2)
+
+- **`entry.delete`** now returns `{"deleted": true, "id": "<ulid>"}` (F-entry-1).
+- **`entry.list`** now returns `{items, total, has_more}` — `has_more` is true when
+  `total > offset + items.len()` (F-entry-4).
+- **`events.list`** now returns `{items, has_more, total}` — `total` is the full
+  count matching the filters (F-events-1).
+- **`block.list`** RPC — list blocks by `entry_id` (F-block-1, namespace completeness).
+- **`nomai_core::EntryListOrder` / `EventListOrder`** — replaces the old `ListOrder`
+  enum (split per-service so they can diverge; F-events-2).
+- **`nomai_core::NomaiBlock`** — alias for the parser's `Block` type (F-lib-1).
+- **`nomai_daemon::DaemonBuilder`** — fluent alternative to `Daemon::from_services`
+  (F-lib-2; `from_services` kept for backward compatibility).
+- **`nomai_protocol::method::cache::{STATS, CLEAR}`** — named constants for the
+  cache RPC method strings (F-cache-1).
+
+### Changed
+
+- **Batch per-op error objects now include a `data` field** when the underlying
+  `CoreError` carries context (Spec 8 Plan 2 / F-batch-4). For example, a batch
+  `entry.get` op that hits a 1001 NotFound now reports
+  `{ok: false, error: {code: 1001, message: "...", data: {id: "..."}}}`.
+  Previously the `data` field was omitted. Clients that did not inspect `data`
+  are unaffected.
+
 ## [0.1.0] — 2026-06-24
 
 First public alpha. The API surface is stabilizing but may change before 1.0.
