@@ -66,6 +66,8 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     m.insert(h.method(), Arc::new(h));
     let h = block::Delete;
     m.insert(h.method(), Arc::new(h));
+    let h = block::List;
+    m.insert(h.method(), Arc::new(h));
 
     // index.* (Plan 5: FS↔SQLite reconciliation. Plan 6: read-only verify.)
     let h = index::Sync;
@@ -1167,10 +1169,10 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 28 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
+        // 29 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:4,
         // events:3, search:2, provider:1, cache:2, batch:1, index:3,
         // system:1).
-        assert_eq!(tools.len(), 28);
+        assert_eq!(tools.len(), 29);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1302,7 +1304,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 29); // 28 built-in + custom.echo
+        assert_eq!(tools.len(), 30); // 29 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
@@ -2231,6 +2233,57 @@ mod tests {
             .await;
         let err = resp.error.unwrap();
         assert_eq!(err.code, 1001); // NotFound
+    }
+
+    // ----- block.list e2e tests (Spec 8 Plan 1 / F-block-1) -----
+
+    #[tokio::test]
+    async fn block_list_returns_blocks_for_entry() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let create = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({
+                    "title": "t",
+                    "blocks": [
+                        {"type": "note", "text": "first"},
+                        {"type": "claim", "text": "second"}
+                    ]
+                }),
+            ))
+            .await;
+        assert!(create.error.is_none(), "{:?}", create.error);
+        let entry_id = create.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        let resp = daemon
+            .dispatch(req("block.list", json!({"entry_id": entry_id})))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"].as_str().unwrap(), "note");
+        assert_eq!(items[1]["type"].as_str().unwrap(), "claim");
+        assert_eq!(result["total"].as_u64().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn block_list_unknown_entry_returns_empty() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req("block.list", json!({"entry_id": phantom_id})))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["items"].as_array().unwrap().len(), 0);
+        assert_eq!(result["total"].as_u64().unwrap(), 0);
     }
 
     // ----- system.export_to_fs e2e test (Plan 6 Task 3) -----

@@ -59,6 +59,9 @@ pub mod block {
     /// Plan 5: delete a block. The chunks_ad trigger cleans vec_chunk_embeddings
     /// and re-renders the entry's `.nomai` file.
     pub const DELETE: &str = "block.delete";
+    /// Spec 8 Plan 1 / F-block-1: list blocks for an entry by entry_id.
+    /// Fills the namespace gap (entry/link/chunk/events all have list).
+    pub const LIST: &str = "block.list";
 }
 
 pub mod index {
@@ -144,6 +147,7 @@ mod tests {
         assert_eq!(block::APPEND, "block.append");
         assert_eq!(block::UPDATE, "block.update");
         assert_eq!(block::DELETE, "block.delete");
+        assert_eq!(block::LIST, "block.list");
     }
 
     #[test]
