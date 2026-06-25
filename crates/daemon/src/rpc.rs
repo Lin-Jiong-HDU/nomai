@@ -33,7 +33,11 @@ pub trait RpcHandler: Send + Sync {
     -> Result<Value, CoreError>;
 }
 
-pub fn core_error_to_rpc(err: CoreError) -> RpcError {
+/// Reference version of `core_error_to_rpc`. Used by callers that need
+/// to keep the original CoreError (e.g. batch.rs inserts per-op errors
+/// into the results array AND returns the last error as the top-level
+/// RPC error). Spec 8 Plan 2 / F-batch-4.
+pub fn core_error_to_rpc_ref(err: &CoreError) -> RpcError {
     match err {
         CoreError::NotFound(id) => RpcError {
             code: ENTRY_NOT_FOUND,
@@ -42,7 +46,7 @@ pub fn core_error_to_rpc(err: CoreError) -> RpcError {
         },
         CoreError::Validation(msg) => RpcError {
             code: VALIDATION_ERROR,
-            message: msg,
+            message: msg.clone(),
             data: None,
         },
         CoreError::Provider(p) => RpcError {
@@ -55,7 +59,7 @@ pub fn core_error_to_rpc(err: CoreError) -> RpcError {
         },
         CoreError::Config(msg) => RpcError {
             code: CONFIG_ERROR,
-            message: msg,
+            message: msg.clone(),
             data: None,
         },
         CoreError::Io(e) => RpcError {
@@ -82,6 +86,11 @@ pub fn core_error_to_rpc(err: CoreError) -> RpcError {
             data: None,
         },
     }
+}
+
+/// Convenience wrapper: convert owned CoreError to RpcError.
+pub fn core_error_to_rpc(err: CoreError) -> RpcError {
+    core_error_to_rpc_ref(&err)
 }
 
 #[cfg(test)]
@@ -135,5 +144,17 @@ mod tests {
         let rpc = core_error_to_rpc(CoreError::NomaiFormat(parse_err));
         assert_eq!(rpc.code, NOMAI_FORMAT_ERROR);
         assert!(rpc.message.contains("empty input"));
+    }
+
+    #[test]
+    fn core_error_to_rpc_ref_matches_by_value() {
+        // Spec 8 Plan 2 / F-batch-4: ref version produces same code/data as
+        // the by-value version. CoreError isn't Clone, so reconstruct the
+        // owned path's expectations by hand.
+        let id: ulid::Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let err = CoreError::NotFound(id);
+        let by_ref = core_error_to_rpc_ref(&err);
+        assert_eq!(by_ref.code, 1001);
+        assert!(by_ref.data.unwrap().get("id").is_some());
     }
 }

@@ -16,7 +16,7 @@ use nomai_core::{
 use nomai_providers::EmbeddingProvider;
 
 use crate::daemon::Daemon;
-use crate::rpc::RpcHandler;
+use crate::rpc::{RpcHandler, core_error_to_rpc_ref};
 
 /// A single operation within a batch request.
 #[derive(Debug, Deserialize)]
@@ -123,7 +123,7 @@ impl RpcHandler for Batch {
                     ));
                     results.push(json!({
                         "ok": false,
-                        "error": error_to_rpc(&err)
+                        "error": error_to_rpc_value(&err)
                     }));
                     failed_at = Some((i, err));
                     continue;
@@ -135,7 +135,7 @@ impl RpcHandler for Batch {
                     Err(e) => {
                         results.push(json!({
                             "ok": false,
-                            "error": error_to_rpc(&e)
+                            "error": error_to_rpc_value(&e)
                         }));
                         failed_at = Some((i, e));
                         continue;
@@ -164,7 +164,7 @@ impl RpcHandler for Batch {
                     Err(e) => {
                         results.push(json!({
                             "ok": false,
-                            "error": error_to_rpc(&e)
+                            "error": error_to_rpc_value(&e)
                         }));
                         failed_at = Some((i, e));
                     }
@@ -341,28 +341,13 @@ fn dispatch_in_tx(
     }
 }
 
-/// Convert CoreError to a JSON-RPC error object (for results array entries).
+/// Convert CoreError to a JSON-RPC error Value (for results array entries).
 ///
-/// Mirrors `crate::rpc::core_error_to_rpc` but takes a reference (CoreError
-/// does not implement Clone). Keep the code/message mapping in sync with
-/// `core_error_to_rpc` in `crate::rpc`.
-fn error_to_rpc(err: &CoreError) -> Value {
-    use nomai_protocol::error::{
-        CONFIG_ERROR, ENTRY_NOT_FOUND, FS_ERROR, INTERNAL_ERROR, NOMAI_FORMAT_ERROR,
-        PROVIDER_ERROR, VALIDATION_ERROR,
-    };
-    let (code, message) = match err {
-        CoreError::NotFound(_) => (ENTRY_NOT_FOUND, "entry not found".to_string()),
-        CoreError::Validation(msg) => (VALIDATION_ERROR, msg.clone()),
-        CoreError::Provider(p) => (PROVIDER_ERROR, p.message.clone()),
-        CoreError::Config(msg) => (CONFIG_ERROR, msg.clone()),
-        CoreError::Io(e) => (FS_ERROR, format!("io error: {e}")),
-        CoreError::NomaiFormat(pe) => (NOMAI_FORMAT_ERROR, format!("nomai format error: {pe}")),
-        CoreError::Storage(e) => (INTERNAL_ERROR, format!("storage error: {e}")),
-        CoreError::Migration(msg) => (INTERNAL_ERROR, format!("migration error: {msg}")),
-    };
-    json!({
-        "code": code,
-        "message": message,
-    })
+/// Spec 8 Plan 2 / F-batch-4: delegate to `rpc::core_error_to_rpc_ref`
+/// instead of duplicating the CoreError → RPC mapping (which previously
+/// drifted from the top-level mapping in `rpc.rs`). Wraps the resulting
+/// `RpcError` as a Value for direct insertion into the per-op results array.
+fn error_to_rpc_value(err: &CoreError) -> Value {
+    serde_json::to_value(core_error_to_rpc_ref(err))
+        .unwrap_or_else(|_| json!({"code": -32603, "message": "serialize error in batch"}))
 }
