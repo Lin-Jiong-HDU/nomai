@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use nomai_core::CoreError;
+use nomai_protocol::method::cache::{CLEAR as CACHE_CLEAR, STATS as CACHE_STATS};
 use nomai_providers::ClearOptions;
 
 use crate::daemon::Daemon;
@@ -14,7 +15,7 @@ pub struct Stats;
 #[async_trait]
 impl RpcHandler for Stats {
     fn method(&self) -> &'static str {
-        "cache.stats"
+        CACHE_STATS
     }
     async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
         let stats = daemon.cache.stats()?;
@@ -91,7 +92,7 @@ pub struct Clear;
 #[async_trait]
 impl RpcHandler for Clear {
     fn method(&self) -> &'static str {
-        "cache.clear"
+        CACHE_CLEAR
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let opts: ClearParams = if params.is_null() {

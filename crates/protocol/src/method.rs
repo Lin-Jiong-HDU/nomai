@@ -92,6 +92,15 @@ pub mod system {
     pub const EXPORT_TO_FS: &str = "system.export_to_fs";
 }
 
+pub mod cache {
+    /// Spec 5: emb_cache introspection (model, rows, hits/misses, warning).
+    pub const STATS: &str = "cache.stats";
+    /// Spec 5 + Spec 7: clear cache by namespace. Default namespace
+    /// `"embeddings"` for backward compat; `"searches"` / `"all"` opts
+    /// into the Spec 7 search cache.
+    pub const CLEAR: &str = "cache.clear";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +169,11 @@ mod tests {
     #[test]
     fn system_namespace_methods() {
         assert_eq!(system::EXPORT_TO_FS, "system.export_to_fs");
+    }
+
+    #[test]
+    fn cache_namespace_methods() {
+        assert_eq!(cache::STATS, "cache.stats");
+        assert_eq!(cache::CLEAR, "cache.clear");
     }
 }
