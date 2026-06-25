@@ -42,8 +42,13 @@ pub mod events {
 }
 
 pub mod chunk {
+    /// Reserved: chunks are auto-derived from blocks (Spec 6 §10).
+    /// Returns `METHOD_NOT_FOUND` (-32601) if dispatched. Constant
+    /// retained for symmetry with GET/LIST and future re-enable.
     pub const CREATE: &str = "chunk.create";
     pub const GET: &str = "chunk.get";
+    /// Reserved: see CREATE. Chunks are immutable; deleted when the
+    /// parent block is deleted (CASCADE + V9 trigger).
     pub const DELETE: &str = "chunk.delete";
     pub const LIST: &str = "chunk.list";
 }
