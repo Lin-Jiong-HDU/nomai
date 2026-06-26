@@ -146,7 +146,9 @@ If your `config.embedding.dim` differs from 1536 (the daemon default), the daemo
 
 ## Documentation
 
-- **[docs/guide.md](docs/guide.md)** — Concepts, full RPC reference, error codes, configuration, and usage patterns.
+- **[docs/guide.md](docs/guide.md)** — Concepts: transport, the five primitives, storage model.
+- **[docs/reference.md](docs/reference.md)** — Full RPC reference, error codes, configuration, cache internals.
+- **[docs/lib.md](docs/lib.md)** — Embedding nomai as a Rust library (lib mode, DaemonBuilder, custom RPCs).
 
 ## Project layout
 
@@ -160,7 +162,9 @@ nomai/
 ├── hooks/           # Git hooks (version-controlled)
 │   └── pre-commit   # Runs `cargo fmt --check` on staged .rs files
 └── docs/
-    └── guide.md     # Developer guide
+    ├── guide.md       # Concepts: transport, primitives, storage model
+    ├── reference.md   # Full RPC + error + config + cache reference
+    └── lib.md         # Lib mode + DaemonBuilder + custom RPCs
 ```
 
 ## Development

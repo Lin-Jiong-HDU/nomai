@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-06-26
+
+Docs-only release. No code or API changes; no migration steps.
+
+### Changed
+
+- **Docs split**: the single-file `docs/guide.md` (765 lines) is now three
+  focused documents:
+  - `docs/guide.md` (216 lines) — concepts: transport, the five primitives,
+    storage model, migration
+  - `docs/reference.md` (416 lines, new) — full RPC reference, error codes,
+    configuration, cache internals
+  - `docs/lib.md` (179 lines, new) — lib mode, `DaemonBuilder`, custom RPCs
+  - `README.md` Documentation section + Project layout updated to point at
+    all three
+- **De-branded config examples**: GLM/BigModel-specific `base_url`,
+  `api_key_env`, `model`, and `dim` values in README.md and docs/guide.md
+  replaced with neutral placeholders (`your-embedding-endpoint`,
+  `NOMAI_EMBEDDING_API_KEY`, `your-embedding-model`, `1024`). The
+  multi-vendor "Compatible endpoints" list in `reference.md` is preserved
+  (it advertises multi-vendor support rather than picking one).
+
 ## [0.2.0] — 2026-06-26
 
 Pre-1.0 release. API surface continues to evolve; breaking changes may
@@ -119,6 +141,7 @@ empty `.nomai` files. To regenerate from current state:
 - No built-in sync (the `events` primitive is the substrate; build on top).
 - No CLI subcommands — every operation is an RPC over stdio.
 
-[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Lin-Jiong-HDU/nomai/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Lin-Jiong-HDU/nomai/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Lin-Jiong-HDU/nomai/releases/tag/v0.1.0

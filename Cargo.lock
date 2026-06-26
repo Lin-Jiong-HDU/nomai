@@ -974,7 +974,7 @@ dependencies = [
 
 [[package]]
 name = "nomai-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "nomai-protocol",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "nomai-daemon"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "nomai-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1023,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "nomai-providers"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "blake3",
