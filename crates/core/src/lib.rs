@@ -23,7 +23,7 @@ pub use chunk_model::{Chunk, ChunkListResult, ChunkSearchResult, DimReconciliati
 pub use chunk_service::ChunkService;
 pub use content_store::ContentStore;
 pub use error::CoreError;
-pub use event_model::{Event, ListEventsQuery, ListEventsResult, ListOrder, PurgeQuery};
+pub use event_model::{Event, EventListOrder, ListEventsQuery, ListEventsResult, PurgeQuery};
 pub use event_service::EventService;
 pub use link_model::{
     CreateLink, Direction, Link, ListLinkQuery, ListLinkResult, NeighborsQuery, NeighborsResult,
@@ -31,16 +31,17 @@ pub use link_model::{
 pub use link_service::LinkService;
 pub use model::Entry;
 pub use nomai_format::{
-    BlockType, NomaiDoc, ParseError, parse as parse_nomai, render as render_nomai,
+    Block as NomaiBlock, BlockType, NomaiDoc, ParseError, parse as parse_nomai,
+    render as render_nomai,
 };
 pub use service::{
-    CreateEntry, EntryListQuery, EntryListResult, EntryService, ExportResult, FulltextSearchResult,
-    RebuildResult, SyncResult, UpdateEntry, VerifyResult,
+    CreateEntry, EntryListOrder, EntryListQuery, EntryListResult, EntryService, ExportResult,
+    FulltextSearchResult, RebuildResult, SyncResult, UpdateEntry, VerifyResult,
 };
 
 #[cfg(test)]
 mod integration_tests {
-    use crate::{Block, BlockService, ContentStore, CreateBlock};
+    use crate::{Block, BlockService, ContentStore, CreateBlock, NomaiBlock};
 
     #[test]
     fn new_types_are_accessible_from_crate_root() {
@@ -49,5 +50,13 @@ mod integration_tests {
         let _ = std::marker::PhantomData::<CreateBlock>;
         let _ = std::marker::PhantomData::<BlockService>;
         let _ = std::marker::PhantomData::<ContentStore>;
+        // Spec 8 Plan 2 / F-lib-1: parser Block re-exported as NomaiBlock.
+        let _ = std::marker::PhantomData::<NomaiBlock>;
     }
+
+    // Spec 8 Plan 2 / F-lib-1 (final-review I3): prove NomaiBlock IS the parser
+    // `nomai_format::Block`, not the storage `block_model::Block`. PhantomData
+    // alone couldn't distinguish — both are valid types named via the alias.
+    // If the alias ever drifts to `block_model::Block`, this stops compiling.
+    const _: fn(crate::nomai_format::Block) -> NomaiBlock = |b| b;
 }

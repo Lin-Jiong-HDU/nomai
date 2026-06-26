@@ -42,8 +42,13 @@ pub mod events {
 }
 
 pub mod chunk {
+    /// Reserved: chunks are auto-derived from blocks (Spec 6 §10).
+    /// Returns `METHOD_NOT_FOUND` (-32601) if dispatched. Constant
+    /// retained for symmetry with GET/LIST and future re-enable.
     pub const CREATE: &str = "chunk.create";
     pub const GET: &str = "chunk.get";
+    /// Reserved: see CREATE. Chunks are immutable; deleted when the
+    /// parent block is deleted (CASCADE + V9 trigger).
     pub const DELETE: &str = "chunk.delete";
     pub const LIST: &str = "chunk.list";
 }
@@ -59,6 +64,9 @@ pub mod block {
     /// Plan 5: delete a block. The chunks_ad trigger cleans vec_chunk_embeddings
     /// and re-renders the entry's `.nomai` file.
     pub const DELETE: &str = "block.delete";
+    /// Spec 8 Plan 1 / F-block-1: list blocks for an entry by entry_id.
+    /// Fills the namespace gap (entry/link/chunk/events all have list).
+    pub const LIST: &str = "block.list";
 }
 
 pub mod index {
@@ -87,6 +95,15 @@ pub mod system {
     /// rows created via direct DB manipulation. Returns
     /// `{ exported, skipped, errors }`.
     pub const EXPORT_TO_FS: &str = "system.export_to_fs";
+}
+
+pub mod cache {
+    /// Spec 5: emb_cache introspection (model, rows, hits/misses, warning).
+    pub const STATS: &str = "cache.stats";
+    /// Spec 5 + Spec 7: clear cache by namespace. Default namespace
+    /// `"embeddings"` for backward compat; `"searches"` / `"all"` opts
+    /// into the Spec 7 search cache.
+    pub const CLEAR: &str = "cache.clear";
 }
 
 #[cfg(test)]
@@ -144,6 +161,7 @@ mod tests {
         assert_eq!(block::APPEND, "block.append");
         assert_eq!(block::UPDATE, "block.update");
         assert_eq!(block::DELETE, "block.delete");
+        assert_eq!(block::LIST, "block.list");
     }
 
     #[test]
@@ -156,5 +174,11 @@ mod tests {
     #[test]
     fn system_namespace_methods() {
         assert_eq!(system::EXPORT_TO_FS, "system.export_to_fs");
+    }
+
+    #[test]
+    fn cache_namespace_methods() {
+        assert_eq!(cache::STATS, "cache.stats");
+        assert_eq!(cache::CLEAR, "cache.clear");
     }
 }

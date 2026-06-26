@@ -3,11 +3,6 @@
 //! Each method is a zero-sized struct implementing `RpcHandler`. The daemon
 //! looks up handlers by method name in a `HashMap` populated by `registry()`.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use crate::rpc::RpcHandler;
-
 pub mod batch;
 pub mod block;
 pub mod cache;
@@ -18,105 +13,11 @@ pub mod index;
 pub mod link;
 pub mod mcp;
 pub mod provider;
+pub mod registry;
 pub mod search;
 pub mod system;
 
-/// Build the default method → handler registry for the daemon.
-///
-/// Returns the full set of built-in JSON-RPC handlers. Plugins may add
-/// more via `Daemon::register_handler`.
-pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
-    let mut m: HashMap<&'static str, Arc<dyn RpcHandler>> = HashMap::new();
-
-    // entry.*
-    let h = entry::Create;
-    m.insert(h.method(), Arc::new(h));
-    let h = entry::Get;
-    m.insert(h.method(), Arc::new(h));
-    let h = entry::Update;
-    m.insert(h.method(), Arc::new(h));
-    let h = entry::Delete;
-    m.insert(h.method(), Arc::new(h));
-    let h = entry::List;
-    m.insert(h.method(), Arc::new(h));
-
-    // link.*
-    let h = link::Create;
-    m.insert(h.method(), Arc::new(h));
-    let h = link::Get;
-    m.insert(h.method(), Arc::new(h));
-    let h = link::Delete;
-    m.insert(h.method(), Arc::new(h));
-    let h = link::List;
-    m.insert(h.method(), Arc::new(h));
-    let h = link::Neighbors;
-    m.insert(h.method(), Arc::new(h));
-
-    // chunk.* (Plan 4: only Get + List; Create/Update/Delete removed because
-    // chunks are auto-derived from blocks.)
-    let h = chunk::Get;
-    m.insert(h.method(), Arc::new(h));
-    let h = chunk::List;
-    m.insert(h.method(), Arc::new(h));
-
-    // block.* (Plan 5: block-level RPCs on top of Plan 3 blocks storage.)
-    let h = block::Append;
-    m.insert(h.method(), Arc::new(h));
-    let h = block::Update;
-    m.insert(h.method(), Arc::new(h));
-    let h = block::Delete;
-    m.insert(h.method(), Arc::new(h));
-
-    // index.* (Plan 5: FS↔SQLite reconciliation. Plan 6: read-only verify.)
-    let h = index::Sync;
-    m.insert(h.method(), Arc::new(h));
-    let h = index::Rebuild;
-    m.insert(h.method(), Arc::new(h));
-    let h = index::Verify;
-    m.insert(h.method(), Arc::new(h));
-
-    // system.* (Plan 6: Spec §12 migration utilities.)
-    let h = system::ExportToFs;
-    m.insert(h.method(), Arc::new(h));
-
-    // events.*
-    let h = events::List;
-    m.insert(h.method(), Arc::new(h));
-    let h = events::Get;
-    m.insert(h.method(), Arc::new(h));
-    let h = events::Purge;
-    m.insert(h.method(), Arc::new(h));
-
-    // search.*
-    let h = search::Fulltext;
-    m.insert(h.method(), Arc::new(h));
-    let h = search::Semantic;
-    m.insert(h.method(), Arc::new(h));
-
-    // provider.*
-    let h = provider::List;
-    m.insert(h.method(), Arc::new(h));
-
-    // cache.* (embedding cache introspection + management)
-    let h = cache::Stats;
-    m.insert(h.method(), Arc::new(h));
-    let h = cache::Clear;
-    m.insert(h.method(), Arc::new(h));
-
-    // mcp.* (lifecycle: initialize / tools/list / tools/call)
-    let h = mcp::Initialize;
-    m.insert(h.method(), Arc::new(h));
-    let h = mcp::ToolsList;
-    m.insert(h.method(), Arc::new(h));
-    let h = mcp::ToolsCall;
-    m.insert(h.method(), Arc::new(h));
-
-    // batch (multi-op atomic transaction)
-    let h = batch::Batch;
-    m.insert(h.method(), Arc::new(h));
-
-    m
-}
+pub use registry::registry;
 
 #[cfg(test)]
 mod tests {
@@ -667,6 +568,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn events_list_returns_total() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        // Create 2 entries (each emits entry.created + block.created; total
+        // events >= 2). Verify the total field reflects all matching events.
+        daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"a","blocks":[{"type":"note","text":"x"}]}),
+            ))
+            .await;
+        daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"b","blocks":[{"type":"note","text":"y"}]}),
+            ))
+            .await;
+
+        let resp = daemon.dispatch(req("events.list", json!({}))).await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let total = resp.result.unwrap()["total"].as_u64().unwrap();
+        // At minimum, the two entry.created events.
+        assert!(total >= 2);
+        // Default limit=100 > event count, so has_more is false.
+        let resp2 = daemon.dispatch(req("events.list", json!({}))).await;
+        assert_eq!(resp2.result.unwrap()["has_more"].as_bool(), Some(false));
+    }
+
+    #[tokio::test]
     async fn events_get_returns_event_by_id() {
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
@@ -1024,9 +956,13 @@ mod tests {
 
         // Delete the entry — CASCADE removes blocks → chunks; chunks_ad trigger
         // cleans vec_chunk_embeddings.
-        daemon
+        let del_resp = daemon
             .dispatch(req("entry.delete", json!({"id": entry_id})))
             .await;
+        // F-entry-1: entry.delete ack carries the id (mirrors block.delete).
+        let del_result = del_resp.result.unwrap();
+        assert_eq!(del_result["deleted"], true);
+        assert_eq!(del_result["id"], entry_id);
 
         // After: chunk search returns 0 because the trigger cleaned up
         // vec_chunk_embeddings (no handler-side walk).
@@ -1053,6 +989,38 @@ mod tests {
         let result = list.result.unwrap();
         let items = result["items"].as_array().unwrap();
         assert!(items.iter().all(|e| e["id"].as_str().unwrap() != entry_id));
+    }
+
+    #[tokio::test]
+    async fn entry_list_returns_has_more_when_paginated() {
+        // Spec 8 Plan 1 / F-entry-4: entry.list now returns has_more so
+        // consumers can tell whether more entries exist beyond offset+limit.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        for i in 0..3 {
+            daemon
+                .dispatch(req(
+                    "entry.create",
+                    json!({
+                        "title": format!("t{i}"),
+                        "blocks": [{"type": "note", "text": "x"}],
+                    }),
+                ))
+                .await;
+        }
+
+        let resp = daemon
+            .dispatch(req("entry.list", json!({"limit": 2})))
+            .await;
+        let result = resp.result.unwrap();
+        assert_eq!(result["items"].as_array().unwrap().len(), 2);
+        assert_eq!(result["total"].as_u64().unwrap(), 3);
+        assert!(
+            result["has_more"].as_bool().unwrap(),
+            "has_more must be true when total > returned"
+        );
     }
 
     #[tokio::test]
@@ -1131,10 +1099,10 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 28 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:3,
+        // 29 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:4,
         // events:3, search:2, provider:1, cache:2, batch:1, index:3,
         // system:1).
-        assert_eq!(tools.len(), 28);
+        assert_eq!(tools.len(), 29);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1266,7 +1234,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 29); // 28 built-in + custom.echo
+        assert_eq!(tools.len(), 30); // 29 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
@@ -1365,6 +1333,55 @@ mod tests {
                 .iter()
                 .all(|e| e["title"].as_str().unwrap() != "will rollback"),
             "entry should have been rolled back"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_op_error_includes_data_field_for_not_found() {
+        // Spec 8 Plan 2 / F-batch-4 (final-review I2): wire-format guard.
+        // When a batch op fails with a CoreError variant that carries context
+        // (here: NotFound(id)), the resulting RPC error must include a `data`
+        // object on the per-op error. The batch handler routes the failing op's
+        // CoreError to the top-level error (atomic rollback), so the wire-visible
+        // `data` field appears on `resp.error.data`. If `core_error_to_rpc_ref`
+        // ever stops enriching NotFound with `data.id`, this test fails.
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req(
+                "batch",
+                json!({
+                    "ops": [
+                        {"id": "op1", "method": "entry.delete", "params": {"id": phantom_id}}
+                    ]
+                }),
+            ))
+            .await;
+
+        // Atomic rollback surfaces the underlying op failure at top level.
+        let err = resp
+            .error
+            .expect("batch with failing op must return top-level error");
+        assert_eq!(
+            err.code, 1001,
+            "NotFound code from entry.delete on phantom id"
+        );
+
+        // The wire-format change introduced in F-batch-4: `data` is present and
+        // carries the NotFound id. Old consumers ignore this field; new ones can
+        // read the offending id without scraping the message string.
+        let data = err
+            .data
+            .expect("per-op NotFound error must include `data` field");
+        assert_eq!(
+            data["id"]
+                .as_str()
+                .expect("data.id is the phantom ulid string"),
+            phantom_id,
+            "data.id should match the entry.delete target id"
         );
     }
 
@@ -2195,6 +2212,57 @@ mod tests {
             .await;
         let err = resp.error.unwrap();
         assert_eq!(err.code, 1001); // NotFound
+    }
+
+    // ----- block.list e2e tests (Spec 8 Plan 1 / F-block-1) -----
+
+    #[tokio::test]
+    async fn block_list_returns_blocks_for_entry() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let create = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({
+                    "title": "t",
+                    "blocks": [
+                        {"type": "note", "text": "first"},
+                        {"type": "claim", "text": "second"}
+                    ]
+                }),
+            ))
+            .await;
+        assert!(create.error.is_none(), "{:?}", create.error);
+        let entry_id = create.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        let resp = daemon
+            .dispatch(req("block.list", json!({"entry_id": entry_id})))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"].as_str().unwrap(), "note");
+        assert_eq!(items[1]["type"].as_str().unwrap(), "claim");
+        assert_eq!(result["total"].as_u64().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn block_list_unknown_entry_returns_empty() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req("block.list", json!({"entry_id": phantom_id})))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["items"].as_array().unwrap().len(), 0);
+        assert_eq!(result["total"].as_u64().unwrap(), 0);
     }
 
     // ----- system.export_to_fs e2e test (Plan 6 Task 3) -----

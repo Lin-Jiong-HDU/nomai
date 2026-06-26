@@ -33,7 +33,7 @@ pub struct ListEventsQuery {
     #[serde(default = "default_limit")]
     pub limit: u32,
     #[serde(default)]
-    pub order: ListOrder,
+    pub order: EventListOrder,
 }
 
 impl Default for ListEventsQuery {
@@ -44,14 +44,14 @@ impl Default for ListEventsQuery {
             target_type: None,
             target_id: None,
             limit: default_limit(),
-            order: ListOrder::default(),
+            order: EventListOrder::default(),
         }
     }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ListOrder {
+pub enum EventListOrder {
     #[default]
     Asc,
     Desc,
@@ -61,6 +61,9 @@ pub enum ListOrder {
 pub struct ListEventsResult {
     pub items: Vec<Event>,
     pub has_more: bool,
+    /// Total events matching the WHERE filter (ignores LIMIT/OFFSET).
+    /// Spec 8 Plan 1 / F-events-1.
+    pub total: u64,
 }
 
 /// Input for `EventService::purge`. `before` is exclusive (deletes id < before).
@@ -103,14 +106,17 @@ mod tests {
         assert!(q.since.is_none());
         assert!(q.type_.is_none());
         assert_eq!(q.limit, 100);
-        assert_eq!(q.order, ListOrder::Asc);
+        assert_eq!(q.order, EventListOrder::Asc);
     }
 
     #[test]
     fn list_order_serializes_as_snake_case() {
-        assert_eq!(serde_json::to_string(&ListOrder::Asc).unwrap(), r#""asc""#);
         assert_eq!(
-            serde_json::to_string(&ListOrder::Desc).unwrap(),
+            serde_json::to_string(&EventListOrder::Asc).unwrap(),
+            r#""asc""#
+        );
+        assert_eq!(
+            serde_json::to_string(&EventListOrder::Desc).unwrap(),
             r#""desc""#
         );
     }

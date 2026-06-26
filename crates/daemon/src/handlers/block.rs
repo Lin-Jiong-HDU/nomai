@@ -20,6 +20,7 @@ use crate::handlers::entry::blocking;
 use crate::rpc::RpcHandler;
 use nomai_protocol::method::block::APPEND as BLOCK_APPEND;
 use nomai_protocol::method::block::DELETE as BLOCK_DELETE;
+use nomai_protocol::method::block::LIST as BLOCK_LIST;
 use nomai_protocol::method::block::UPDATE as BLOCK_UPDATE;
 
 pub struct Append;
@@ -136,6 +137,35 @@ impl RpcHandler for Delete {
         daemon.search_cache.bump_generation();
 
         Ok(json!({"deleted": true, "id": id.to_string()}))
+    }
+}
+
+pub struct List;
+
+#[async_trait]
+impl RpcHandler for List {
+    fn method(&self) -> &'static str {
+        BLOCK_LIST
+    }
+    async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
+        #[derive(Deserialize)]
+        struct Params {
+            entry_id: ulid::Ulid,
+        }
+        let p: Params = serde_json::from_value(params)
+            .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+
+        let entries: Arc<EntryService> = daemon.entries.clone();
+        let entry_id = p.entry_id;
+        let result = {
+            let entries = entries.clone();
+            blocking(move || entries.block_service().list(entry_id)).await??
+        };
+
+        Ok(json!({
+            "items": result.items,
+            "total": result.total,
+        }))
     }
 }
 

@@ -114,6 +114,7 @@ impl RpcHandler for Delete {
         }
         let p: Params = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+        let id_for_ack = p.id;
 
         // Plan 5: deleting the entry CASCADEs blocks → chunks; the V9
         // chunks_ad AFTER DELETE trigger cleans vec_chunk_embeddings when
@@ -124,7 +125,8 @@ impl RpcHandler for Delete {
         // Spec 7: invalidate search cache.
         daemon.search_cache.bump_generation();
 
-        Ok(json!({ "deleted": true }))
+        // F-entry-1: mirror block.delete ack shape — include the id.
+        Ok(json!({ "deleted": true, "id": id_for_ack.to_string() }))
     }
 }
 
@@ -144,6 +146,7 @@ impl RpcHandler for List {
         Ok(json!({
             "items": result.items,
             "total": result.total,
+            "has_more": result.has_more,
         }))
     }
 }
