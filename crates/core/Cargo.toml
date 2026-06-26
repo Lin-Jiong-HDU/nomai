@@ -12,7 +12,7 @@ keywords = ["nomai", "knowledge", "notes", "rag", "sqlite"]
 categories = ["database", "text-processing"]
 
 [dependencies]
-nomai-protocol = { path = "../protocol", version = "0.1" }
+nomai-protocol = { path = "../protocol", version = "0.2" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = "3"

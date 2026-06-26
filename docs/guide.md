@@ -727,13 +727,14 @@ Run: `cargo run --example custom_rpc`
 
 The `batch` RPC lets you compose multiple mutations atomically (see [RPC reference](#batch) above). Custom handlers participate in the ecosystem but are not callable from within `batch` ops (only built-in mutations are batch-eligible).
 
-## Migration from 0.x to 1.0
+## Migration from 0.1.0 to 0.2.0
 
-1.0 freezes the API surface. The full breaking-change list and migration
+0.2.0 includes lib-side breaking changes (Rust type renames); RPC wire
+format remains additive-only. The full breaking-change list and migration
 steps live in [CHANGELOG.md](../CHANGELOG.md#migration-from-010). Quick
 summary:
 
-- **RPC consumers**: no breaking changes (all 1.0 RPC additions are additive).
+- **RPC consumers**: no breaking changes (all 0.2.0 RPC additions are additive).
 - **lib consumers**: rename `ListOrder` imports (see CHANGELOG §"Changed").
 - **Daemon lib-mode users**: optional switch to `DaemonBuilder`.
 

@@ -7,10 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0] — 2026-06-26
+## [0.2.0] — 2026-06-26
 
-First stable release. API surface is frozen: breaking changes require
-a major bump (2.0). See "Migration from 0.1.0" below.
+Pre-1.0 release. API surface continues to evolve; breaking changes may
+still land in 0.x (per semver 0.y.z allowance). See "Migration from
+0.1.0" below for lib-side breaking changes in this release.
 
 ### Added (RPC additive)
 
@@ -36,12 +37,12 @@ a major bump (2.0). See "Migration from 0.1.0" below.
 
 - `chunk.{CREATE, DELETE}` constants marked as reserved in `protocol::method` (Spec 8 Plan 3 / F-chunk-1)
 - `protocol::error` tests now cover all 6 business codes (Spec 8 Plan 3 / F-err-1)
-- `docs/guide.md` and `README.md` synced with 1.0 API surface (Spec 8 Plan 3 / F-doc-2)
+- `docs/guide.md` and `README.md` synced with 0.2.0 API surface (Spec 8 Plan 3 / F-doc-2)
 - Stale `#[allow(dead_code)]` on `Daemon::search_cache` removed (Spec 8 Plan 3 / F-doc-3)
 
 ### Migration from 0.1.0
 
-**RPC consumers (JSON-RPC clients)**: no breaking changes — all 1.0
+**RPC consumers (JSON-RPC clients)**: no breaking changes — all 0.2.0
 RPC additions are additive (new optional response fields / new
 methods). Old clients ignore new fields.
 
@@ -54,9 +55,10 @@ methods). Old clients ignore new fields.
 3. If you called `batch::error_to_rpc` — switch to `rpc::core_error_to_rpc_ref(&err)` and serialize the returned `RpcError` to `Value` yourself.
 4. `Daemon::from_services` is unchanged; new `DaemonBuilder` is optional.
 
-### Non-goals (deferred to 2.0)
+### Non-goals (deferred to future releases)
 
-The following were considered for 1.0 but deferred (see Spec 8 §7):
+The following were considered for 0.2.0 but deferred (see Spec 8 §7).
+They remain candidates for 1.0 (true API freeze) or later 0.x releases:
 
 - `entry.list include_blocks: Option<bool>` → `bool` (RPC breaking)
 - `"batch"` method → `"batch.run"` rename (RPC breaking)
@@ -117,6 +119,6 @@ empty `.nomai` files. To regenerate from current state:
 - No built-in sync (the `events` primitive is the substrate; build on top).
 - No CLI subcommands — every operation is an RPC over stdio.
 
-[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/Lin-Jiong-HDU/nomai/releases/tag/v1.0.0
+[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Lin-Jiong-HDU/nomai/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Lin-Jiong-HDU/nomai/releases/tag/v0.1.0
