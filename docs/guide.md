@@ -357,7 +357,7 @@ Omitting `namespace` entirely is equivalent to `{"namespace": "embeddings"}` —
 
 | Filter        | Effect                                                                    | Example                              |
 | ------------- | ------------------------------------------------------------------------- | ------------------------------------ |
-| `model`       | Restrict to a single model namespace. Omit to clear every model.          | `{"model": "embedding-3"}`           |
+| `model`       | Restrict to a single model namespace. Omit to clear every model.          | `{"model": "your-embedding-model"}`  |
 | `before`      | Delete only rows created strictly before this RFC3339 timestamp.          | `{"before": "2026-01-01T00:00:00Z"}` |
 | `keep_recent` | Keep only the N most-recent rows (by `created_at DESC`); delete the rest. | `{"keep_recent": 1000}`              |
 
@@ -430,10 +430,10 @@ Config lives at `~/.config/nomai/config.toml` (Linux), or override with `nomai-d
 db_path = "~/.local/share/nomai/db.sqlite"   # ~ expansion supported
 
 [embedding]
-base_url    = "https://open.bigmodel.cn/api/paas/v4"
-api_key_env = "GLM_API_KEY"     # references env var name, not the key itself
-model       = "embedding-3"
-dim         = 2048              # must match model's output dim
+base_url    = "https://your-embedding-endpoint/v1"
+api_key_env = "NOMAI_EMBEDDING_API_KEY"  # references env var name, not the key itself
+model       = "your-embedding-model"
+dim         = 1024              # must match model's output dim
 
 [llm]
 base_url    = "http://your-llm-endpoint/v1"
@@ -450,7 +450,7 @@ target_size = 1024              # chunk char budget; paragraph → sentence → 
 **API keys are referenced by env var name**, never stored in the config file. Set the env vars in your shell:
 
 ```fish
-set -Ux GLM_API_KEY "sk-..."
+set -Ux NOMAI_EMBEDDING_API_KEY "sk-..."
 set -Ux NOMAI_LLM_API_KEY "sk-..."
 ```
 
@@ -636,9 +636,9 @@ let mut daemon = Daemon::from_services(
     content_store,
     embedder,
     llm,
-    2048,    // embedding_dim
+    1024,    // embedding_dim
     1024,    // chunk_target_size (chars)
-    "embedding-3",
+    "your-embedding-model",
     100_000,
 )?;
 
@@ -659,9 +659,9 @@ let mut daemon = DaemonBuilder::new()
     .content_store(content_store)
     .embedder(embedder)
     .llm(llm)
-    .embedding_dim(2048)
+    .embedding_dim(1024)
     .chunk_target_size(1024)
-    .cache_model("embedding-3")
+    .cache_model("your-embedding-model")
     .warn_rows(100_000)
     .build()?;
 ```

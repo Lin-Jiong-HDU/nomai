@@ -48,10 +48,10 @@ cargo build --release --bin nomai-daemon
 mkdir -p ~/.config/nomai ~/.local/share/nomai
 cat > ~/.config/nomai/config.toml <<EOF
 [embedding]
-base_url    = "https://open.bigmodel.cn/api/paas/v4"
-api_key_env = "GLM_API_KEY"
-model       = "embedding-3"
-dim         = 2048
+base_url    = "https://your-embedding-endpoint/v1"
+api_key_env = "NOMAI_EMBEDDING_API_KEY"
+model       = "your-embedding-model"
+dim         = 1024
 
 [llm]
 base_url    = "http://your-llm-endpoint/v1"
@@ -60,9 +60,9 @@ model       = "your-model"
 EOF
 
 # Set API keys
-# fish:   set -Ux GLM_API_KEY "..."
+# fish:   set -Ux NOMAI_EMBEDDING_API_KEY "..."
 # bash/zsh:
-export GLM_API_KEY="..."
+export NOMAI_EMBEDDING_API_KEY="..."
 export NOMAI_LLM_API_KEY="..."
 
 # First RPC
