@@ -153,6 +153,17 @@ impl RpcHandler for List {
     fn method(&self) -> &'static str {
         BLOCK_LIST
     }
+    fn description(&self) -> &'static str {
+        "List all blocks of an entry, in ordinal order. Returns {items, total}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": { "entry_id": crate::handlers::params::ulid_schema() },
+            "required": ["entry_id"],
+            "additionalProperties": false
+        }))
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct Params {

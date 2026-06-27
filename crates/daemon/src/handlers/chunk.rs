@@ -46,6 +46,17 @@ impl RpcHandler for List {
     fn method(&self) -> &'static str {
         "chunk.list"
     }
+    fn description(&self) -> &'static str {
+        "List all chunks belonging to a block, in ordinal order. Returns {items, total}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": { "block_id": crate::handlers::params::ulid_schema() },
+            "required": ["block_id"],
+            "additionalProperties": false
+        }))
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct Params {
