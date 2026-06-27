@@ -394,3 +394,38 @@ fn error_to_rpc_value(err: &CoreError) -> Value {
     serde_json::to_value(core_error_to_rpc_ref(err))
         .unwrap_or_else(|_| json!({"code": -32603, "message": "serialize error in batch"}))
 }
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params).map_err(|errs| {
+            errs.map(|e| format!("{e}")).collect::<Vec<_>>()
+        })
+    }
+
+    #[test]
+    fn batch_schema_accepts_minimal_valid() {
+        let schema = Batch.input_schema().unwrap();
+        let valid = json!({
+            "ops": [
+                {"method": "entry.create", "params": {"title": "x", "blocks": [{"type": "note", "text": "y"}]}}
+            ]
+        });
+        assert!(validate(&schema, &valid).is_ok());
+    }
+
+    #[test]
+    fn batch_schema_rejects_missing_ops() {
+        let schema = Batch.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn batch_schema_rejects_empty_ops_array() {
+        let schema = Batch.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"ops": []})).is_err());
+    }
+}

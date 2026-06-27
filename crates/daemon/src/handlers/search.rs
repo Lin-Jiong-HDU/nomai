@@ -151,3 +151,39 @@ impl RpcHandler for Semantic {
         Ok(json!({ "items": cached.as_ref() }))
     }
 }
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params).map_err(|errs| {
+            errs.map(|e| format!("{e}")).collect::<Vec<_>>()
+        })
+    }
+
+    #[test]
+    fn fulltext_schema_accepts_query() {
+        let schema = Fulltext.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"query": "hello"})).is_ok());
+    }
+
+    #[test]
+    fn fulltext_schema_rejects_missing_query() {
+        let schema = Fulltext.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn semantic_schema_accepts_query() {
+        let schema = Semantic.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"query": "hello"})).is_ok());
+    }
+
+    #[test]
+    fn semantic_schema_rejects_missing_query() {
+        let schema = Semantic.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+}

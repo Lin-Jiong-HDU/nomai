@@ -144,3 +144,45 @@ impl RpcHandler for Clear {
         }))
     }
 }
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params).map_err(|errs| {
+            errs.map(|e| format!("{e}")).collect::<Vec<_>>()
+        })
+    }
+
+    #[test]
+    fn stats_schema_accepts_empty_object() {
+        let schema = Stats.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_ok());
+    }
+
+    #[test]
+    fn stats_schema_rejects_extra_props() {
+        let schema = Stats.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"foo": 1})).is_err());
+    }
+
+    #[test]
+    fn clear_schema_accepts_empty_defaults_to_embeddings() {
+        let schema = Clear.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_ok());
+    }
+
+    #[test]
+    fn clear_schema_accepts_namespace_all() {
+        let schema = Clear.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"namespace": "all"})).is_ok());
+    }
+
+    #[test]
+    fn clear_schema_rejects_unknown_namespace() {
+        let schema = Clear.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"namespace": "bogus"})).is_err());
+    }
+}

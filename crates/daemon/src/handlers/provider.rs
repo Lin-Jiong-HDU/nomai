@@ -34,3 +34,27 @@ impl RpcHandler for List {
         }))
     }
 }
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params).map_err(|errs| {
+            errs.map(|e| format!("{e}")).collect::<Vec<_>>()
+        })
+    }
+
+    #[test]
+    fn list_schema_accepts_empty_object() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_ok());
+    }
+
+    #[test]
+    fn list_schema_rejects_extra_props() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"foo": 1})).is_err());
+    }
+}

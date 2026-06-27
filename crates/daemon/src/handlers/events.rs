@@ -105,3 +105,53 @@ impl RpcHandler for Purge {
         Ok(json!({ "deleted": deleted }))
     }
 }
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params).map_err(|errs| {
+            errs.map(|e| format!("{e}")).collect::<Vec<_>>()
+        })
+    }
+
+    const ULID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    #[test]
+    fn list_schema_accepts_empty_object() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_ok());
+    }
+
+    #[test]
+    fn list_schema_accepts_since_filter() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"since": ULID})).is_ok());
+    }
+
+    #[test]
+    fn get_schema_accepts_valid_id() {
+        let schema = Get.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"id": ULID})).is_ok());
+    }
+
+    #[test]
+    fn get_schema_rejects_missing_id() {
+        let schema = Get.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn purge_schema_accepts_before() {
+        let schema = Purge.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"before": ULID})).is_ok());
+    }
+
+    #[test]
+    fn purge_schema_rejects_missing_before() {
+        let schema = Purge.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+}

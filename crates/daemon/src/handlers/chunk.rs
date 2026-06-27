@@ -74,3 +74,41 @@ impl RpcHandler for List {
         }))
     }
 }
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params).map_err(|errs| {
+            errs.map(|e| format!("{e}")).collect::<Vec<_>>()
+        })
+    }
+
+    const ULID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    #[test]
+    fn get_schema_accepts_valid_id() {
+        let schema = Get.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"id": ULID})).is_ok());
+    }
+
+    #[test]
+    fn get_schema_rejects_missing_id() {
+        let schema = Get.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn list_schema_accepts_block_id() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"block_id": ULID})).is_ok());
+    }
+
+    #[test]
+    fn list_schema_rejects_missing_block_id() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+}

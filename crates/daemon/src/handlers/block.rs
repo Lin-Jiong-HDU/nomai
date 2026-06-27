@@ -273,3 +273,85 @@ pub(crate) async fn rerender_entry_nomai(
     })
     .await?
 }
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params).map_err(|errs| {
+            errs.map(|e| format!("{e}")).collect::<Vec<_>>()
+        })
+    }
+
+    const ULID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    #[test]
+    fn append_schema_accepts_valid() {
+        let schema = Append.input_schema().unwrap();
+        let valid = json!({
+            "entry_id": ULID,
+            "type": "note",
+            "text": "hello"
+        });
+        assert!(validate(&schema, &valid).is_ok());
+    }
+
+    #[test]
+    fn append_schema_rejects_missing_entry_id() {
+        let schema = Append.input_schema().unwrap();
+        let invalid = json!({"type": "note", "text": "hi"});
+        assert!(validate(&schema, &invalid).is_err());
+    }
+
+    #[test]
+    fn append_schema_rejects_missing_type() {
+        let schema = Append.input_schema().unwrap();
+        let invalid = json!({"entry_id": ULID, "text": "hi"});
+        assert!(validate(&schema, &invalid).is_err());
+    }
+
+    #[test]
+    fn append_schema_rejects_missing_text() {
+        let schema = Append.input_schema().unwrap();
+        let invalid = json!({"entry_id": ULID, "type": "note"});
+        assert!(validate(&schema, &invalid).is_err());
+    }
+
+    #[test]
+    fn update_schema_accepts_only_id() {
+        let schema = Update.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"id": ULID})).is_ok());
+    }
+
+    #[test]
+    fn update_schema_rejects_missing_id() {
+        let schema = Update.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"text": "x"})).is_err());
+    }
+
+    #[test]
+    fn delete_schema_accepts_valid_id() {
+        let schema = Delete.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"id": ULID})).is_ok());
+    }
+
+    #[test]
+    fn delete_schema_rejects_missing_id() {
+        let schema = Delete.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn list_schema_accepts_entry_id() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"entry_id": ULID})).is_ok());
+    }
+
+    #[test]
+    fn list_schema_rejects_missing_entry_id() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+}

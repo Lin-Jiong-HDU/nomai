@@ -40,3 +40,27 @@ impl RpcHandler for ExportToFs {
         serde_json::to_value(&result).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
 }
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params).map_err(|errs| {
+            errs.map(|e| format!("{e}")).collect::<Vec<_>>()
+        })
+    }
+
+    #[test]
+    fn export_to_fs_schema_accepts_empty_object() {
+        let schema = ExportToFs.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn export_to_fs_schema_rejects_extra_props() {
+        let schema = ExportToFs.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({"foo": 1})).is_err());
+    }
+}

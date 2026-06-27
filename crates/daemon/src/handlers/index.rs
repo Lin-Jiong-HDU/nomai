@@ -105,3 +105,51 @@ impl RpcHandler for Verify {
         serde_json::to_value(&result).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
 }
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params).map_err(|errs| {
+            errs.map(|e| format!("{e}")).collect::<Vec<_>>()
+        })
+    }
+
+    #[test]
+    fn sync_schema_accepts_empty_object() {
+        let schema = Sync.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn sync_schema_rejects_extra_props() {
+        let schema = Sync.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({"foo": 1})).is_err());
+    }
+
+    #[test]
+    fn rebuild_schema_accepts_empty_object() {
+        let schema = Rebuild.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn rebuild_schema_rejects_extra_props() {
+        let schema = Rebuild.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({"foo": 1})).is_err());
+    }
+
+    #[test]
+    fn verify_schema_accepts_empty_object() {
+        let schema = Verify.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn verify_schema_rejects_extra_props() {
+        let schema = Verify.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({"foo": 1})).is_err());
+    }
+}
