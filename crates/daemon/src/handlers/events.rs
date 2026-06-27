@@ -37,6 +37,12 @@ impl RpcHandler for Get {
     fn method(&self) -> &'static str {
         "events.get"
     }
+    fn description(&self) -> &'static str {
+        "Fetch a single event by ULID. Returns error 1001 if not found."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::ulid_param_schema())
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct Params {

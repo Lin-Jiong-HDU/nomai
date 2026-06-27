@@ -34,6 +34,12 @@ impl RpcHandler for Get {
     fn method(&self) -> &'static str {
         "link.get"
     }
+    fn description(&self) -> &'static str {
+        "Fetch a single link by ULID. Returns error 1001 if not found."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::ulid_param_schema())
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct Params {
@@ -54,6 +60,12 @@ pub struct Delete;
 impl RpcHandler for Delete {
     fn method(&self) -> &'static str {
         "link.delete"
+    }
+    fn description(&self) -> &'static str {
+        "Delete a link by ULID. Returns {deleted: true}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::ulid_param_schema())
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]

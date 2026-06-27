@@ -112,6 +112,12 @@ impl RpcHandler for Delete {
     fn method(&self) -> &'static str {
         BLOCK_DELETE
     }
+    fn description(&self) -> &'static str {
+        "Delete a block by ULID. Re-renders the parent entry's .nomai file and invalidates the search cache. Returns {deleted: true, id}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::ulid_param_schema())
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct Params {

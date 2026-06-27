@@ -54,6 +54,12 @@ impl RpcHandler for Get {
     fn method(&self) -> &'static str {
         "entry.get"
     }
+    fn description(&self) -> &'static str {
+        "Fetch a single entry by ULID. Returns error 1001 if not found."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::ulid_param_schema())
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct Params {
@@ -106,6 +112,12 @@ pub struct Delete;
 impl RpcHandler for Delete {
     fn method(&self) -> &'static str {
         "entry.delete"
+    }
+    fn description(&self) -> &'static str {
+        "Delete an entry by ULID. CASCADE removes its blocks and chunks; the search cache is invalidated. Returns {deleted: true, id}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::ulid_param_schema())
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
