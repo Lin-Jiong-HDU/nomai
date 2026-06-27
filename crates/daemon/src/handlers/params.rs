@@ -32,7 +32,7 @@ pub fn empty_param_schema() -> Value {
 }
 
 /// `schemars::Schema` for ULID-typed fields. Use via
-/// `#[schemars(with = "crate::handlers::params::ulid_field_schema")]`
+/// `#[schemars(schema_with = "crate::handlers::params::ulid_field_schema")]`
 /// on any `ulid::Ulid` field inside a `#[derive(JsonSchema)]` struct,
 /// since the `ulid` crate does not implement `JsonSchema` itself.
 pub fn ulid_field_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {

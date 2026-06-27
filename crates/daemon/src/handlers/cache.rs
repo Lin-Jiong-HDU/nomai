@@ -52,7 +52,7 @@ impl RpcHandler for Stats {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Namespace {
     Embeddings,
@@ -70,17 +70,21 @@ impl Default for Namespace {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 pub struct ClearParams {
     #[serde(default)]
+    #[schemars(default)]
     pub namespace: Namespace,
     // Existing emb_cache filters below — only consulted when namespace ∈
     // {Embeddings, All}.
     #[serde(default)]
+    #[schemars(default)]
     pub model: Option<String>,
     #[serde(default)]
+    #[schemars(default)]
     pub before: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
+    #[schemars(default)]
     pub keep_recent: Option<u64>,
 }
 
@@ -99,6 +103,12 @@ pub struct Clear;
 impl RpcHandler for Clear {
     fn method(&self) -> &'static str {
         CACHE_CLEAR
+    }
+    fn description(&self) -> &'static str {
+        "Clear embedding cache and/or search cache. namespace controls which: embeddings (default), searches, or all. For embeddings, optional model/before/keep_recent filter the rows cleared."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(schemars::schema_for!(ClearParams).to_value())
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let opts: ClearParams = if params.is_null() {

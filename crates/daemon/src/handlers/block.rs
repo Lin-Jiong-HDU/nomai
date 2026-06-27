@@ -23,6 +23,17 @@ use nomai_protocol::method::block::DELETE as BLOCK_DELETE;
 use nomai_protocol::method::block::LIST as BLOCK_LIST;
 use nomai_protocol::method::block::UPDATE as BLOCK_UPDATE;
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AppendParams {
+    #[schemars(schema_with = "crate::handlers::params::ulid_field_schema")]
+    pub entry_id: ulid::Ulid,
+    pub r#type: String,
+    pub text: String,
+    #[serde(default)]
+    #[schemars(default)]
+    pub attrs: Option<serde_json::Value>,
+}
+
 pub struct Append;
 
 #[async_trait]
@@ -30,16 +41,14 @@ impl RpcHandler for Append {
     fn method(&self) -> &'static str {
         BLOCK_APPEND
     }
+    fn description(&self) -> &'static str {
+        "Append a new block (type, text, optional attrs) to an entry. Computes the next ordinal and re-renders the entry's .nomai file. Invalidates search cache. Returns the created block."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(schemars::schema_for!(AppendParams).to_value())
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
-        #[derive(Deserialize)]
-        struct Params {
-            entry_id: ulid::Ulid,
-            r#type: String,
-            text: String,
-            #[serde(default)]
-            attrs: Option<Value>,
-        }
-        let p: Params = serde_json::from_value(params)
+        let p: AppendParams = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
         let entries: Arc<EntryService> = daemon.entries.clone();
@@ -63,6 +72,21 @@ impl RpcHandler for Append {
     }
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateParams {
+    #[schemars(schema_with = "crate::handlers::params::ulid_field_schema")]
+    pub id: ulid::Ulid,
+    #[serde(default)]
+    #[schemars(default)]
+    pub r#type: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
+    pub attrs: Option<serde_json::Value>,
+}
+
 pub struct Update;
 
 #[async_trait]
@@ -70,18 +94,14 @@ impl RpcHandler for Update {
     fn method(&self) -> &'static str {
         BLOCK_UPDATE
     }
+    fn description(&self) -> &'static str {
+        "Update a block's type, text, or attrs by ULID. At least one of type/text/attrs must be present. Re-renders the entry's .nomai file. Invalidates search cache. Returns the updated block."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(schemars::schema_for!(UpdateParams).to_value())
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
-        #[derive(Deserialize)]
-        struct Params {
-            id: ulid::Ulid,
-            #[serde(default)]
-            r#type: Option<String>,
-            #[serde(default)]
-            text: Option<String>,
-            #[serde(default)]
-            attrs: Option<Value>,
-        }
-        let p: Params = serde_json::from_value(params)
+        let p: UpdateParams = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
         let entries: Arc<EntryService> = daemon.entries.clone();

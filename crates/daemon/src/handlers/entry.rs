@@ -81,6 +81,29 @@ impl RpcHandler for Update {
     fn method(&self) -> &'static str {
         "entry.update"
     }
+    fn description(&self) -> &'static str {
+        "Update an entry's metadata (title, tags, attrs, source) by ULID. Cannot change blocks; use block.* for that. Invalidates search cache. Returns the updated entry."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "id": crate::handlers::params::ulid_schema(),
+                "title": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "attrs": {"type": "object"},
+                "source": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "null"}
+                    ],
+                    "description": "Set source (string) or clear it (null). Omit to leave unchanged."
+                }
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        }))
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct Params {
