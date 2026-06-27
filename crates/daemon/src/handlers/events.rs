@@ -16,6 +16,23 @@ impl RpcHandler for List {
     fn method(&self) -> &'static str {
         "events.list"
     }
+    fn description(&self) -> &'static str {
+        "List events matching filters, ordered by ULID (time-ordered). since is exclusive (returns id > since). Use for incremental sync: client tracks last_seen_id and pulls via since=last_seen_id. Default limit 100, order asc. Returns {items, has_more, total}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "since": crate::handlers::params::ulid_schema(),
+                "type": {"type": "string", "description": "event type filter, e.g. \"entry.created\""},
+                "target_type": {"type": "string", "description": "\"entry\" or \"link\""},
+                "target_id": crate::handlers::params::ulid_schema(),
+                "limit": {"type": "integer", "minimum": 0, "default": 100},
+                "order": {"type": "string", "enum": ["asc", "desc"], "default": "asc"}
+            },
+            "additionalProperties": false
+        }))
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let query: ListEventsQuery = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
@@ -63,6 +80,20 @@ pub struct Purge;
 impl RpcHandler for Purge {
     fn method(&self) -> &'static str {
         "events.purge"
+    }
+    fn description(&self) -> &'static str {
+        "Delete events with id < before (exclusive). Optional type filter (e.g. \"entry.created\"). For retention/cleanup. Returns {deleted: N}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "before": crate::handlers::params::ulid_schema(),
+                "type": {"type": "string"}
+            },
+            "required": ["before"],
+            "additionalProperties": false
+        }))
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let query: PurgeQuery = serde_json::from_value(params)

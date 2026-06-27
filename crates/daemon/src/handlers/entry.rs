@@ -30,6 +30,33 @@ impl RpcHandler for Create {
     fn method(&self) -> &'static str {
         "entry.create"
     }
+    fn description(&self) -> &'static str {
+        "Create a new knowledge entry with title and content blocks. Chunks and embeddings are derived automatically. Returns the created entry with its generated ULID."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        let block_input = json!({
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "description": "block type (e.g. \"note\", \"claim\", \"question\")"},
+                "text": {"type": "string"},
+                "attrs": {"type": "object"}
+            },
+            "required": ["type", "text"],
+            "additionalProperties": false
+        });
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "blocks": {"type": "array", "items": block_input, "minItems": 1},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "attrs": {"type": "object"},
+                "source": {"type": "string"}
+            },
+            "required": ["title", "blocks"],
+            "additionalProperties": false
+        }))
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let input: CreateEntry = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
@@ -170,6 +197,26 @@ pub struct List;
 impl RpcHandler for List {
     fn method(&self) -> &'static str {
         "entry.list"
+    }
+    fn description(&self) -> &'static str {
+        "List entries with optional tag filter, pagination, and ordering. Default limit 50, offset 0, order created_desc. Set include_blocks=true to inline block content (avoids N+1 follow-up entry.get calls). Returns {items, total, has_more}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "tag": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 0, "default": 50},
+                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "order": {
+                    "type": "string",
+                    "enum": ["created_desc", "created_asc", "updated_desc", "updated_asc"],
+                    "default": "created_desc"
+                },
+                "include_blocks": {"type": "boolean"}
+            },
+            "additionalProperties": false
+        }))
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let query: EntryListQuery = serde_json::from_value(params)

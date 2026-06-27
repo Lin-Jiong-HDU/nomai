@@ -17,6 +17,22 @@ impl RpcHandler for Create {
     fn method(&self) -> &'static str {
         "link.create"
     }
+    fn description(&self) -> &'static str {
+        "Create a directed, typed link between two entries (e.g. references, supports, contradicts). Returns the created link."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "source_id": crate::handlers::params::ulid_schema(),
+                "target_id": crate::handlers::params::ulid_schema(),
+                "relation": {"type": "string"},
+                "attrs": {"type": "object"}
+            },
+            "required": ["source_id", "target_id", "relation"],
+            "additionalProperties": false
+        }))
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let input: CreateLink = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
@@ -87,6 +103,27 @@ impl RpcHandler for List {
     fn method(&self) -> &'static str {
         "link.list"
     }
+    fn description(&self) -> &'static str {
+        "List links matching filters. At least one of from/to/relation must be supplied (listing all links is rejected). Default limit 50, offset 0. Returns {items, total}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "from": crate::handlers::params::ulid_schema(),
+                "to": crate::handlers::params::ulid_schema(),
+                "relation": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 0, "default": 50},
+                "offset": {"type": "integer", "minimum": 0, "default": 0}
+            },
+            "anyOf": [
+                {"required": ["from"]},
+                {"required": ["to"]},
+                {"required": ["relation"]}
+            ],
+            "additionalProperties": false
+        }))
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let query: nomai_core::ListLinkQuery = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
@@ -106,6 +143,26 @@ pub struct Neighbors;
 impl RpcHandler for Neighbors {
     fn method(&self) -> &'static str {
         "link.neighbors"
+    }
+    fn description(&self) -> &'static str {
+        "List entries neighboring the given id via links. direction: out (id is source), in (id is target), or both (default). Returns {entries, links}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "id": crate::handlers::params::ulid_schema(),
+                "relation": {"type": "string"},
+                "direction": {
+                    "type": "string",
+                    "enum": ["out", "in", "both"],
+                    "default": "both"
+                },
+                "limit": {"type": "integer", "minimum": 0, "default": 50}
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        }))
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let query: nomai_core::NeighborsQuery = serde_json::from_value(params)
