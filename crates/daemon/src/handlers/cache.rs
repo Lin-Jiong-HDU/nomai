@@ -17,6 +17,12 @@ impl RpcHandler for Stats {
     fn method(&self) -> &'static str {
         CACHE_STATS
     }
+    fn description(&self) -> &'static str {
+        "Report embedding-cache and search-cache stats: row counts, hit rates, generation, warnings."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::empty_param_schema())
+    }
     async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
         let stats = daemon.cache.stats()?;
         let s = daemon.search_cache.stats();

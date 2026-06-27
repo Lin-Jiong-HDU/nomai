@@ -26,6 +26,12 @@ impl RpcHandler for ExportToFs {
     fn method(&self) -> &'static str {
         SYSTEM_EXPORT_TO_FS
     }
+    fn description(&self) -> &'static str {
+        "Walk every entry row and render a .nomai file for any that lack one. Skips entries that already have a .nomai on disk. Returns {exported, skipped, errors}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::empty_param_schema())
+    }
     async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
         // Clone the Arc before spawning so the closure is 'static. The
         // export pass takes per-entry locks internally during get/write.

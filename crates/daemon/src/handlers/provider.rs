@@ -15,6 +15,12 @@ impl RpcHandler for List {
     fn method(&self) -> &'static str {
         "provider.list"
     }
+    fn description(&self) -> &'static str {
+        "List the currently configured embedding and LLM providers with their model names."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::empty_param_schema())
+    }
     async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
         Ok(json!({
             "embedding": {
