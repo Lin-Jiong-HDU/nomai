@@ -55,7 +55,7 @@ async fn build_test_daemon() -> Daemon {
         }
     }
 
-    let daemon = Daemon::from_services(
+    Daemon::from_services(
         entries.conn_for_test(),
         entries.content_store().clone(),
         Arc::new(NullEmbed),
@@ -65,8 +65,7 @@ async fn build_test_daemon() -> Daemon {
         "test-embed",
         100_000,
     )
-    .expect("daemon builds");
-    daemon
+    .expect("daemon builds")
 }
 
 #[tokio::test]

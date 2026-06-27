@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- MCP `tools/list` now exposes `description` + real `inputSchema` for all
+  internal handlers (F-mcp-2). `RpcHandler` trait gains two default methods
+  `description()` and `input_schema()` for plugin authors to opt in.
+  External plugins continue to work unchanged.
+
 ## [0.2.1] — 2026-06-26
 
 Docs-only release. No code or API changes; no migration steps.

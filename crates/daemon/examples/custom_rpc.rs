@@ -27,6 +27,18 @@ impl RpcHandler for Stats {
         "stats"
     }
 
+    fn description(&self) -> &'static str {
+        "Custom RPC: returns the total entry count plus a fixed description string."
+    }
+
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }))
+    }
+
     async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
         let entries = daemon.entries().clone();
         let entry_total = tokio::task::spawn_blocking(move || {

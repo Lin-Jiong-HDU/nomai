@@ -158,9 +158,8 @@ mod descriptor_tests {
 
     fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
         let v = jsonschema::validator_for(schema).unwrap();
-        v.validate(params).map_err(|errs| {
-            errs.map(|e| format!("{e}")).collect::<Vec<_>>()
-        })
+        v.validate(params)
+            .map_err(|errs| errs.map(|e| format!("{e}")).collect::<Vec<_>>())
     }
 
     #[test]
