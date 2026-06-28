@@ -28,6 +28,21 @@ pub trait RpcHandler: Send + Sync {
     /// The JSON-RPC method name (e.g. `"entry.create"`).
     fn method(&self) -> &'static str;
 
+    /// 1-3 sentence English description surfaced to MCP clients via
+    /// `tools/list`. Empty string (default) → `tools/list` omits the field
+    /// and clients fall back to the method name.
+    fn description(&self) -> &'static str {
+        ""
+    }
+
+    /// JSON Schema for the `params` object.
+    /// `None` (default) → `tools/list` emits `{"type": "object"}` (current
+    /// behavior, preserves backward compat for plugins).
+    /// `Some(v)` → `tools/list` emits `v` as `inputSchema`.
+    fn input_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
+
     /// Invoke the handler with the parsed params JSON value.
     async fn call(&self, daemon: &crate::daemon::Daemon, params: Value)
     -> Result<Value, CoreError>;

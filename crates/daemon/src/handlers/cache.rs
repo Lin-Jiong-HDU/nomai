@@ -17,6 +17,12 @@ impl RpcHandler for Stats {
     fn method(&self) -> &'static str {
         CACHE_STATS
     }
+    fn description(&self) -> &'static str {
+        "Report embedding-cache and search-cache stats: row counts, hit rates, generation, warnings."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::empty_param_schema())
+    }
     async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
         let stats = daemon.cache.stats()?;
         let s = daemon.search_cache.stats();
@@ -46,7 +52,7 @@ impl RpcHandler for Stats {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Namespace {
     Embeddings,
@@ -64,17 +70,21 @@ impl Default for Namespace {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 pub struct ClearParams {
     #[serde(default)]
+    #[schemars(default)]
     pub namespace: Namespace,
     // Existing emb_cache filters below — only consulted when namespace ∈
     // {Embeddings, All}.
     #[serde(default)]
+    #[schemars(default)]
     pub model: Option<String>,
     #[serde(default)]
+    #[schemars(default)]
     pub before: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
+    #[schemars(default)]
     pub keep_recent: Option<u64>,
 }
 
@@ -93,6 +103,12 @@ pub struct Clear;
 impl RpcHandler for Clear {
     fn method(&self) -> &'static str {
         CACHE_CLEAR
+    }
+    fn description(&self) -> &'static str {
+        "Clear embedding cache and/or search cache. namespace controls which: embeddings (default), searches, or all. For embeddings, optional model/before/keep_recent filter the rows cleared."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(schemars::schema_for!(ClearParams).to_value())
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let opts: ClearParams = if params.is_null() {
@@ -126,5 +142,46 @@ impl RpcHandler for Clear {
             "embeddings": embeddings_result,
             "searches": searches_result,
         }))
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params)
+            .map_err(|errs| errs.map(|e| format!("{e}")).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn stats_schema_accepts_empty_object() {
+        let schema = Stats.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_ok());
+    }
+
+    #[test]
+    fn stats_schema_rejects_extra_props() {
+        let schema = Stats.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"foo": 1})).is_err());
+    }
+
+    #[test]
+    fn clear_schema_accepts_empty_defaults_to_embeddings() {
+        let schema = Clear.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_ok());
+    }
+
+    #[test]
+    fn clear_schema_accepts_namespace_all() {
+        let schema = Clear.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"namespace": "all"})).is_ok());
+    }
+
+    #[test]
+    fn clear_schema_rejects_unknown_namespace() {
+        let schema = Clear.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"namespace": "bogus"})).is_err());
     }
 }

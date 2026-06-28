@@ -1,0 +1,737 @@
+{
+  "tools": [
+    {
+      "description": "Execute multiple mutation ops (entry.create/update/delete, link.create/delete) in a single atomic transaction. Ops may reference each other via {\"$ref\": \"op_id\"} or {\"$ref\": \"op_id.field\"}. Atomic mode only (any failure rolls back the whole batch). See docs/reference.md for full semantics.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "atomic": {
+            "default": true,
+            "description": "parsed but currently always treated as true",
+            "type": "boolean"
+          },
+          "ops": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "description": "optional handle for $ref referencing",
+                  "type": "string"
+                },
+                "method": {
+                  "enum": [
+                    "entry.create",
+                    "entry.update",
+                    "entry.delete",
+                    "link.create",
+                    "link.delete",
+                    "events.purge"
+                  ],
+                  "type": "string"
+                },
+                "params": {
+                  "description": "method-specific params; may contain {\"$ref\": \"op_id[.field]\"} placeholders resolved against prior op results",
+                  "type": "object"
+                }
+              },
+              "required": [
+                "method",
+                "params"
+              ],
+              "type": "object"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "ops"
+        ],
+        "type": "object"
+      },
+      "name": "batch"
+    },
+    {
+      "description": "Append a new block (type, text, optional attrs) to an entry. Computes the next ordinal and re-renders the entry's .nomai file. Invalidates search cache. Returns the created block.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "attrs": {
+            "default": null
+          },
+          "entry_id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "type",
+          "text"
+        ],
+        "title": "AppendParams",
+        "type": "object"
+      },
+      "name": "block.append"
+    },
+    {
+      "description": "Delete a block by ULID. Re-renders the parent entry's .nomai file and invalidates the search cache. Returns {deleted: true, id}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "block.delete"
+    },
+    {
+      "description": "List all blocks of an entry, in ordinal order. Returns {items, total}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "entry_id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id"
+        ],
+        "type": "object"
+      },
+      "name": "block.list"
+    },
+    {
+      "description": "Update a block's type, text, or attrs by ULID. At least one of type/text/attrs must be present. Re-renders the entry's .nomai file. Invalidates search cache. Returns the updated block.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "attrs": {
+            "default": null
+          },
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "text": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "UpdateParams",
+        "type": "object"
+      },
+      "name": "block.update"
+    },
+    {
+      "description": "Clear embedding cache and/or search cache. namespace controls which: embeddings (default), searches, or all. For embeddings, optional model/before/keep_recent filter the rows cleared.",
+      "inputSchema": {
+        "$defs": {
+          "Namespace": {
+            "enum": [
+              "embeddings",
+              "searches",
+              "all"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "before": {
+            "default": null,
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "keep_recent": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "namespace": {
+            "$ref": "#/$defs/Namespace",
+            "default": "embeddings"
+          }
+        },
+        "title": "ClearParams",
+        "type": "object"
+      },
+      "name": "cache.clear"
+    },
+    {
+      "description": "Report embedding-cache and search-cache stats: row counts, hit rates, generation, warnings.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "cache.stats"
+    },
+    {
+      "description": "Fetch a single chunk by ULID. Returns error 1001 if not found.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "chunk.get"
+    },
+    {
+      "description": "List all chunks belonging to a block, in ordinal order. Returns {items, total}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "block_id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_id"
+        ],
+        "type": "object"
+      },
+      "name": "chunk.list"
+    },
+    {
+      "description": "Create a new knowledge entry with title and content blocks. Chunks and embeddings are derived automatically. Returns the created entry with its generated ULID.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "attrs": {
+            "type": "object"
+          },
+          "blocks": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "attrs": {
+                  "type": "object"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "type": {
+                  "description": "block type (e.g. \"note\", \"claim\", \"question\")",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "text"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "source": {
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "blocks"
+        ],
+        "type": "object"
+      },
+      "name": "entry.create"
+    },
+    {
+      "description": "Delete an entry by ULID. CASCADE removes its blocks and chunks; the search cache is invalidated. Returns {deleted: true, id}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "entry.delete"
+    },
+    {
+      "description": "Fetch a single entry by ULID. Returns error 1001 if not found.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "entry.get"
+    },
+    {
+      "description": "List entries with optional tag filter, pagination, and ordering. Default limit 50, offset 0, order created_desc. Set include_blocks=true to inline block content (avoids N+1 follow-up entry.get calls). Returns {items, total, has_more}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_blocks": {
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 50,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "order": {
+            "default": "created_desc",
+            "enum": [
+              "created_desc",
+              "created_asc",
+              "updated_desc",
+              "updated_asc"
+            ],
+            "type": "string"
+          },
+          "tag": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "entry.list"
+    },
+    {
+      "description": "Update an entry's metadata (title, tags, attrs, source) by ULID. Cannot change blocks; use block.* for that. Invalidates search cache. Returns the updated entry.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "attrs": {
+            "type": "object"
+          },
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "source": {
+            "description": "Set source (string) or clear it (null). Omit to leave unchanged.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "entry.update"
+    },
+    {
+      "description": "Fetch a single event by ULID. Returns error 1001 if not found.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "events.get"
+    },
+    {
+      "description": "List events matching filters, ordered by ULID (time-ordered). since is exclusive (returns id > since). Use for incremental sync: client tracks last_seen_id and pulls via since=last_seen_id. Default limit 100, order asc. Returns {items, has_more, total}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "order": {
+            "default": "asc",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "type": "string"
+          },
+          "since": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "target_id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "target_type": {
+            "description": "\"entry\" or \"link\"",
+            "type": "string"
+          },
+          "type": {
+            "description": "event type filter, e.g. \"entry.created\"",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "events.list"
+    },
+    {
+      "description": "Delete events with id < before (exclusive). Optional type filter (e.g. \"entry.created\"). For retention/cleanup. Returns {deleted: N}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "before": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "before"
+        ],
+        "type": "object"
+      },
+      "name": "events.purge"
+    },
+    {
+      "description": "Wipe every derived table and re-index every entry from the filesystem. Use to recover from index corruption; heavier than index.sync.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "index.rebuild"
+    },
+    {
+      "description": "Reconcile the SQLite index with the filesystem source-of-truth. Walks every entry's .nomai file, diffing mtime; adds/updates/removes rows as needed. Returns per-bucket counts.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "index.sync"
+    },
+    {
+      "description": "Read-only drift report between the filesystem and the SQLite index. Same scan as index.sync but never mutates; use to preview drift before deciding to sync or rebuild.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "index.verify"
+    },
+    {
+      "description": "Create a directed, typed link between two entries (e.g. references, supports, contradicts). Returns the created link.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "attrs": {
+            "type": "object"
+          },
+          "relation": {
+            "type": "string"
+          },
+          "source_id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "target_id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "target_id",
+          "relation"
+        ],
+        "type": "object"
+      },
+      "name": "link.create"
+    },
+    {
+      "description": "Delete a link by ULID. Returns {deleted: true}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "link.delete"
+    },
+    {
+      "description": "Fetch a single link by ULID. Returns error 1001 if not found.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "link.get"
+    },
+    {
+      "description": "List links matching filters. At least one of from/to/relation must be supplied (listing all links is rejected). Default limit 50, offset 0. Returns {items, total}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "anyOf": [
+          {
+            "required": [
+              "from"
+            ]
+          },
+          {
+            "required": [
+              "to"
+            ]
+          },
+          {
+            "required": [
+              "relation"
+            ]
+          }
+        ],
+        "properties": {
+          "from": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "relation": {
+            "type": "string"
+          },
+          "to": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "link.list"
+    },
+    {
+      "description": "List entries neighboring the given id via links. direction: out (id is source), in (id is target), or both (default). Returns {entries, links}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "direction": {
+            "default": "both",
+            "enum": [
+              "out",
+              "in",
+              "both"
+            ],
+            "type": "string"
+          },
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "relation": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "link.neighbors"
+    },
+    {
+      "description": "List the currently configured embedding and LLM providers with their model names.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "provider.list"
+    },
+    {
+      "description": "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Each call is cached per (query, limit, block_type).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_type": {
+            "default": null,
+            "description": "Optional block-type filter (e.g. `\"claim\"`, `\"note\"`). When supplied,\nrestricts matches to blocks of that type.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": 10,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "FulltextParams",
+        "type": "object"
+      },
+      "name": "search.fulltext"
+    },
+    {
+      "description": "Semantic search over chunk embeddings via sqlite-vec cosine similarity. Queries the embedding provider on each unique query (cached). Returns chunks ranked by similarity.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_type": {
+            "default": null,
+            "description": "Optional block-type filter applied via JOIN blocks.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": 10,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "SemanticParams",
+        "type": "object"
+      },
+      "name": "search.semantic"
+    },
+    {
+      "description": "Walk every entry row and render a .nomai file for any that lack one. Skips entries that already have a .nomai on disk. Returns {exported, skipped, errors}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "system.export_to_fs"
+    }
+  ]
+}

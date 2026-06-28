@@ -145,6 +145,30 @@ nomai's daemon uses a plugin registry (`RpcHandler` trait + `HashMap`). You can 
 2. **Register** — call `daemon.register_handler(Arc::new(YourHandler))`.
 3. **That's it** — your custom RPC appears in `tools/list` and is callable by any MCP client.
 
+### Adding MCP descriptors
+
+MCP clients (Claude Desktop, Cursor) read `description` and `inputSchema`
+from `tools/list` to display tools and guide argument construction.
+Override the default trait methods to populate them:
+
+```rust
+impl RpcHandler for YourHandler {
+    fn method(&self) -> &'static str { "your.rpc" }
+    fn description(&self) -> &'static str {
+        "What it does. When to use it. Notable behavior."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        // Use schemars::schema_for!(YourParams).to_value() for derived
+        // schemas, or hand-write JSON for full control.
+        Some(schemars::schema_for!(YourParams).to_value())
+    }
+    async fn call(&self, ...) { ... }
+}
+```
+
+Shared helpers (`ulid_param_schema()`, `empty_param_schema()`) live in
+`nomai_daemon::handlers::params`.
+
 ### Accessing services
 
 Custom handlers access the four core services via `&Daemon` accessors:

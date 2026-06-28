@@ -16,6 +16,23 @@ impl RpcHandler for List {
     fn method(&self) -> &'static str {
         "events.list"
     }
+    fn description(&self) -> &'static str {
+        "List events matching filters, ordered by ULID (time-ordered). since is exclusive (returns id > since). Use for incremental sync: client tracks last_seen_id and pulls via since=last_seen_id. Default limit 100, order asc. Returns {items, has_more, total}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "since": crate::handlers::params::ulid_schema(),
+                "type": {"type": "string", "description": "event type filter, e.g. \"entry.created\""},
+                "target_type": {"type": "string", "description": "\"entry\" or \"link\""},
+                "target_id": crate::handlers::params::ulid_schema(),
+                "limit": {"type": "integer", "minimum": 0, "default": 100},
+                "order": {"type": "string", "enum": ["asc", "desc"], "default": "asc"}
+            },
+            "additionalProperties": false
+        }))
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let query: ListEventsQuery = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
@@ -36,6 +53,12 @@ pub struct Get;
 impl RpcHandler for Get {
     fn method(&self) -> &'static str {
         "events.get"
+    }
+    fn description(&self) -> &'static str {
+        "Fetch a single event by ULID. Returns error 1001 if not found."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::ulid_param_schema())
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
@@ -58,6 +81,20 @@ impl RpcHandler for Purge {
     fn method(&self) -> &'static str {
         "events.purge"
     }
+    fn description(&self) -> &'static str {
+        "Delete events with id < before (exclusive). Optional type filter (e.g. \"entry.created\"). For retention/cleanup. Returns {deleted: N}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "before": crate::handlers::params::ulid_schema(),
+                "type": {"type": "string"}
+            },
+            "required": ["before"],
+            "additionalProperties": false
+        }))
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let query: PurgeQuery = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
@@ -66,5 +103,54 @@ impl RpcHandler for Purge {
         let deleted = blocking(move || events.purge(query)).await??;
 
         Ok(json!({ "deleted": deleted }))
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params)
+            .map_err(|errs| errs.map(|e| format!("{e}")).collect::<Vec<_>>())
+    }
+
+    const ULID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    #[test]
+    fn list_schema_accepts_empty_object() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_ok());
+    }
+
+    #[test]
+    fn list_schema_accepts_since_filter() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"since": ULID})).is_ok());
+    }
+
+    #[test]
+    fn get_schema_accepts_valid_id() {
+        let schema = Get.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"id": ULID})).is_ok());
+    }
+
+    #[test]
+    fn get_schema_rejects_missing_id() {
+        let schema = Get.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn purge_schema_accepts_before() {
+        let schema = Purge.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"before": ULID})).is_ok());
+    }
+
+    #[test]
+    fn purge_schema_rejects_missing_before() {
+        let schema = Purge.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
     }
 }

@@ -34,6 +34,12 @@ impl RpcHandler for Sync {
     fn method(&self) -> &'static str {
         INDEX_SYNC
     }
+    fn description(&self) -> &'static str {
+        "Reconcile the SQLite index with the filesystem source-of-truth. Walks every entry's .nomai file, diffing mtime; adds/updates/removes rows as needed. Returns per-bucket counts."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::empty_param_schema())
+    }
     async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
         // Clone the Arc before spawning so the closure is 'static. The sync
         // pass takes per-entry locks internally; we don't hold any lock here.
@@ -57,6 +63,12 @@ impl RpcHandler for Rebuild {
     fn method(&self) -> &'static str {
         INDEX_REBUILD
     }
+    fn description(&self) -> &'static str {
+        "Wipe every derived table and re-index every entry from the filesystem. Use to recover from index corruption; heavier than index.sync."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::empty_param_schema())
+    }
     async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
         // Clone the Arc before spawning so the closure is 'static. The
         // rebuild takes per-entry locks internally during the reindex phase.
@@ -78,6 +90,12 @@ impl RpcHandler for Verify {
     fn method(&self) -> &'static str {
         INDEX_VERIFY
     }
+    fn description(&self) -> &'static str {
+        "Read-only drift report between the filesystem and the SQLite index. Same scan as index.sync but never mutates; use to preview drift before deciding to sync or rebuild."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::empty_param_schema())
+    }
     async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
         // Read-only drift report. verify_fs snapshots the index under one
         // short lock and then walks the FS without taking any lock; safe to
@@ -85,5 +103,52 @@ impl RpcHandler for Verify {
         let entries: Arc<EntryService> = daemon.entries.clone();
         let result: VerifyResult = { blocking(move || entries.verify_fs()).await?? };
         serde_json::to_value(&result).map_err(|e| CoreError::Config(format!("serialize: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params)
+            .map_err(|errs| errs.map(|e| format!("{e}")).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn sync_schema_accepts_empty_object() {
+        let schema = Sync.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn sync_schema_rejects_extra_props() {
+        let schema = Sync.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({"foo": 1})).is_err());
+    }
+
+    #[test]
+    fn rebuild_schema_accepts_empty_object() {
+        let schema = Rebuild.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn rebuild_schema_rejects_extra_props() {
+        let schema = Rebuild.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({"foo": 1})).is_err());
+    }
+
+    #[test]
+    fn verify_schema_accepts_empty_object() {
+        let schema = Verify.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn verify_schema_rejects_extra_props() {
+        let schema = Verify.input_schema().unwrap();
+        assert!(validate(&schema, &serde_json::json!({"foo": 1})).is_err());
     }
 }

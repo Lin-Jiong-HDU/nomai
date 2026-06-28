@@ -28,6 +28,7 @@ dashmap = "6"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+schemars = { workspace = true }
 thiserror = "1"
 tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "sync"] }
 toml = "0.8"
@@ -38,3 +39,4 @@ chrono = { version = "0.4", features = ["serde"] }
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3"
+jsonschema = { workspace = true }

@@ -23,6 +23,17 @@ use nomai_protocol::method::block::DELETE as BLOCK_DELETE;
 use nomai_protocol::method::block::LIST as BLOCK_LIST;
 use nomai_protocol::method::block::UPDATE as BLOCK_UPDATE;
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AppendParams {
+    #[schemars(schema_with = "crate::handlers::params::ulid_field_schema")]
+    pub entry_id: ulid::Ulid,
+    pub r#type: String,
+    pub text: String,
+    #[serde(default)]
+    #[schemars(default)]
+    pub attrs: Option<serde_json::Value>,
+}
+
 pub struct Append;
 
 #[async_trait]
@@ -30,16 +41,14 @@ impl RpcHandler for Append {
     fn method(&self) -> &'static str {
         BLOCK_APPEND
     }
+    fn description(&self) -> &'static str {
+        "Append a new block (type, text, optional attrs) to an entry. Computes the next ordinal and re-renders the entry's .nomai file. Invalidates search cache. Returns the created block."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(schemars::schema_for!(AppendParams).to_value())
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
-        #[derive(Deserialize)]
-        struct Params {
-            entry_id: ulid::Ulid,
-            r#type: String,
-            text: String,
-            #[serde(default)]
-            attrs: Option<Value>,
-        }
-        let p: Params = serde_json::from_value(params)
+        let p: AppendParams = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
         let entries: Arc<EntryService> = daemon.entries.clone();
@@ -63,6 +72,21 @@ impl RpcHandler for Append {
     }
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateParams {
+    #[schemars(schema_with = "crate::handlers::params::ulid_field_schema")]
+    pub id: ulid::Ulid,
+    #[serde(default)]
+    #[schemars(default)]
+    pub r#type: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
+    pub attrs: Option<serde_json::Value>,
+}
+
 pub struct Update;
 
 #[async_trait]
@@ -70,18 +94,14 @@ impl RpcHandler for Update {
     fn method(&self) -> &'static str {
         BLOCK_UPDATE
     }
+    fn description(&self) -> &'static str {
+        "Update a block's type, text, or attrs by ULID. At least one of type/text/attrs must be present. Re-renders the entry's .nomai file. Invalidates search cache. Returns the updated block."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(schemars::schema_for!(UpdateParams).to_value())
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
-        #[derive(Deserialize)]
-        struct Params {
-            id: ulid::Ulid,
-            #[serde(default)]
-            r#type: Option<String>,
-            #[serde(default)]
-            text: Option<String>,
-            #[serde(default)]
-            attrs: Option<Value>,
-        }
-        let p: Params = serde_json::from_value(params)
+        let p: UpdateParams = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
         let entries: Arc<EntryService> = daemon.entries.clone();
@@ -111,6 +131,12 @@ pub struct Delete;
 impl RpcHandler for Delete {
     fn method(&self) -> &'static str {
         BLOCK_DELETE
+    }
+    fn description(&self) -> &'static str {
+        "Delete a block by ULID. Re-renders the parent entry's .nomai file and invalidates the search cache. Returns {deleted: true, id}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::ulid_param_schema())
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
@@ -146,6 +172,17 @@ pub struct List;
 impl RpcHandler for List {
     fn method(&self) -> &'static str {
         BLOCK_LIST
+    }
+    fn description(&self) -> &'static str {
+        "List all blocks of an entry, in ordinal order. Returns {items, total}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": { "entry_id": crate::handlers::params::ulid_schema() },
+            "required": ["entry_id"],
+            "additionalProperties": false
+        }))
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
@@ -235,4 +272,85 @@ pub(crate) async fn rerender_entry_nomai(
         Ok(())
     })
     .await?
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params)
+            .map_err(|errs| errs.map(|e| format!("{e}")).collect::<Vec<_>>())
+    }
+
+    const ULID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    #[test]
+    fn append_schema_accepts_valid() {
+        let schema = Append.input_schema().unwrap();
+        let valid = json!({
+            "entry_id": ULID,
+            "type": "note",
+            "text": "hello"
+        });
+        assert!(validate(&schema, &valid).is_ok());
+    }
+
+    #[test]
+    fn append_schema_rejects_missing_entry_id() {
+        let schema = Append.input_schema().unwrap();
+        let invalid = json!({"type": "note", "text": "hi"});
+        assert!(validate(&schema, &invalid).is_err());
+    }
+
+    #[test]
+    fn append_schema_rejects_missing_type() {
+        let schema = Append.input_schema().unwrap();
+        let invalid = json!({"entry_id": ULID, "text": "hi"});
+        assert!(validate(&schema, &invalid).is_err());
+    }
+
+    #[test]
+    fn append_schema_rejects_missing_text() {
+        let schema = Append.input_schema().unwrap();
+        let invalid = json!({"entry_id": ULID, "type": "note"});
+        assert!(validate(&schema, &invalid).is_err());
+    }
+
+    #[test]
+    fn update_schema_accepts_only_id() {
+        let schema = Update.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"id": ULID})).is_ok());
+    }
+
+    #[test]
+    fn update_schema_rejects_missing_id() {
+        let schema = Update.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"text": "x"})).is_err());
+    }
+
+    #[test]
+    fn delete_schema_accepts_valid_id() {
+        let schema = Delete.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"id": ULID})).is_ok());
+    }
+
+    #[test]
+    fn delete_schema_rejects_missing_id() {
+        let schema = Delete.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn list_schema_accepts_entry_id() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"entry_id": ULID})).is_ok());
+    }
+
+    #[test]
+    fn list_schema_rejects_missing_entry_id() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
 }

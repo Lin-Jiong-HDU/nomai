@@ -16,24 +16,28 @@ fn default_search_limit() -> u32 {
     10
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct FulltextParams {
     query: String,
     #[serde(default = "default_search_limit")]
+    #[schemars(default = "default_search_limit")]
     limit: u32,
     /// Optional block-type filter (e.g. `"claim"`, `"note"`). When supplied,
     /// restricts matches to blocks of that type.
     #[serde(default)]
+    #[schemars(default)]
     block_type: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct SemanticParams {
     query: String,
     #[serde(default = "default_search_limit")]
+    #[schemars(default = "default_search_limit")]
     limit: u32,
     /// Optional block-type filter applied via JOIN blocks.
     #[serde(default)]
+    #[schemars(default)]
     block_type: Option<String>,
 }
 
@@ -42,6 +46,12 @@ pub struct Fulltext;
 impl RpcHandler for Fulltext {
     fn method(&self) -> &'static str {
         "search.fulltext"
+    }
+    fn description(&self) -> &'static str {
+        "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Each call is cached per (query, limit, block_type)."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(schemars::schema_for!(FulltextParams).to_value())
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let p: FulltextParams = serde_json::from_value(params)
@@ -91,6 +101,12 @@ impl RpcHandler for Semantic {
     fn method(&self) -> &'static str {
         "search.semantic"
     }
+    fn description(&self) -> &'static str {
+        "Semantic search over chunk embeddings via sqlite-vec cosine similarity. Queries the embedding provider on each unique query (cached). Returns chunks ranked by similarity."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(schemars::schema_for!(SemanticParams).to_value())
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let p: SemanticParams = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
@@ -133,5 +149,40 @@ impl RpcHandler for Semantic {
             )
             .await?;
         Ok(json!({ "items": cached.as_ref() }))
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params)
+            .map_err(|errs| errs.map(|e| format!("{e}")).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn fulltext_schema_accepts_query() {
+        let schema = Fulltext.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"query": "hello"})).is_ok());
+    }
+
+    #[test]
+    fn fulltext_schema_rejects_missing_query() {
+        let schema = Fulltext.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn semantic_schema_accepts_query() {
+        let schema = Semantic.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"query": "hello"})).is_ok());
+    }
+
+    #[test]
+    fn semantic_schema_rejects_missing_query() {
+        let schema = Semantic.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
     }
 }

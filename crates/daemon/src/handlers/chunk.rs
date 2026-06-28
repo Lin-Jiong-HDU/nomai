@@ -19,6 +19,12 @@ impl RpcHandler for Get {
     fn method(&self) -> &'static str {
         "chunk.get"
     }
+    fn description(&self) -> &'static str {
+        "Fetch a single chunk by ULID. Returns error 1001 if not found."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::ulid_param_schema())
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct Params {
@@ -40,6 +46,17 @@ impl RpcHandler for List {
     fn method(&self) -> &'static str {
         "chunk.list"
     }
+    fn description(&self) -> &'static str {
+        "List all chunks belonging to a block, in ordinal order. Returns {items, total}."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": { "block_id": crate::handlers::params::ulid_schema() },
+            "required": ["block_id"],
+            "additionalProperties": false
+        }))
+    }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct Params {
@@ -55,5 +72,42 @@ impl RpcHandler for List {
             "items": result.items,
             "total": result.total,
         }))
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
+        let v = jsonschema::validator_for(schema).unwrap();
+        v.validate(params)
+            .map_err(|errs| errs.map(|e| format!("{e}")).collect::<Vec<_>>())
+    }
+
+    const ULID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    #[test]
+    fn get_schema_accepts_valid_id() {
+        let schema = Get.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"id": ULID})).is_ok());
+    }
+
+    #[test]
+    fn get_schema_rejects_missing_id() {
+        let schema = Get.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn list_schema_accepts_block_id() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"block_id": ULID})).is_ok());
+    }
+
+    #[test]
+    fn list_schema_rejects_missing_block_id() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
     }
 }

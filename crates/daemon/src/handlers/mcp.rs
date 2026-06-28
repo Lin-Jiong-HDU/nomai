@@ -60,8 +60,9 @@ impl RpcHandler for Initialize {
 /// `tools/list` — enumerate available MCP tools.
 ///
 /// Each non-MCP handler registered in `daemon.handlers` is surfaced as a
-/// tool. For MVP the `inputSchema` is a minimal `{"type": "object"}` and
-/// `description` is omitted — clients fall back to the method name.
+/// tool. The descriptor's `description` and `inputSchema` are sourced from
+/// the handler's `description()` and `input_schema()` trait methods
+/// (default `""` and `None` preserve pre-spec behavior for plugins).
 pub struct ToolsList;
 
 #[async_trait]
@@ -76,10 +77,17 @@ impl RpcHandler for ToolsList {
             if is_mcp_method(name) {
                 continue;
             }
-            tools.push(tool_descriptor(name));
+            // Look up the handler to fetch its description + input_schema.
+            // We just verified `name` is non-MCP, so the entry exists.
+            let handler = &daemon.handlers[name];
+            tools.push(tool_descriptor(
+                name,
+                handler.description(),
+                handler.input_schema(),
+            ));
         }
-        // Stable-ish ordering: sort alphabetically so list output is
-        // deterministic across runs (helps testing + diffs).
+        // Stable ordering: sort alphabetically by tool name so list output
+        // is deterministic across runs (helps testing + diffs).
         tools.sort_by(|a, b| {
             a["name"]
                 .as_str()
@@ -147,12 +155,22 @@ fn is_mcp_method(name: &str) -> bool {
     matches!(name, INITIALIZE | TOOLS_LIST | TOOLS_CALL)
 }
 
-/// Build a single MCP tool descriptor. For MVP the schema is minimal.
-fn tool_descriptor(name: &str) -> Value {
-    json!({
+/// Build a single MCP tool descriptor.
+///
+/// - `desc` empty → omit the `description` field entirely (clients fall
+///   back to the method name; matches pre-spec behavior).
+/// - `schema` None → emit `{"type": "object"}` (current behavior).
+/// - `schema` Some(v) → emit `v`.
+fn tool_descriptor(name: &str, desc: &str, schema: Option<Value>) -> Value {
+    let input_schema = schema.unwrap_or_else(|| json!({"type": "object"}));
+    let mut d = json!({
         "name": name,
-        "inputSchema": { "type": "object" }
-    })
+        "inputSchema": input_schema,
+    });
+    if !desc.is_empty() {
+        d["description"] = json!(desc);
+    }
+    d
 }
 
 #[cfg(test)]
@@ -175,12 +193,28 @@ mod tests {
     }
 
     #[test]
-    fn tool_descriptor_has_minimal_schema() {
-        let d = tool_descriptor("entry.create");
+    fn tool_descriptor_omits_description_when_empty() {
+        let d = tool_descriptor("entry.create", "", None);
         assert_eq!(d["name"], "entry.create");
         assert_eq!(d["inputSchema"]["type"], "object");
-        // description omitted for MVP
         assert!(d.get("description").is_none());
+    }
+
+    #[test]
+    fn tool_descriptor_includes_description_when_nonempty() {
+        let d = tool_descriptor(
+            "entry.create",
+            "Create a new entry.",
+            Some(json!({"type": "object", "properties": {}})),
+        );
+        assert_eq!(d["description"], "Create a new entry.");
+        assert_eq!(d["inputSchema"]["properties"], json!({}));
+    }
+
+    #[test]
+    fn tool_descriptor_falls_back_to_object_schema_when_none() {
+        let d = tool_descriptor("noop", "does nothing", None);
+        assert_eq!(d["inputSchema"]["type"], "object");
     }
 
     #[tokio::test]

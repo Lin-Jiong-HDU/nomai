@@ -213,7 +213,7 @@ nomai is a native MCP (Model Context Protocol) server. Any MCP-compatible client
 | Method       | Params              | Returns                                       |
 | ------------ | ------------------- | --------------------------------------------- |
 | `initialize` | `{}`                | `{protocolVersion, capabilities, serverInfo}` |
-| `tools/list` | `{}`                | `{tools: [{name, inputSchema}]}`              |
+| `tools/list` | `{}`                | `{tools: [{name, description, inputSchema}]}` |
 | `tools/call` | `{name, arguments}` | `{content: [{type: "text", text}]}`           |
 
 All 23 primitive RPCs + batch + any custom registered RPCs appear as MCP tools automatically.

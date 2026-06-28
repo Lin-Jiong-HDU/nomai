@@ -12,6 +12,7 @@ pub mod events;
 pub mod index;
 pub mod link;
 pub mod mcp;
+pub mod params;
 pub mod provider;
 pub mod registry;
 pub mod search;
