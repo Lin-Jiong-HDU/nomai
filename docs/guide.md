@@ -210,7 +210,5 @@ Future work (not yet started):
 - **Phase 4 (Collections)** — multi-project isolation, schema enforcement, ACL
 - **`link.traverse`** — recursive CTE multi-hop graph traversal (use `link.neighbors` in a client-side loop for now)
 - **`search.hybrid`** — RRF fusion of FTS + vector scores (compose your own in client code for now)
-- **FTS5 Chinese tokenization** — trigram/jieba for CJK fulltext search
-- **Object cache (Entry/Chunk LRU)** — for GraphRAG multi-hop workloads with hot entries
 
 For implementation history and design rationale, see the spec docs in `docs/superpowers/specs/` (local-only, not in the public repo).

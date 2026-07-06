@@ -6,6 +6,11 @@
 //! p99 to suppress noise from outliers (GC, scheduler).
 //!
 //! Run: `cargo run --example bench_object_cache --release`
+//!
+//! Verdict (2026-07-06): the only beneficiary is the rare "get same id N
+//! times" pattern. GraphRAG uses JOIN (no separate entry.get), and
+//! entry.list / search deserialize their own rows. Declined — the hit-path
+//! speedup does not justify the invalidation complexity.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
