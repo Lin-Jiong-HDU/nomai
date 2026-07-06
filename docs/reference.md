@@ -216,7 +216,7 @@ nomai is a native MCP (Model Context Protocol) server. Any MCP-compatible client
 | `tools/list` | `{}`                | `{tools: [{name, description, inputSchema}]}` |
 | `tools/call` | `{name, arguments}` | `{content: [{type: "text", text}]}`           |
 
-All 23 primitive RPCs + batch + any custom registered RPCs appear as MCP tools automatically.
+All built-in RPCs + batch + any custom registered RPCs appear as MCP tools automatically.
 
 Example MCP handshake:
 
@@ -307,11 +307,11 @@ Three ways to find entries. Pick based on what you're matching.
 
 | Mode                 | Method                              | Matches by                            | Best for                            |
 | -------------------- | ----------------------------------- | ------------------------------------- | ----------------------------------- |
-| **Fulltext**         | `search.fulltext`                   | Token overlap (FTS5 bm25)             | Keyword search, exact terms         |
+| **Fulltext**         | `search.fulltext`                   | Trigram substring (FTS5 bm25, ≥3 chars) or LIKE fallback (<3 chars) | Keyword search, exact terms, CJK phrases |
 | **Semantic (entry)** | `search.semantic` (default)         | Cosine similarity of entry embeddings | Concept search, "find similar"      |
 | **Semantic (chunk)** | `search.semantic granularity=chunk` | Cosine similarity of chunk embeddings | Long-doc RAG, sub-passage retrieval |
 
-**Fulltext limitations**: FTS5 uses the `unicode61` tokenizer by default, which treats consecutive CJK characters as a single token. Searching for Chinese phrases may return no matches. Use semantic search for Chinese content. (Future: trigram/ICU tokenizer.)
+**Fulltext tokenizer**: `fts_blocks` uses SQLite FTS5's `trigram` tokenizer. CJK (Chinese/Japanese/Korean) text is matched by 3-character substring, so Chinese phrases now return matches. Queries of ≥3 characters go through FTS5 bm25 ranking. Queries of 1–2 characters (e.g. `"Go"`, `"管理"`) fall back to a `LIKE '%q%'` scan automatically — still case-insensitive and deduped to entries, but ordered by recency rather than relevance. For semantic matching on short terms, use `search.semantic`.
 
 **Combining modes**: nomai does not implement hybrid search (`search.hybrid` is reserved). For RRF fusion or re-ranking, fetch from multiple modes in your client and merge.
 
@@ -371,7 +371,7 @@ Each row is ~8KB at 2048 dims (`dim × 4 bytes + 32B hash + metadata`), so 100K 
 | SQLite page cache     | B-tree nodes (disk I/O avoidance)            | SQLite (`cache_size`)             |
 | **emb_cache table**   | **`(model, body) → vector`**                 | **nomai (this section)**          |
 | **search cache**      | **`(rpc, query, limit, ...) → results`**     | **nomai ([Search results cache](#search-results-cache))** |
-| In-memory LRU         | (future, YAGNI)                              | —                                 |
+| In-memory LRU         | measured, declined — see `crates/core/examples/bench_object_cache.rs` | —                                 |
 
 ---
 

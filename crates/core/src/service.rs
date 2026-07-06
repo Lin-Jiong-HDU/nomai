@@ -1065,10 +1065,15 @@ impl EntryService {
         })
     }
 
-    /// Fulltext search over `fts_blocks` (per-block FTS5). Optional
-    /// `block_type` filter narrows matches to a single block type. Results
-    /// are deduplicated to entries (an entry with multiple matching blocks
-    /// appears once).
+    /// Fulltext search over `fts_blocks` (per-block FTS5, trigram tokenizer).
+    /// Optional `block_type` filter narrows matches to a single block type.
+    /// Results are deduplicated to entries (an entry with multiple matching
+    /// blocks appears once).
+    ///
+    /// Queries of >=3 characters go through FTS5 bm25 ranking. Queries of
+    /// 1–2 characters (trigram returns empty for them) fall back to a
+    /// case-insensitive `LIKE` scan ordered by recency — still deduped to
+    /// entries, but without relevance ranking.
     pub fn fulltext_search(
         &self,
         query: &str,
@@ -1078,31 +1083,42 @@ impl EntryService {
         let conn = self.conn.lock().unwrap();
         // Strategy: FTS5's bm25() refuses to evaluate inside aggregates /
         // subqueries in some SQLite builds ("unable to use function bm25 in
-        // the requested context"). Pull all matching (entry_id, bm25) pairs
-        // via direct FTS5 query, dedupe in Rust keeping the best rank per
-        // entry, then fetch the entry rows.
+        // the requested context"). Pull matching (entry_id, rank) pairs via
+        // a direct FTS5 query (or LIKE for short queries), dedupe in Rust
+        // keeping the best rank per entry, then fetch the entry rows.
+        let pairs = if query.chars().count() >= 3 {
+            Self::fts_match_pairs(&conn, query, block_type, limit)?
+        } else {
+            Self::like_match_pairs(&conn, query, block_type, limit)?
+        };
+        Self::fetch_entries_by_ids(&conn, &pairs)
+    }
+
+    /// FTS5 trigram path (queries >=3 chars): MATCH + bm25, deduped to
+    /// entries keeping the first (best) rank per entry.
+    fn fts_match_pairs(
+        conn: &Connection,
+        query: &str,
+        block_type: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<(Ulid, f64)>, CoreError> {
         let sql = match block_type {
             Some(_) => {
                 "SELECT fts_blocks.entry_id, bm25(fts_blocks) AS rank
-                 FROM fts_blocks
-                 WHERE fts_blocks MATCH ?1 AND fts_blocks.type = ?2
-                 ORDER BY rank"
+                        FROM fts_blocks
+                        WHERE fts_blocks MATCH ?1 AND fts_blocks.type = ?2
+                        ORDER BY rank"
             }
             None => {
                 "SELECT fts_blocks.entry_id, bm25(fts_blocks) AS rank
-                 FROM fts_blocks
-                 WHERE fts_blocks MATCH ?1
-                 ORDER BY rank"
+                     FROM fts_blocks
+                     WHERE fts_blocks MATCH ?1
+                     ORDER BY rank"
             }
         };
         let mut stmt = conn.prepare(sql)?;
-        // Gather (entry_id, rank) pairs; keep first (best) per entry_id.
-        let mut seen: std::collections::HashSet<Ulid> = std::collections::HashSet::new();
-        let mut ordered_ids: Vec<(Ulid, f64)> = Vec::new();
         let process_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, f64)> {
-            let id_str: String = row.get(0)?;
-            let rank: f64 = row.get(1)?;
-            Ok((id_str, rank))
+            Ok((row.get(0)?, row.get(1)?))
         };
         let pairs: Vec<(String, f64)> = match block_type {
             Some(t) => stmt
@@ -1112,27 +1128,67 @@ impl EntryService {
                 .query_map(params![query], process_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         };
-        for (id_str, rank) in pairs {
-            let id: Ulid = id_str.parse().map_err(|e: ulid::DecodeError| {
-                CoreError::Storage(rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                ))
-            })?;
-            if seen.insert(id) {
-                ordered_ids.push((id, rank));
-                if ordered_ids.len() >= limit as usize {
-                    break;
-                }
+        Ok(Self::dedupe_pairs(pairs, limit))
+    }
+
+    /// LIKE fallback (queries <3 chars): trigram returns empty for them, so
+    /// fall back to an escaped, case-insensitive substring scan. No bm25 —
+    /// ordered by `rowid DESC` (most-recent block first). User input is
+    /// escaped so `\ % _` are matched literally, never as LIKE wildcards.
+    fn like_match_pairs(
+        conn: &Connection,
+        query: &str,
+        block_type: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<(Ulid, f64)>, CoreError> {
+        let escaped: String = query
+            .chars()
+            .flat_map(|c| match c {
+                '\\' | '%' | '_' => vec!['\\', c],
+                _ => vec![c],
+            })
+            .collect();
+        let pattern = format!("%{escaped}%");
+        let sql = match block_type {
+            Some(_) => {
+                "SELECT entry_id FROM blocks
+                        WHERE LOWER(text) LIKE LOWER(?1) ESCAPE '\\' AND type = ?2
+                        ORDER BY rowid DESC"
             }
-        }
-        if ordered_ids.is_empty() {
+            None => {
+                "SELECT entry_id FROM blocks
+                     WHERE LOWER(text) LIKE LOWER(?1) ESCAPE '\\'
+                     ORDER BY rowid DESC"
+            }
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let process_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, f64)> {
+            // No bm25 on the LIKE path; score 0.0 marks "unranked".
+            Ok((row.get(0)?, 0.0))
+        };
+        let pairs: Vec<(String, f64)> = match block_type {
+            Some(t) => stmt
+                .query_map(params![pattern, t], process_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+            None => stmt
+                .query_map(params![pattern], process_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        };
+        Ok(Self::dedupe_pairs(pairs, limit))
+    }
+
+    /// Fetch full Entry rows for the deduped id list, preserving pair order.
+    /// Skips ids whose entry row has vanished (defensive; should not happen
+    /// given the FK graph, but a vanished entry is not a hard error).
+    fn fetch_entries_by_ids(
+        conn: &Connection,
+        pairs: &[(Ulid, f64)],
+    ) -> Result<Vec<FulltextSearchResult>, CoreError> {
+        if pairs.is_empty() {
             return Ok(Vec::new());
         }
-        // Fetch the entries in rank order.
-        let mut results: Vec<FulltextSearchResult> = Vec::with_capacity(ordered_ids.len());
-        for (id, rank) in ordered_ids {
+        let mut results: Vec<FulltextSearchResult> = Vec::with_capacity(pairs.len());
+        for (id, rank) in pairs {
             let entry = match conn.query_row(
                 "SELECT id, title, tags, attrs, source, created_at, updated_at
                  FROM entries WHERE id = ?1",
@@ -1149,6 +1205,29 @@ impl EntryService {
             });
         }
         Ok(results)
+    }
+
+    /// Dedupe `(entry_id_str, rank)` pairs by entry, keeping the first
+    /// (best) occurrence, and parse to `Ulid`. Stops after `limit` unique
+    /// entries. ids in `fts_blocks.entry_id` / `blocks.entry_id` are always
+    /// well-formed ULIDs written by the service layer; an unparseable id
+    /// indicates index corruption and is skipped rather than propagated as
+    /// a misleading FromSqlConversionFailure.
+    fn dedupe_pairs(pairs: Vec<(String, f64)>, limit: u32) -> Vec<(Ulid, f64)> {
+        let mut seen: std::collections::HashSet<Ulid> = std::collections::HashSet::new();
+        let mut ordered: Vec<(Ulid, f64)> = Vec::new();
+        for (id_str, rank) in pairs {
+            let Ok(id) = id_str.parse::<Ulid>() else {
+                continue;
+            };
+            if seen.insert(id) {
+                ordered.push((id, rank));
+                if ordered.len() >= limit as usize {
+                    break;
+                }
+            }
+        }
+        ordered
     }
 
     /// Test-only constructor backed by an in-memory SQLite database.
@@ -1773,15 +1852,168 @@ mod tests {
         let hits_note = svc.fulltext_search("orbit", 10, Some("note")).unwrap();
         assert_eq!(hits_note.len(), 1);
 
-        // Filter to claim only: no match — claim text "Earth orbits the sun"
-        // uses "orbits" (stemmed differently; the literal token "orbit" only
-        // appears in the note block).
+        // Filter to claim only: under the trigram tokenizer (V10), "orbit"
+        // shares 3-grams (orb/rbi/bit) with "orbits" in the claim block, so
+        // the claim also matches — the filter still narrows to claim blocks.
         let hits_claim = svc.fulltext_search("orbit", 10, Some("claim")).unwrap();
-        assert!(hits_claim.is_empty());
+        assert_eq!(hits_claim.len(), 1);
 
         // Filter to evidence: no match.
         let hits_none = svc.fulltext_search("orbit", 10, Some("evidence")).unwrap();
         assert!(hits_none.is_empty());
+    }
+
+    #[test]
+    fn fulltext_trigram_matches_chinese_phrase() {
+        let svc = EntryService::for_test().unwrap();
+        svc.create(CreateEntry {
+            title: "Nomai".into(),
+            blocks: vec![crate::block_model::BlockInput {
+                r#type: "note".into(),
+                text: "Nomai 文化的核心是对知识和真相的不懈追求".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+        let hits = svc.fulltext_search("Nomai 文化", 10, None).unwrap();
+        assert_eq!(hits.len(), 1, "trigram should match the Chinese phrase");
+    }
+
+    #[test]
+    fn fulltext_short_query_falls_back_to_like() {
+        let svc = EntryService::for_test().unwrap();
+        svc.create(CreateEntry {
+            title: "t".into(),
+            blocks: vec![crate::block_model::BlockInput {
+                r#type: "note".into(),
+                text: "Rust 入门指南".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+        // "入门" is 2 chars — trigram returns empty; LIKE must catch it.
+        let hits = svc.fulltext_search("入门", 10, None).unwrap();
+        assert_eq!(hits.len(), 1, "2-char query falls back to LIKE");
+    }
+
+    #[test]
+    fn fulltext_english_still_works() {
+        let svc = EntryService::for_test().unwrap();
+        svc.create(CreateEntry {
+            title: "t".into(),
+            blocks: vec![crate::block_model::BlockInput {
+                r#type: "note".into(),
+                text: "Rust is a systems programming language".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+        let hits = svc.fulltext_search("Rust", 10, None).unwrap();
+        assert_eq!(hits.len(), 1, "English >=3 chars matches via trigram");
+    }
+
+    #[test]
+    fn fulltext_block_type_filter_both_paths() {
+        let svc = EntryService::for_test().unwrap();
+        svc.create(CreateEntry {
+            title: "t".into(),
+            blocks: vec![
+                crate::block_model::BlockInput {
+                    r#type: "claim".into(),
+                    text: "shared keyword alpha".into(),
+                    attrs: None,
+                },
+                crate::block_model::BlockInput {
+                    r#type: "note".into(),
+                    text: "shared keyword beta".into(),
+                    attrs: None,
+                },
+            ],
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+        // >=3 char path with block_type filter: "keyword" is in the claim block.
+        let claims = svc.fulltext_search("keyword", 10, Some("claim")).unwrap();
+        assert_eq!(claims.len(), 1);
+        // <3 char path with block_type filter to a type that has no block.
+        // "sh" is in both blocks; filtering to "evidence" (no such block)
+        // must return empty — proves the filter is applied on the LIKE path,
+        // not ignored.
+        let none = svc.fulltext_search("sh", 10, Some("evidence")).unwrap();
+        assert!(none.is_empty(), "LIKE path honors block_type filter");
+    }
+
+    #[test]
+    fn fulltext_like_escapes_wildcards() {
+        let svc = EntryService::for_test().unwrap();
+        // Two entries: one literally contains "0%", one contains "0" only.
+        svc.create(CreateEntry {
+            title: "t1".into(),
+            blocks: vec![crate::block_model::BlockInput {
+                r#type: "note".into(),
+                text: "discount 50% off".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+        svc.create(CreateEntry {
+            title: "t2".into(),
+            blocks: vec![crate::block_model::BlockInput {
+                r#type: "note".into(),
+                text: "fifty 50 dollars".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+        // "0%" is 2 chars → LIKE path. With % escaped, only the entry
+        // literally containing "0%" matches. If % were unescaped (regression),
+        // "0%" would act as "0<any>" and match BOTH entries.
+        let hits = svc.fulltext_search("0%", 10, None).unwrap();
+        assert_eq!(hits.len(), 1, "% escaped → only literal '0%' matches");
+    }
+
+    #[test]
+    fn fulltext_dedupes_entries_across_blocks() {
+        let svc = EntryService::for_test().unwrap();
+        svc.create(CreateEntry {
+            title: "t".into(),
+            blocks: vec![
+                crate::block_model::BlockInput {
+                    r#type: "note".into(),
+                    text: "shared keyword alpha".into(),
+                    attrs: None,
+                },
+                crate::block_model::BlockInput {
+                    r#type: "note".into(),
+                    text: "shared keyword beta".into(),
+                    attrs: None,
+                },
+            ],
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+        // Two blocks in one entry both match "keyword" — entry appears once.
+        let hits = svc.fulltext_search("keyword", 10, None).unwrap();
+        assert_eq!(hits.len(), 1, "FTS path dedupes by entry");
     }
 
     #[test]

@@ -7,12 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-07-06
+
 ### Added
 
+- `block.get` RPC: fetch a single block by ULID (namespace completeness —
+  the other four primitives all have `get`). `BlockService::get` already
+  existed in core; this adds the daemon handler, MCP descriptor, and
+  schema tests. Auto-registers in `tools/list`.
+- CJK fulltext search: `fts_blocks` switched to FTS5 `trigram` tokenizer
+  (V10 migration). Chinese / Japanese / Korean text is now substring-
+  searchable. The migration self-backfills from existing `blocks` rows,
+  so existing DBs need no manual reindex.
+- Short-query LIKE fallback: `search.fulltext` queries of 1–2 characters
+  (trigram returns empty for them) transparently fall back to an escaped
+  `LIKE '%q%'` scan. Same RPC, same params — clients need no changes.
 - MCP `tools/list` now exposes `description` + real `inputSchema` for all
   internal handlers (F-mcp-2). `RpcHandler` trait gains two default methods
   `description()` and `input_schema()` for plugin authors to opt in.
   External plugins continue to work unchanged.
+
+### Changed
+
+- Object cache (Entry/Chunk LRU) moved from "future work" to "measured,
+  declined" — `bench_object_cache.rs` showed the only beneficiary is the
+  rare "get same id N times" pattern; GraphRAG uses JOIN and never calls
+  `entry.get` separately.
+- `docs/reference.md` "All 23 primitive RPCs" wording fixed (count had
+  drifted to 29/30); now reads "all built-in RPCs" to prevent recurrence.
+
+### Database migration
+
+- **V10** (automatic on next daemon boot): switches `fts_blocks` to the
+  FTS5 `trigram` tokenizer and self-backfills from `blocks`. No manual
+  reindex or `index.sync` required — the migration is self-contained, so
+  `fts_blocks` is consistent the moment V10 lands.
 
 ## [0.2.1] — 2026-06-26
 
@@ -148,7 +177,8 @@ empty `.nomai` files. To regenerate from current state:
 - No built-in sync (the `events` primitive is the substrate; build on top).
 - No CLI subcommands — every operation is an RPC over stdio.
 
-[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Lin-Jiong-HDU/nomai/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Lin-Jiong-HDU/nomai/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Lin-Jiong-HDU/nomai/releases/tag/v0.1.0

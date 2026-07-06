@@ -58,6 +58,8 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     m.insert(h.method(), Arc::new(h));
     let h = block::List;
     m.insert(h.method(), Arc::new(h));
+    let h = block::Get;
+    m.insert(h.method(), Arc::new(h));
 
     // index.* (Plan 5: FS↔SQLite reconciliation. Plan 6: read-only verify.)
     let h = index::Sync;

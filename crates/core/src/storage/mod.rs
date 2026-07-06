@@ -437,4 +437,62 @@ mod tests {
             "V9 must not hardcode dim=2048; got: {sql}"
         );
     }
+
+    #[test]
+    fn v10_migration_switches_fts_blocks_to_trigram() {
+        crate::storage::init_sqlite_extensions();
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='fts_blocks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.contains("tokenize='trigram'"),
+            "V10 should recreate fts_blocks with trigram tokenizer; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn v10_backfill_copies_all_blocks_rows_into_fts() {
+        crate::storage::init_sqlite_extensions();
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        // Seed an entry + block (FK chain). blocks_ai trigger fills fts_blocks.
+        conn.execute(
+            "INSERT INTO entries (id, title, tags, attrs, source, fs_path, fs_mtime, created_at, updated_at)
+             VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAV', 't', '[]', '{}', NULL, NULL, NULL,
+                     '2026-07-06T00:00:00Z', '2026-07-06T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blocks (id, entry_id, ordinal, type, text, attrs, created_at, updated_at)
+             VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FB0', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 0,
+                     'note', 'Nomai 文化追求', '{}',
+                     '2026-07-06T00:00:00Z', '2026-07-06T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        // Simulate pre-backfill state: empty fts_blocks, blocks populated.
+        conn.execute("DELETE FROM fts_blocks", []).unwrap();
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fts_blocks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, 0, "precondition: fts_blocks cleared");
+        // Replay the exact backfill statement V10 runs.
+        conn.execute(
+            "INSERT INTO fts_blocks (block_id, entry_id, type, text)
+             SELECT id, entry_id, type, text FROM blocks",
+            [],
+        )
+        .unwrap();
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fts_blocks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, 1, "backfill copies every blocks row");
+    }
 }

@@ -57,6 +57,9 @@ pub mod block {
     /// Plan 5: append a block to an entry. Computes ordinal = max(existing)+1
     /// and re-renders the entry's `.nomai` file.
     pub const APPEND: &str = "block.append";
+    /// 0.2.2: fetch a single block by ULID. Namespace completeness —
+    /// entry/link/chunk/events all have `get`. Returns 1001 if not found.
+    pub const GET: &str = "block.get";
     /// Plan 5: update a block's type/text/attrs. Re-chunks when text changes
     /// (chunks_ad trigger cleans vec_chunk_embeddings) and re-renders the
     /// entry's `.nomai` file.
@@ -159,6 +162,7 @@ mod tests {
     #[test]
     fn block_namespace_methods() {
         assert_eq!(block::APPEND, "block.append");
+        assert_eq!(block::GET, "block.get");
         assert_eq!(block::UPDATE, "block.update");
         assert_eq!(block::DELETE, "block.delete");
         assert_eq!(block::LIST, "block.list");

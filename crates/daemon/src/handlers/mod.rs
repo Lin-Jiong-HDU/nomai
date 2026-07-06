@@ -1100,10 +1100,10 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 29 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:4,
+        // 30 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:5,
         // events:3, search:2, provider:1, cache:2, batch:1, index:3,
         // system:1).
-        assert_eq!(tools.len(), 29);
+        assert_eq!(tools.len(), 30);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1235,7 +1235,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 30); // 29 built-in + custom.echo
+        assert_eq!(tools.len(), 31); // 30 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
