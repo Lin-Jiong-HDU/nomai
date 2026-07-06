@@ -20,6 +20,7 @@ use crate::handlers::entry::blocking;
 use crate::rpc::RpcHandler;
 use nomai_protocol::method::block::APPEND as BLOCK_APPEND;
 use nomai_protocol::method::block::DELETE as BLOCK_DELETE;
+use nomai_protocol::method::block::GET as BLOCK_GET;
 use nomai_protocol::method::block::LIST as BLOCK_LIST;
 use nomai_protocol::method::block::UPDATE as BLOCK_UPDATE;
 
@@ -206,6 +207,39 @@ impl RpcHandler for List {
     }
 }
 
+/// 0.2.2: fetch a single block by ULID. Namespace completeness — the other
+/// four primitives (entry/link/chunk/events) all have `get`. Read-only: no
+/// `.nomai` rerender, no search-cache bump.
+pub struct Get;
+
+#[async_trait]
+impl RpcHandler for Get {
+    fn method(&self) -> &'static str {
+        BLOCK_GET
+    }
+    fn description(&self) -> &'static str {
+        "Fetch a single block by ULID. Returns error 1001 if not found."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::ulid_param_schema())
+    }
+    async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
+        #[derive(Deserialize)]
+        struct Params {
+            id: ulid::Ulid,
+        }
+        let p: Params = serde_json::from_value(params)
+            .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+        let entries: Arc<EntryService> = daemon.entries.clone();
+        let id = p.id;
+        let block = {
+            let entries = entries.clone();
+            blocking(move || entries.block_service().get(id)).await??
+        };
+        serde_json::to_value(&block).map_err(|e| CoreError::Config(format!("serialize: {e}")))
+    }
+}
+
 /// Load entry metadata + blocks via EntryService, render a `NomaiDoc`, and
 /// atomically overwrite the entry's `.nomai` file via `ContentStore`.
 ///
@@ -351,6 +385,18 @@ mod descriptor_tests {
     #[test]
     fn list_schema_rejects_missing_entry_id() {
         let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn get_schema_accepts_valid_id() {
+        let schema = Get.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"id": ULID})).is_ok());
+    }
+
+    #[test]
+    fn get_schema_rejects_missing_id() {
+        let schema = Get.input_schema().unwrap();
         assert!(validate(&schema, &json!({})).is_err());
     }
 }

@@ -99,6 +99,23 @@
       "name": "block.delete"
     },
     {
+      "description": "Fetch a single block by ULID. Returns error 1001 if not found.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "block.get"
+    },
+    {
       "description": "List all blocks of an entry, in ordinal order. Returns {items, total}.",
       "inputSchema": {
         "additionalProperties": false,
