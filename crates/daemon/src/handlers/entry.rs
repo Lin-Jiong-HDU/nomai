@@ -64,9 +64,11 @@ impl RpcHandler for Create {
         let entries = daemon.entries.clone();
         let entry = blocking(move || entries.create(input)).await??;
 
-        // Plan 4: entry-level embeddings are retired; chunk-level embeddings
-        // are managed via BlockService::create_in_tx + a separate background
-        // embedder. For v1, entry.create no longer triggers embedding work.
+        // 0.2.3: embed the entry's chunks so search.semantic works. Was a v1
+        // gap (the "background embedder" was never implemented); now done
+        // synchronously in-handler. Entry is already committed; embed failure
+        // returns provider error (1002) without rolling back the entry.
+        crate::handlers::embed::embed_entry_chunks(daemon, entry.id).await?;
 
         // Spec 7: invalidate search cache (new entry affects both search RPCs).
         daemon.search_cache.bump_generation();

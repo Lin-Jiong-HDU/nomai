@@ -18,6 +18,10 @@ pub mod registry;
 pub mod search;
 pub mod system;
 
+// Internal helper (not an RPC module): chunk-embedding orchestration used by
+// entry/block/batch handlers. See `embed::embed_entry_chunks`.
+mod embed;
+
 pub use registry::registry;
 
 #[cfg(test)]
@@ -83,6 +87,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn entry_create_auto_embeds_chunks_semantic_searchable() {
+        // Mock /embeddings to return a fixed vector for ANY input. Both the
+        // entry.create chunk embedding and the search.semantic query embedding
+        // hit this mock → identical vectors → cosine similarity 1.0 → match.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"index": 0, "embedding": vec![0.1_f32; DIM]}]
+            })))
+            .mount(&server)
+            .await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"t","blocks":[{"type":"note","text":"Nomai 文化的核心是追求知识"}]}),
+            ))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        // search.semantic must now hit (auto-embedded, no manual write_embedding).
+        let search = daemon
+            .dispatch(req("search.semantic", json!({"query":"文化","limit":5})))
+            .await;
+        let items = search.result.unwrap()["items"].as_array().unwrap().clone();
+        assert!(
+            !items.is_empty(),
+            "auto-embed should make semantic search hit"
+        );
+    }
+
+    #[tokio::test]
+    async fn block_append_auto_embeds_new_chunk() {
+        // Verify block.append triggers an embed call (not just entry.create).
+        // expect(2..): entry.create (1 embed) + block.append (1 embed). If
+        // block.append doesn't embed, only 1 call → mock fails on drop.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"index": 0, "embedding": vec![0.2_f32; DIM]}]
+            })))
+            .expect(2..)
+            .mount(&server)
+            .await;
+        let daemon = setup_daemon(&server).await;
+
+        let e = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"t","blocks":[{"type":"note","text":"orig"}]}),
+            ))
+            .await;
+        let entry_id = e.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        daemon
+            .dispatch(req(
+                "block.append",
+                json!({
+                    "entry_id": entry_id,
+                    "type": "note",
+                    "text": "新追加的知识点"
+                }),
+            ))
+            .await;
+        // No search.semantic here — it would add a 3rd embed call and mask
+        // whether block.append itself embedded. Mock expect(2..) verifies
+        // block.append triggered an embed (drop-time assertion).
+    }
+
+    #[tokio::test]
     async fn entry_create_round_trips_via_get() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -117,16 +194,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_create_does_not_trigger_embedding_call() {
-        // Plan 4: entry.create no longer triggers entry-level embedding work.
-        // A separate background chunk embedder (Plan 5) will handle chunks.
+    async fn entry_create_triggers_embedding_call() {
+        // 0.2.3: entry.create now auto-embeds its chunks (was a v1 gap — the
+        // "background chunk embedder" was never implemented). One block with
+        // text → one chunk → at least one embedding call.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/embeddings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": [{"index": 0, "embedding": vec![0.0_f32; DIM]}]
             })))
-            .expect(0) // ← zero embedding calls expected
+            .expect(1..) // ← at least one embedding call (chunk embed)
             .mount(&server)
             .await;
 
@@ -140,7 +218,37 @@ mod tests {
                 }),
             ))
             .await;
-        // Mock's expect(0) verifies on drop that no embedding call was made.
+        // Mock's expect(1..) verifies on drop that ≥1 embedding call was made.
+    }
+
+    #[tokio::test]
+    async fn entry_create_embed_failure_returns_provider_error_entry_preserved() {
+        // Mock /embeddings to return 500 → embed_entry_chunks fails.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"t","blocks":[{"type":"note","text":"some text"}]}),
+            ))
+            .await;
+
+        // RPC returns provider error (1002).
+        let err = resp
+            .error
+            .expect("embed failure should surface as RPC error");
+        assert_eq!(err.code, 1002);
+
+        // But the entry IS persisted (fulltext still works; rebuild can re-embed).
+        let list = daemon.dispatch(req("entry.list", json!({}))).await;
+        let total = list.result.unwrap()["total"].as_u64().unwrap();
+        assert_eq!(total, 1, "entry preserved despite embed failure");
     }
 
     #[tokio::test]
@@ -1469,23 +1577,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_does_not_call_embedder() {
-        // Plan 4: entry.create no longer triggers embedding work (Plan 5
-        // will add a separate background chunk embedder). batch of N
-        // entry.create ops must therefore issue zero embedding calls.
+    async fn batch_embeds_committed_entries() {
+        // 0.2.3: batch now embeds chunks post-commit for touched entries.
+        // 3 entry.create ops → 3 embed calls (one per entry's chunks). If
+        // batch doesn't embed, 0 calls → expect(3..) fails on drop.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/embeddings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": [{"index": 0, "embedding": vec![1.0_f32; DIM]}]
             })))
-            .expect(0) // ← zero embedding calls
+            .expect(3..) // ← ≥3 embed calls (3 entries × 1 chunk each)
             .mount(&server)
             .await;
 
         let daemon = setup_daemon(&server).await;
 
-        daemon
+        let resp = daemon
             .dispatch(req(
                 "batch",
                 json!({
@@ -1497,8 +1605,9 @@ mod tests {
                 }),
             ))
             .await;
-
-        // Mock's expect(0) verifies on drop that no embedding call was made.
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        // No search.semantic — mock returns a fixed vec, so search would hit
+        // regardless. expect(3..) verifies batch triggered the embeds.
     }
 
     #[tokio::test]
@@ -1758,9 +1867,14 @@ mod tests {
         assert!(result["embeddings"].is_null(), "emb_cache untouched");
         assert_eq!(result["searches"]["cleared"].as_u64().unwrap(), 1);
 
-        // Verify emb_cache still has its row.
+        // Verify emb_cache still has its row(s). 0.2.3: entry.create now
+        // auto-embeds → emb_cache has the chunk's row plus the manually
+        // inserted one; cache.clear(searches) must leave emb_cache intact.
         let stats = daemon.dispatch(req("cache.stats", json!({}))).await;
-        assert_eq!(stats.result.unwrap()["embeddings"]["rows"], 1);
+        let rows = stats.result.unwrap()["embeddings"]["rows"]
+            .as_u64()
+            .unwrap();
+        assert!(rows >= 1, "emb_cache untouched by cache.clear(searches)");
     }
 
     #[tokio::test]
