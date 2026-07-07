@@ -18,6 +18,10 @@ pub mod registry;
 pub mod search;
 pub mod system;
 
+// Internal helper (not an RPC module): chunk-embedding orchestration used by
+// entry/block/batch handlers. See `embed::embed_entry_chunks`.
+mod embed;
+
 pub use registry::registry;
 
 #[cfg(test)]
