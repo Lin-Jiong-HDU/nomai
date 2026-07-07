@@ -87,6 +87,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn entry_create_auto_embeds_chunks_semantic_searchable() {
+        // Mock /embeddings to return a fixed vector for ANY input. Both the
+        // entry.create chunk embedding and the search.semantic query embedding
+        // hit this mock → identical vectors → cosine similarity 1.0 → match.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"index": 0, "embedding": vec![0.1_f32; DIM]}]
+            })))
+            .mount(&server)
+            .await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"t","blocks":[{"type":"note","text":"Nomai 文化的核心是追求知识"}]}),
+            ))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+
+        // search.semantic must now hit (auto-embedded, no manual write_embedding).
+        let search = daemon
+            .dispatch(req("search.semantic", json!({"query":"文化","limit":5})))
+            .await;
+        let items = search.result.unwrap()["items"].as_array().unwrap().clone();
+        assert!(
+            !items.is_empty(),
+            "auto-embed should make semantic search hit"
+        );
+    }
+
+    #[tokio::test]
     async fn entry_create_round_trips_via_get() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -121,16 +155,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_create_does_not_trigger_embedding_call() {
-        // Plan 4: entry.create no longer triggers entry-level embedding work.
-        // A separate background chunk embedder (Plan 5) will handle chunks.
+    async fn entry_create_triggers_embedding_call() {
+        // 0.2.3: entry.create now auto-embeds its chunks (was a v1 gap — the
+        // "background chunk embedder" was never implemented). One block with
+        // text → one chunk → at least one embedding call.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/embeddings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": [{"index": 0, "embedding": vec![0.0_f32; DIM]}]
             })))
-            .expect(0) // ← zero embedding calls expected
+            .expect(1..) // ← at least one embedding call (chunk embed)
             .mount(&server)
             .await;
 
@@ -144,7 +179,7 @@ mod tests {
                 }),
             ))
             .await;
-        // Mock's expect(0) verifies on drop that no embedding call was made.
+        // Mock's expect(1..) verifies on drop that ≥1 embedding call was made.
     }
 
     #[tokio::test]
@@ -1762,9 +1797,14 @@ mod tests {
         assert!(result["embeddings"].is_null(), "emb_cache untouched");
         assert_eq!(result["searches"]["cleared"].as_u64().unwrap(), 1);
 
-        // Verify emb_cache still has its row.
+        // Verify emb_cache still has its row(s). 0.2.3: entry.create now
+        // auto-embeds → emb_cache has the chunk's row plus the manually
+        // inserted one; cache.clear(searches) must leave emb_cache intact.
         let stats = daemon.dispatch(req("cache.stats", json!({}))).await;
-        assert_eq!(stats.result.unwrap()["embeddings"]["rows"], 1);
+        let rows = stats.result.unwrap()["embeddings"]["rows"]
+            .as_u64()
+            .unwrap();
+        assert!(rows >= 1, "emb_cache untouched by cache.clear(searches)");
     }
 
     #[tokio::test]
