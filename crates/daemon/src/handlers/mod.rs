@@ -121,6 +121,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn block_append_auto_embeds_new_chunk() {
+        // Verify block.append triggers an embed call (not just entry.create).
+        // expect(2..): entry.create (1 embed) + block.append (1 embed). If
+        // block.append doesn't embed, only 1 call → mock fails on drop.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"index": 0, "embedding": vec![0.2_f32; DIM]}]
+            })))
+            .expect(2..)
+            .mount(&server)
+            .await;
+        let daemon = setup_daemon(&server).await;
+
+        let e = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"t","blocks":[{"type":"note","text":"orig"}]}),
+            ))
+            .await;
+        let entry_id = e.result.unwrap()["id"].as_str().unwrap().to_string();
+
+        daemon
+            .dispatch(req(
+                "block.append",
+                json!({
+                    "entry_id": entry_id,
+                    "type": "note",
+                    "text": "新追加的知识点"
+                }),
+            ))
+            .await;
+        // No search.semantic here — it would add a 3rd embed call and mask
+        // whether block.append itself embedded. Mock expect(2..) verifies
+        // block.append triggered an embed (drop-time assertion).
+    }
+
+    #[tokio::test]
     async fn entry_create_round_trips_via_get() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
