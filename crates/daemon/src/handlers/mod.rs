@@ -222,6 +222,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn entry_create_embed_failure_returns_provider_error_entry_preserved() {
+        // Mock /embeddings to return 500 → embed_entry_chunks fails.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"t","blocks":[{"type":"note","text":"some text"}]}),
+            ))
+            .await;
+
+        // RPC returns provider error (1002).
+        let err = resp
+            .error
+            .expect("embed failure should surface as RPC error");
+        assert_eq!(err.code, 1002);
+
+        // But the entry IS persisted (fulltext still works; rebuild can re-embed).
+        let list = daemon.dispatch(req("entry.list", json!({}))).await;
+        let total = list.result.unwrap()["total"].as_u64().unwrap();
+        assert_eq!(total, 1, "entry preserved despite embed failure");
+    }
+
+    #[tokio::test]
     async fn search_semantic_ranks_by_similarity() {
         let server = MockServer::start().await;
 
