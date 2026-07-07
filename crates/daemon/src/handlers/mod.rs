@@ -1547,23 +1547,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_does_not_call_embedder() {
-        // Plan 4: entry.create no longer triggers embedding work (Plan 5
-        // will add a separate background chunk embedder). batch of N
-        // entry.create ops must therefore issue zero embedding calls.
+    async fn batch_embeds_committed_entries() {
+        // 0.2.3: batch now embeds chunks post-commit for touched entries.
+        // 3 entry.create ops → 3 embed calls (one per entry's chunks). If
+        // batch doesn't embed, 0 calls → expect(3..) fails on drop.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/embeddings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": [{"index": 0, "embedding": vec![1.0_f32; DIM]}]
             })))
-            .expect(0) // ← zero embedding calls
+            .expect(3..) // ← ≥3 embed calls (3 entries × 1 chunk each)
             .mount(&server)
             .await;
 
         let daemon = setup_daemon(&server).await;
 
-        daemon
+        let resp = daemon
             .dispatch(req(
                 "batch",
                 json!({
@@ -1575,8 +1575,9 @@ mod tests {
                 }),
             ))
             .await;
-
-        // Mock's expect(0) verifies on drop that no embedding call was made.
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        // No search.semantic — mock returns a fixed vec, so search would hit
+        // regardless. expect(3..) verifies batch triggered the embeds.
     }
 
     #[tokio::test]

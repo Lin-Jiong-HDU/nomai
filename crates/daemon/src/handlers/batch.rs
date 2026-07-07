@@ -230,6 +230,41 @@ impl RpcHandler for Batch {
             // conn + conn_arc drop here, releasing the Mutex.
         };
 
+        // 0.2.3: post-commit embed. Collect every entry_id touched by a
+        // successful op, dedupe, embed each. Embed failure → provider error
+        // (1002); the batch transaction is already committed, so the entry
+        // writes stand (atomic guarantees op consistency; embed is
+        // post-transaction enrichment and is NOT rolled back).
+        if matches!(commit_outcome, CommitOutcome::Ok) {
+            let mut touched: HashMap<ulid::Ulid, ()> = HashMap::new();
+            for (i, op) in req.ops.iter().enumerate() {
+                let ok = results[i]
+                    .get("ok")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !ok {
+                    continue;
+                }
+                let id_str = match op.method.as_str() {
+                    "entry.create" => results[i]["result"]["id"].as_str(),
+                    "entry.update" => op.params.get("id").and_then(|v| v.as_str()),
+                    "block.append" => results[i]["result"]["entry_id"]
+                        .as_str()
+                        .or_else(|| op.params.get("entry_id").and_then(|v| v.as_str())),
+                    "block.update" => results[i]["result"]["entry_id"].as_str(),
+                    _ => None,
+                };
+                if let Some(s) = id_str {
+                    if let Ok(id) = s.parse::<ulid::Ulid>() {
+                        touched.insert(id, ());
+                    }
+                }
+            }
+            for entry_id in touched.keys() {
+                crate::handlers::embed::embed_entry_chunks(daemon, *entry_id).await?;
+            }
+        }
+
         match commit_outcome {
             CommitOutcome::Ok => Ok(json!({
                 "results": results,
