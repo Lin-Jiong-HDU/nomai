@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-07-07
+
+### Added
+
+- daemon auto-embeds chunks on `entry.create`, `block.append` /
+  `block.update`, and `batch` commit. **Fixes `search.semantic` returning
+  empty for production entries** — the `vec_chunk_embeddings` table was
+  never populated (the "background embedder" referenced in old code
+  comments was never implemented). Embeddings reuse `emb_cache`
+  (unchanged bodies skip the API call). `entry.update` is not wired (it
+  only changes metadata, not blocks — chunks are unchanged).
+
+### Changed
+
+- Embed failure surfaces as RPC provider error (1002); the entry write is
+  NOT rolled back (fulltext still works; `index.rebuild` re-embeds).
+
 ## [0.2.2] — 2026-07-06
 
 ### Added
@@ -177,7 +194,8 @@ empty `.nomai` files. To regenerate from current state:
 - No built-in sync (the `events` primitive is the substrate; build on top).
 - No CLI subcommands — every operation is an RPC over stdio.
 
-[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Lin-Jiong-HDU/nomai/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Lin-Jiong-HDU/nomai/releases/tag/v0.2.0
