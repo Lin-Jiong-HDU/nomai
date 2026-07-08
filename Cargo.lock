@@ -1106,6 +1106,7 @@ dependencies = [
  "dashmap",
  "directories",
  "jsonschema",
+ "libc",
  "nomai-core",
  "nomai-protocol",
  "nomai-providers",

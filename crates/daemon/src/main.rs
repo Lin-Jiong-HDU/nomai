@@ -10,6 +10,12 @@ mod handlers;
 mod io;
 mod rpc;
 mod search_cache;
+// socket.rs is a shared source file (lib re-exports it as `pub`). The bin's
+// private copy is not yet wired into main — it is consumed by `serve`/`shim`
+// in Tasks 2-4. Silence dead-code until then.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod socket;
 
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();

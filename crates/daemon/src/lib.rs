@@ -6,3 +6,5 @@ pub mod handlers;
 pub mod io;
 pub mod rpc;
 pub mod search_cache;
+#[cfg(unix)]
+pub mod socket;
