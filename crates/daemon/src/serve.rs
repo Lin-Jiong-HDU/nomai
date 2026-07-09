@@ -7,10 +7,6 @@ use nomai_core::CoreError;
 use crate::config::Config;
 use crate::socket::{BindOutcome, bind_or_probe, cleanup, socket_paths, write_pidfile};
 
-/// Idle timeout placeholder; wired to `config.serve.idle_timeout_secs` in
-/// Task 5.
-const DEFAULT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Boot the resident daemon. Detaches into a new session, claims the socket
 /// (exiting cleanly if a live daemon already holds it), writes the pidfile,
 /// constructs the Daemon, and enters the serve loop. Cleans up socket +
@@ -39,8 +35,9 @@ pub async fn run(config: Config) -> Result<(), CoreError> {
     let _guard = PidfileGuard(socket_path.clone(), pidfile.clone());
     write_pidfile(&pidfile).map_err(|e| CoreError::Config(format!("write pidfile: {e}")))?;
 
+    let idle = std::time::Duration::from_secs(config.serve.idle_timeout_secs);
     let daemon = crate::daemon::Daemon::new(config).await?;
-    daemon.run_serve(listener, DEFAULT_IDLE_TIMEOUT).await?;
+    daemon.run_serve(listener, idle).await?;
 
     Ok(())
 }

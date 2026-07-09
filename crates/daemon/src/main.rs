@@ -11,13 +11,10 @@ mod io;
 mod rpc;
 mod search_cache;
 // socket.rs is a shared source file (lib re-exports it as `pub`). The bin's
-// private copy is not yet wired into main — it is consumed by `serve`/`shim`
-// in Tasks 2-4. Silence dead-code until then.
+// private copy is consumed transitively by `serve`/`shim`.
 #[cfg(unix)]
-#[allow(dead_code)]
 mod serve;
 #[cfg(unix)]
-#[allow(dead_code)]
 mod shim;
 #[cfg(unix)]
 #[allow(dead_code)]
@@ -31,21 +28,28 @@ fn install_panic_hook() {
     }));
 }
 
-/// Parse `--config <path>` / `--config=<path>` from the process args.
-///
-/// Returns the path to load the config from if `--config` is present, or
-/// `None` to fall back to the default config path. Unknown args are rejected
-/// with a usage message and a non-zero exit code.
-fn parse_config_path_arg() -> Result<Option<std::path::PathBuf>, ExitCode> {
+/// Parsed CLI args.
+struct CliArgs {
+    /// Path from `--config`, or None for the default config path.
+    config_path: Option<std::path::PathBuf>,
+    /// True if `--serve` was passed (resident daemon mode).
+    serve: bool,
+}
+
+/// Parse `--serve` and `--config <path>` / `--config=<path>` from args.
+fn parse_args() -> Result<CliArgs, ExitCode> {
     let mut iter = std::env::args().skip(1);
     let mut config_path: Option<std::path::PathBuf> = None;
+    let mut serve = false;
     while let Some(arg) = iter.next() {
-        if arg == "--config" {
+        if arg == "--serve" {
+            serve = true;
+        } else if arg == "--config" {
             let path = match iter.next() {
                 Some(p) => p,
                 None => {
                     eprintln!("error: --config requires a path argument");
-                    eprintln!("usage: nomai-daemon [--config <path>]");
+                    eprintln!("usage: nomai-daemon [--serve] [--config <path>]");
                     return Err(ExitCode::FAILURE);
                 }
             };
@@ -54,11 +58,11 @@ fn parse_config_path_arg() -> Result<Option<std::path::PathBuf>, ExitCode> {
             config_path = Some(std::path::PathBuf::from(rest));
         } else {
             eprintln!("error: unknown argument: {arg}");
-            eprintln!("usage: nomai-daemon [--config <path>]");
+            eprintln!("usage: nomai-daemon [--serve] [--config <path>]");
             return Err(ExitCode::FAILURE);
         }
     }
-    Ok(config_path)
+    Ok(CliArgs { config_path, serve })
 }
 
 fn main() -> ExitCode {
@@ -66,13 +70,13 @@ fn main() -> ExitCode {
     // Must run before any Connection::open in the process.
     storage::init_sqlite_extensions();
 
-    let config_path = match parse_config_path_arg() {
-        Ok(p) => p,
+    let args = match parse_args() {
+        Ok(a) => a,
         Err(code) => return code,
     };
 
-    let config = match config_path {
-        Some(path) => match config::Config::load_from(&path) {
+    let config = match args.config_path.as_deref() {
+        Some(path) => match config::Config::load_from(path) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("config error: {e}");
@@ -87,6 +91,12 @@ fn main() -> ExitCode {
             }
         },
     };
+    // Pass the resolved config path to spawned --serve children via env so
+    // they reload the identical config (shim::spawn_serve reads this).
+    if let Some(p) = &args.config_path {
+        // SAFETY: main is single-threaded before the runtime starts.
+        unsafe { std::env::set_var("NOMAI_CONFIG_PATH", p) };
+    }
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -100,8 +110,11 @@ fn main() -> ExitCode {
     };
 
     let result = runtime.block_on(async move {
-        let daemon = daemon::Daemon::new(config).await?;
-        daemon.run_stdio().await
+        if args.serve {
+            serve::run(config).await
+        } else {
+            shim::run(config).await
+        }
     });
 
     if let Err(e) = result {

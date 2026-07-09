@@ -12,13 +12,14 @@ use tokio::net::UnixStream;
 use nomai_core::CoreError;
 
 const READY_POLL: Duration = Duration::from_millis(50);
-/// Default ready timeout; wired into `shim::run` in Task 5.
-#[allow(dead_code)]
+/// Default ready timeout for `ensure_daemon` in `shim::run`.
 const READY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Failure to attach a resident daemon via `ensure_daemon`.
+#[derive(Debug)]
 pub enum SpawnError {
     /// Spawning the `--serve` child failed.
+    #[allow(dead_code)] // surfaced via Debug in `shim::run`'s fallback message
     SpawnFailed(std::io::Error),
     /// The child was spawned but never became ready within the timeout.
     NotReady,
@@ -86,6 +87,26 @@ where
     // Either direction completing (EOF/error) ends the bridge.
     let _ = tokio::try_join!(to_socket, from_socket);
     Ok(())
+}
+
+use crate::config::Config;
+use crate::daemon::Daemon;
+
+/// Shim entry point: attach to (or spawn) the resident daemon and bridge
+/// stdio to it; fall back to in-process stdio serve if unreachable.
+pub async fn run(config: Config) -> Result<(), CoreError> {
+    let db_path = crate::daemon::resolved_db_path(&config)?;
+    let (socket_path, _pidfile) = crate::socket::socket_paths(&db_path)
+        .map_err(|e| CoreError::Config(format!("socket paths: {e}")))?;
+
+    match ensure_daemon(&socket_path, READY_TIMEOUT, spawn_serve).await {
+        Ok(stream) => bridge(tokio::io::stdin(), tokio::io::stdout(), stream).await,
+        Err(e) => {
+            eprintln!("nomai-shim: resident daemon unavailable ({e:?}); falling back to stdio");
+            let daemon = Daemon::new(config).await?;
+            daemon.run_stdio().await
+        }
+    }
 }
 
 #[cfg(test)]

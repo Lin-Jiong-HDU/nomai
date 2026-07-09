@@ -15,6 +15,8 @@ pub struct Config {
     #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
+    pub serve: ServeConfig,
+    #[serde(default)]
     pub chunking: ChunkingConfig,
 }
 
@@ -96,6 +98,26 @@ impl Default for ChunkingConfig {
 
 fn default_chunk_target_size() -> usize {
     1024
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ServeConfig {
+    /// Seconds the resident daemon stays alive after the last client
+    /// disconnects before exiting (debounce). Default 30.
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+}
+
+impl Default for ServeConfig {
+    fn default() -> Self {
+        Self {
+            idle_timeout_secs: default_idle_timeout_secs(),
+        }
+    }
+}
+
+fn default_idle_timeout_secs() -> u64 {
+    30
 }
 
 #[derive(Debug, Error)]
@@ -291,6 +313,59 @@ target_size = 2048
         std::fs::write(tmp.path(), toml_text).unwrap();
         let config = Config::load_from(tmp.path()).unwrap();
         assert_eq!(config.chunking.target_size, 2048);
+        restore("TEST_OPENAI_KEY", old);
+    }
+
+    #[test]
+    fn serve_section_defaults_to_30s() {
+        let _guard = lock();
+        let old = unset("TEST_OPENAI_KEY");
+        // SAFETY: tests are single-threaded within this module.
+        unsafe { std::env::set_var("TEST_OPENAI_KEY", "sk") };
+        let toml_text = r#"
+[embedding]
+base_url = "https://example.com/v1"
+api_key_env = "TEST_OPENAI_KEY"
+model = "x"
+dim = 8
+
+[llm]
+base_url = "https://example.com/v1"
+api_key_env = "TEST_OPENAI_KEY"
+model = "x"
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), toml_text).unwrap();
+        let config = Config::load_from(tmp.path()).unwrap();
+        assert_eq!(config.serve.idle_timeout_secs, 30);
+        restore("TEST_OPENAI_KEY", old);
+    }
+
+    #[test]
+    fn serve_section_accepts_custom_idle_timeout() {
+        let _guard = lock();
+        let old = unset("TEST_OPENAI_KEY");
+        // SAFETY: tests are single-threaded within this module.
+        unsafe { std::env::set_var("TEST_OPENAI_KEY", "sk") };
+        let toml_text = r#"
+[embedding]
+base_url = "https://example.com/v1"
+api_key_env = "TEST_OPENAI_KEY"
+model = "x"
+dim = 8
+
+[llm]
+base_url = "https://example.com/v1"
+api_key_env = "TEST_OPENAI_KEY"
+model = "x"
+
+[serve]
+idle_timeout_secs = 5
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), toml_text).unwrap();
+        let config = Config::load_from(tmp.path()).unwrap();
+        assert_eq!(config.serve.idle_timeout_secs, 5);
         restore("TEST_OPENAI_KEY", old);
     }
 }
