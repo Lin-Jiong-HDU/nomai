@@ -18,6 +18,9 @@ mod search_cache;
 mod serve;
 #[cfg(unix)]
 #[allow(dead_code)]
+mod shim;
+#[cfg(unix)]
+#[allow(dead_code)]
 mod socket;
 
 fn install_panic_hook() {
