@@ -73,19 +73,33 @@ pub fn spawn_serve() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Pump bytes between stdio and the socket in both directions until either
-/// side hits EOF. Generic over the stdio halves so it's unit-testable with
+/// Pump bytes between stdio and the socket in both directions until both
+/// halves close. Generic over the stdio halves so it's unit-testable with
 /// in-memory pipes; production wires it to `tokio::io::stdin()` / `stdout()`.
+///
+/// Half-close semantics: when stdin reaches EOF, the socket write half is
+/// shut down so the resident daemon's connection handler observes EOF,
+/// finishes draining, and closes its write half. Without this the daemon
+/// keeps the socket open (idle) and the shim never exits — a half-close
+/// deadlock. The socket→stdout pump then drains the daemon's final response
+/// and returns once the daemon closes its end.
 pub async fn bridge<R, W>(mut stdin: R, mut stdout: W, stream: UnixStream) -> Result<(), CoreError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    use tokio::io::AsyncWriteExt;
     let (mut sock_read, mut sock_write) = stream.into_split();
-    let to_socket = tokio::io::copy(&mut stdin, &mut sock_write);
-    let from_socket = tokio::io::copy(&mut sock_read, &mut stdout);
-    // Either direction completing (EOF/error) ends the bridge.
-    let _ = tokio::try_join!(to_socket, from_socket);
+    // stdin → socket; on EOF, shut the write half so the daemon sees EOF.
+    let to_socket = async {
+        let _ = tokio::io::copy(&mut stdin, &mut sock_write).await;
+        let _ = sock_write.shutdown().await;
+    };
+    // socket → stdout (drains until the daemon closes its write half).
+    let from_socket = async {
+        let _ = tokio::io::copy(&mut sock_read, &mut stdout).await;
+    };
+    let _ = tokio::join!(to_socket, from_socket);
     Ok(())
 }
 

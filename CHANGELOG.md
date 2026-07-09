@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-08
+
+### Added
+- **Multi-instance Claude Code support (#2).** The daemon is now a single
+  resident process shared across CC instances: CC spawns the binary as
+  before (zero `.mcp.json` change), and the shim auto-spawns/attaches to one
+  resident `--serve` daemon over a Unix socket. This eliminates the
+  `SQLITE_BUSY` conflict that occurred when multiple CC instances each opened
+  the same `db.sqlite`. If the resident daemon can't start, the shim falls
+  back to single-process stdio serve (previous behavior).
+- `[serve] idle_timeout_secs` config (default 30): how long the resident
+  daemon stays alive after the last client disconnects.
+
 ## [0.2.3] — 2026-07-07
 
 ### Added
