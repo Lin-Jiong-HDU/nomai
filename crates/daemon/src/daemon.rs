@@ -49,6 +49,10 @@ impl Daemon {
         // Open SQLite (creating parent dir if needed).
         let db_path = expand_db_path(&config.data.db_path)?;
         let conn = Connection::open(&db_path)?;
+        // Defensive: single-daemon model won't hit SQLITE_BUSY in-process, but
+        // if an external `sqlite3` CLI ever opens the db concurrently, wait up
+        // to 5s rather than failing immediately. Spec §5.
+        conn.pragma_update(None, "busy_timeout", 5000_u32)?;
         let conn = Arc::new(Mutex::new(conn));
 
         // Construct FS-backed ContentStore from config.data.knowledge_root
@@ -329,6 +333,73 @@ impl Daemon {
         Ok(())
     }
 
+    /// Run the resident daemon: accept multiple Unix-socket clients and
+    /// dispatch their NDJSON JSON-RPC lines via the same `dispatch` as
+    /// `run_stdio`, writing responses back to **each connection**. Exits when
+    /// either (a) `idle_timeout` elapses with zero active connections, or
+    /// (b) SIGTERM / SIGINT arrives. Spec §5.
+    #[cfg(unix)]
+    pub async fn run_serve(
+        self,
+        listener: tokio::net::UnixListener,
+        idle_timeout: std::time::Duration,
+    ) -> Result<(), CoreError> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::{Notify, broadcast};
+
+        let daemon = Arc::new(self);
+        let active = Arc::new(AtomicUsize::new(0));
+        let idle_notify = Arc::new(Notify::new());
+        let (shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(1);
+
+        // Signal watcher: forward ctrl_c / SIGTERM to the shutdown channel.
+        let sig_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = sigterm_signal() => {}
+            }
+            let _ = sig_tx.send(());
+        });
+
+        loop {
+            let active_now = active.load(Ordering::SeqCst);
+            let idle_fut = async {
+                if active_now == 0 {
+                    tokio::time::sleep(idle_timeout).await;
+                } else {
+                    idle_notify.notified().await;
+                }
+            };
+
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.recv() => break,
+                res = listener.accept() => {
+                    let (stream, _addr) =
+                        res.map_err(|e| CoreError::Config(format!("accept: {e}")))?;
+                    active.fetch_add(1, Ordering::SeqCst);
+                    let daemon_c = Arc::clone(&daemon);
+                    let active_c = Arc::clone(&active);
+                    let notify_c = Arc::clone(&idle_notify);
+                    tokio::spawn(async move {
+                        handle_conn(daemon_c, stream).await;
+                        if active_c.fetch_sub(1, Ordering::SeqCst) == 1 {
+                            notify_c.notify_one();
+                        }
+                    });
+                }
+                _ = idle_fut => {
+                    // Re-check: a client may have arrived in the same window.
+                    if active.load(Ordering::SeqCst) == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn dispatch(&self, req: nomai_protocol::Request) -> nomai_protocol::Response {
         use nomai_protocol::error::{MESSAGE_METHOD_NOT_FOUND, METHOD_NOT_FOUND};
         use nomai_protocol::{Response, RpcError};
@@ -540,9 +611,218 @@ fn run_startup_sync(entries: &EntryService) {
     }
 }
 
+/// Serve one client connection: read NDJSON requests, dispatch, write the
+/// response back to the stream. Exits on EOF or read error.
+#[cfg(unix)]
+async fn handle_conn(daemon: Arc<Daemon>, stream: tokio::net::UnixStream) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let req: nomai_protocol::Request = match serde_json::from_str(trimmed) {
+            Ok(r) => r,
+            Err(e) => {
+                let resp = nomai_protocol::Response::err(
+                    None,
+                    nomai_protocol::RpcError {
+                        code: nomai_protocol::error::PARSE_ERROR,
+                        message: nomai_protocol::error::MESSAGE_PARSE_ERROR.into(),
+                        data: Some(serde_json::Value::String(e.to_string())),
+                    },
+                );
+                let _ = write_response_to(&mut write_half, &resp).await;
+                continue;
+            }
+        };
+        let is_notification = req.id.is_none();
+        let resp = daemon.dispatch(req).await;
+        if !is_notification {
+            let _ = write_response_to(&mut write_half, &resp).await;
+        }
+    }
+}
+
+/// Serialize a response as one JSON line and write it to an async writer.
+#[cfg(unix)]
+async fn write_response_to<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    resp: &nomai_protocol::Response,
+) -> Result<(), std::io::Error> {
+    use tokio::io::AsyncWriteExt;
+    // Our Response is always serializable; unwrap is an invariant assertion.
+    let mut buf = serde_json::to_string(resp).expect("response serializes");
+    buf.push('\n');
+    writer.write_all(buf.as_bytes()).await
+}
+
+/// Block until SIGTERM is received. If the handler can't be installed, block
+/// forever so ctrl_c (handled separately) remains the only signal path.
+#[cfg(unix)]
+async fn sigterm_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::terminate()) {
+        Ok(mut s) => {
+            s.recv().await;
+        }
+        Err(_) => std::future::pending::<()>().await,
+    }
+}
+
+/// Resolved (tilde-expanded, parent-dir-created) db path from config. Used by
+/// `serve::run` / `shim::run` to derive socket paths alongside the database.
+#[allow(dead_code)] // consumed by Task 3 (serve::run) / Task 4 (shim::run).
+pub(crate) fn resolved_db_path(
+    config: &crate::config::Config,
+) -> Result<std::path::PathBuf, CoreError> {
+    expand_db_path(&config.data.db_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use nomai_core::EntryService;
+    use nomai_providers::{EmbeddingProvider, LlmProvider};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    async fn null_daemon() -> super::Daemon {
+        let entries = Arc::new(EntryService::for_test().unwrap());
+        let conn = entries.conn_for_test();
+        let content_store = entries.content_store().clone();
+
+        struct NullEmbed;
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for NullEmbed {
+            async fn embed(
+                &self,
+                _texts: &[&str],
+            ) -> Result<Vec<Vec<f32>>, nomai_protocol::ProviderError> {
+                Ok(vec![])
+            }
+            fn dim(&self) -> usize {
+                8
+            }
+            fn name(&self) -> &str {
+                "null"
+            }
+        }
+        struct NullLlm;
+        #[async_trait::async_trait]
+        impl LlmProvider for NullLlm {
+            async fn complete(
+                &self,
+                _req: nomai_providers::CompletionRequest,
+            ) -> Result<nomai_providers::CompletionResponse, nomai_protocol::ProviderError>
+            {
+                Err(nomai_protocol::ProviderError::new(
+                    nomai_protocol::ProviderErrorKind::Unknown,
+                    "null",
+                    None,
+                ))
+            }
+            fn name(&self) -> &str {
+                "null"
+            }
+        }
+
+        super::DaemonBuilder::new()
+            .conn(conn)
+            .content_store(content_store)
+            .embedder(Arc::new(NullEmbed))
+            .llm(Arc::new(NullLlm))
+            .embedding_dim(8)
+            .chunk_target_size(1024)
+            .cache_model("test-model")
+            .warn_rows(100_000)
+            .build()
+            .unwrap()
+    }
+
+    fn req_line(id: u64, method: &str) -> String {
+        format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{{}}}}"#)
+    }
+
+    async fn read_one_response(
+        reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    ) -> serde_json::Value {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        serde_json::from_str(line.trim()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn run_serve_routes_responses_to_correct_clients() {
+        let sock =
+            std::env::temp_dir().join(format!("nomai-serve-route-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let daemon = null_daemon().await;
+
+        let serve_task = tokio::spawn(async move {
+            daemon
+                .run_serve(listener, std::time::Duration::from_secs(30))
+                .await
+                .unwrap();
+        });
+
+        // Two concurrent clients; each sends entry.list with a distinct id.
+        let mut a = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        let mut b = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        a.write_all(req_line(10, "entry.list").as_bytes())
+            .await
+            .unwrap();
+        a.write_all(b"\n").await.unwrap();
+        b.write_all(req_line(20, "entry.list").as_bytes())
+            .await
+            .unwrap();
+        b.write_all(b"\n").await.unwrap();
+
+        let (ar, _aw) = a.into_split();
+        let (br, _bw) = b.into_split();
+        let mut ar = BufReader::new(ar);
+        let mut br = BufReader::new(br);
+        let ra = tokio::spawn(async move { read_one_response(&mut ar).await });
+        let rb = tokio::spawn(async move { read_one_response(&mut br).await });
+        let va = ra.await.unwrap();
+        let vb = rb.await.unwrap();
+        // entry.list returns an array; each client gets its own id back.
+        assert_eq!(va["id"], 10);
+        assert_eq!(vb["id"], 20);
+
+        serve_task.abort();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn run_serve_exits_after_idle_timeout() {
+        let sock =
+            std::env::temp_dir().join(format!("nomai-serve-idle-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let daemon = null_daemon().await;
+
+        // No client ever connects; idle_timeout = 80ms → run_serve returns.
+        let start = std::time::Instant::now();
+        daemon
+            .run_serve(listener, std::time::Duration::from_millis(80))
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert!(elapsed >= std::time::Duration::from_millis(80));
+        assert!(elapsed < std::time::Duration::from_secs(2));
+        let _ = std::fs::remove_file(&sock);
+    }
 
     #[test]
     fn expand_db_path_creates_parent_dir() {
