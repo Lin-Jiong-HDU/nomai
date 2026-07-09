@@ -681,7 +681,6 @@ async fn sigterm_signal() {
 
 /// Resolved (tilde-expanded, parent-dir-created) db path from config. Used by
 /// `serve::run` / `shim::run` to derive socket paths alongside the database.
-#[allow(dead_code)] // consumed by Task 3 (serve::run) / Task 4 (shim::run).
 pub(crate) fn resolved_db_path(
     config: &crate::config::Config,
 ) -> Result<std::path::PathBuf, CoreError> {

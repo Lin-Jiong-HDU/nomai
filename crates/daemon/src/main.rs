@@ -15,6 +15,9 @@ mod search_cache;
 // in Tasks 2-4. Silence dead-code until then.
 #[cfg(unix)]
 #[allow(dead_code)]
+mod serve;
+#[cfg(unix)]
+#[allow(dead_code)]
 mod socket;
 
 fn install_panic_hook() {
