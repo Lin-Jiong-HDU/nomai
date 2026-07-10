@@ -21,6 +21,7 @@ use serde_json::Value;
 use nomai_core::{CoreError, EntryService, RebuildResult, SyncResult, VerifyResult};
 
 use crate::daemon::Daemon;
+use crate::handlers::embed::embed_entry_chunks;
 use crate::handlers::entry::blocking;
 use crate::rpc::RpcHandler;
 use nomai_protocol::method::index::{
@@ -52,6 +53,17 @@ impl RpcHandler for Sync {
             daemon.search_cache.bump_generation();
         }
 
+        // reindex_one (run for added/updated entries) clears their
+        // vec_chunk_embeddings via CASCADE but does not re-embed — without
+        // this, an entry that was previously searchable goes silent after a
+        // sync, and newly-synced entries never become searchable (sibling of
+        // issue #1). emb_cache keeps this near-zero API cost for unchanged
+        // bodies. Mirrors entry.create: an embed failure surfaces as a
+        // provider error without rolling back the already-committed reindex.
+        for id in &result.reindexed_ids {
+            embed_entry_chunks(daemon, *id).await?;
+        }
+
         serde_json::to_value(&result).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
 }
@@ -73,11 +85,29 @@ impl RpcHandler for Rebuild {
         // Clone the Arc before spawning so the closure is 'static. The
         // rebuild takes per-entry locks internally during the reindex phase.
         let entries: Arc<EntryService> = daemon.entries.clone();
-        let result: RebuildResult = { blocking(move || entries.rebuild_index()).await?? };
+        let mut result: RebuildResult = { blocking(move || entries.rebuild_index()).await?? };
 
         // Spec 7: rebuild always invalidates — even an empty FS rebuild
         // wipes the derived index, so cached results are stale by definition.
         daemon.search_cache.bump_generation();
+
+        // reindex_one (run per entry by rebuild_index) re-derives chunks + FTS
+        // but does NOT re-embed — rebuild_index phase 1 wiped
+        // vec_chunk_embeddings, so semantic search would return empty without
+        // this pass (issue #1). emb_cache (intentionally untouched by rebuild)
+        // makes this near-zero API cost for unchanged bodies; only genuinely
+        // new chunk texts hit the provider. Embed failures are collected into
+        // `errors` (best-effort, mirroring rebuild_index's own handling) so
+        // one bad entry doesn't abort the rest of the KB.
+        let entry_ids = {
+            let entries = daemon.entries.clone();
+            blocking(move || entries.list_ids()).await??
+        };
+        for id in entry_ids {
+            if let Err(e) = embed_entry_chunks(daemon, id).await {
+                result.errors.push(format!("re-embed entry {id}: {e}"));
+            }
+        }
 
         serde_json::to_value(&result).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }

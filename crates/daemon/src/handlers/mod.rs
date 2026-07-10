@@ -121,6 +121,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebuild_re_embeds_chunks_so_semantic_search_still_hits() {
+        // Regression (issue #1): index.rebuild wipes vec_chunk_embeddings
+        // (service::rebuild_index phase 1) and re-derives chunks + FTS via
+        // reindex_one, but reindex_one never re-embedded — the v1 "background
+        // chunk embedder" it claimed would pick it up was never built. So
+        // search.semantic returned empty for rebuilt entries. The daemon
+        // handler now re-embeds every entry after the rebuild; emb_cache
+        // (untouched by rebuild) keeps it near-zero API cost.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"index": 0, "embedding": vec![0.1_f32; DIM]}]
+            })))
+            .mount(&server)
+            .await;
+        let daemon = setup_daemon(&server).await;
+
+        let create = daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title":"t","blocks":[{"type":"note","text":"Nomai 文化的核心是追求知识"}]}),
+            ))
+            .await;
+        assert!(create.error.is_none(), "{:?}", create.error);
+
+        // Precondition: searchable before rebuild.
+        let pre = daemon
+            .dispatch(req("search.semantic", json!({"query":"文化","limit":5})))
+            .await;
+        assert!(
+            !pre.result.unwrap()["items"].as_array().unwrap().is_empty(),
+            "precondition: entry is searchable before rebuild"
+        );
+
+        let rebuild = daemon.dispatch(req("index.rebuild", json!({}))).await;
+        assert!(rebuild.error.is_none(), "{:?}", rebuild.error);
+
+        // Post-rebuild: chunks were re-derived and embeddings re-written, so
+        // semantic search must still hit. Pre-fix this returned empty.
+        let post = daemon
+            .dispatch(req("search.semantic", json!({"query":"文化","limit":5})))
+            .await;
+        let items = post.result.unwrap()["items"].as_array().unwrap().clone();
+        assert!(
+            !items.is_empty(),
+            "rebuild must re-embed chunks so semantic search still hits after rebuild"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_reindexes_and_re_embeds_entries_picked_up_from_fs() {
+        // Regression (sibling of issue #1): index.sync's reindex_one clears
+        // vec_chunk_embeddings via CASCADE but never re-embedded, so entries
+        // added/updated via a sync were not semantic-searchable. The daemon
+        // handler now re-embeds every reindexed entry (sync_from_fs returns
+        // their ids); emb_cache keeps it near-zero API cost for unchanged
+        // bodies.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"index": 0, "embedding": vec![0.7_f32; DIM]}]
+            })))
+            .mount(&server)
+            .await;
+        let daemon = setup_daemon(&server).await;
+
+        // Drop an orphan .nomai file directly into the content store,
+        // bypassing the service so the SQLite index never sees it until sync.
+        let new_id = ulid::Ulid::new();
+        let doc = nomai_core::NomaiDoc {
+            format_version: 1,
+            id: new_id,
+            title: "Orphan".into(),
+            tags: vec![],
+            attrs: Default::default(),
+            source: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            blocks: vec![nomai_core::NomaiBlock {
+                r#type: nomai_core::BlockType::Note,
+                text: "来自文件系统的孤儿知识\n".into(),
+                attrs: Default::default(),
+            }],
+        };
+        daemon
+            .entries()
+            .content_store()
+            .write_entry(new_id, &doc)
+            .unwrap();
+
+        let sync = daemon.dispatch(req("index.sync", json!({}))).await;
+        assert!(sync.error.is_none(), "{:?}", sync.error);
+
+        let search = daemon
+            .dispatch(req("search.semantic", json!({"query":"孤儿","limit":5})))
+            .await;
+        let items = search.result.unwrap()["items"].as_array().unwrap().clone();
+        assert!(
+            !items.is_empty(),
+            "sync must re-embed reindexed entries so semantic search hits"
+        );
+    }
+
+    #[tokio::test]
     async fn block_append_auto_embeds_new_chunk() {
         // Verify block.append triggers an embed call (not just entry.create).
         // expect(2..): entry.create (1 embed) + block.append (1 embed). If
