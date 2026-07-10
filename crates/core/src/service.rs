@@ -23,6 +23,12 @@ pub struct SyncResult {
     pub removed: u64,
     /// FS entries whose mtime matches the index (no-op).
     pub unchanged: u64,
+    /// ULIDs of entries (re-)indexed via `reindex_one` this pass — the union
+    /// of the `added` and `updated` causes. `index.sync`'s daemon handler
+    /// re-embeds these because `reindex_one` clears their
+    /// `vec_chunk_embeddings` (via CASCADE) but does not re-embed (the v1
+    /// "background chunk embedder" was never implemented).
+    pub reindexed_ids: Vec<Ulid>,
 }
 
 /// Result of `EntryService::rebuild_index`: a wholesale wipe + re-populate
@@ -674,6 +680,10 @@ impl EntryService {
         let mut updated = 0u64;
         let mut unchanged = 0u64;
         let mut removed = 0u64;
+        // ULIDs of entries (re-)indexed this pass. The daemon's index.sync
+        // handler re-embeds these because reindex_one clears their
+        // vec_chunk_embeddings via CASCADE but does not re-embed.
+        let mut reindexed_ids: Vec<Ulid> = Vec::new();
 
         // Phase 1: walk FS, add/update/skip each entry.
         for fs_id in &fs_ids {
@@ -683,6 +693,7 @@ impl EntryService {
                 (None, Some(_)) => {
                     // FS has entry, index doesn't → add.
                     self.reindex_one(*fs_id)?;
+                    reindexed_ids.push(*fs_id);
                     added += 1;
                 }
                 (Some((_, Some(db_mtime_str))), Some(fs_mtime)) => {
@@ -693,6 +704,7 @@ impl EntryService {
                         unchanged += 1;
                     } else {
                         self.reindex_one(*fs_id)?;
+                        reindexed_ids.push(*fs_id);
                         updated += 1;
                     }
                 }
@@ -714,6 +726,7 @@ impl EntryService {
                     // via reindex so future passes can diff correctly. Counts
                     // as updated because the index changed.
                     self.reindex_one(*fs_id)?;
+                    reindexed_ids.push(*fs_id);
                     updated += 1;
                 }
                 (None, None) => {
@@ -743,6 +756,7 @@ impl EntryService {
             updated,
             removed,
             unchanged,
+            reindexed_ids,
         })
     }
 
@@ -1282,6 +1296,36 @@ impl EntryService {
     /// the same store that owns the file path layout (`<root>/entries/<id>/`).
     pub fn content_store(&self) -> &Arc<crate::content_store::ContentStore> {
         &self.content_store
+    }
+
+    /// Return the ULID of every entry row, in storage order. Used by the
+    /// daemon's `index.rebuild` handler to re-embed every chunk after
+    /// `rebuild_index` wipes `vec_chunk_embeddings`: `reindex_one` re-derives
+    /// chunks + FTS but does not re-embed (the v1 "background chunk embedder"
+    /// was never built; 0.2.3 wired in-handler embed for entry.create /
+    /// block.* / batch, rebuild closes the loop).
+    ///
+    /// A row whose id is not a valid ULID indicates index corruption; it is
+    /// surfaced as `CoreError::Storage` (matching `sync_from_fs` / `verify_fs`)
+    /// rather than silently skipped.
+    pub fn list_ids(&self) -> Result<Vec<Ulid>, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id FROM entries")?;
+        let id_strings = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        let mut ids = Vec::with_capacity(id_strings.len());
+        for s in id_strings {
+            let id = s.parse::<Ulid>().map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            ids.push(id);
+        }
+        Ok(ids)
     }
 }
 

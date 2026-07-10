@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`index.rebuild` / `index.sync` now re-embed chunks (#1).** Both RPCs
+  re-derive chunks + FTS via `reindex_one`, which clears
+  `vec_chunk_embeddings` (CASCADE on the entry DELETE) but never re-embedded —
+  it relied on a v1 "background chunk embedder" that was never implemented
+  (0.2.3 wired in-handler embed for `entry.create` / `block.*` / `batch` but
+  missed these two paths). After a rebuild or sync, `search.semantic` returned
+  empty for the affected entries until each was touched again via
+  `entry.create` / `block.update` / `batch`. The handlers now re-embed every
+  (re-)indexed entry; `emb_cache` (untouched by rebuild) keeps this near-zero
+  API cost for unchanged bodies — only genuinely new chunk texts hit the
+  provider. This also closes the latent `index.sync` regression where editing
+  a `.nomai` file and syncing would silently break `search.semantic` for that
+  entry.
+
 ## [0.3.0] - 2026-07-08
 
 ### Added
