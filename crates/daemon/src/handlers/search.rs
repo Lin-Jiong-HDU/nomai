@@ -41,6 +41,22 @@ struct SemanticParams {
     block_type: Option<String>,
 }
 
+/// Map a `FulltextSearchResult` to the wire JSON object. Extracted so the
+/// field set is unit-testable without spinning up a Daemon.
+fn serialize_fulltext_result(r: &nomai_core::FulltextSearchResult) -> serde_json::Value {
+    json!({
+        "entry": r.entry,
+        "score": r.score,
+        "match_count": r.match_count,
+        "matched_block_ids": r.matched_block_ids,
+        "best_match": {
+            "block_id": r.best_match.block_id,
+            "block_type": r.best_match.block_type,
+            "snippet": r.best_match.snippet,
+        }
+    })
+}
+
 pub struct Fulltext;
 #[async_trait]
 impl RpcHandler for Fulltext {
@@ -85,7 +101,7 @@ impl RpcHandler for Fulltext {
                         // format.
                         Ok(items_inner
                             .into_iter()
-                            .map(|r| json!({ "entry": r.entry, "score": r.score }))
+                            .map(|r| serialize_fulltext_result(&r))
                             .collect::<Vec<_>>())
                     }
                 },
@@ -184,5 +200,31 @@ mod descriptor_tests {
     fn semantic_schema_rejects_missing_query() {
         let schema = Semantic.input_schema().unwrap();
         assert!(validate(&schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn fulltext_wire_serializes_new_fields() {
+        // Drive a real fulltext_search result so we don't hand-construct
+        // Entry/Ulid/DateTime — only the wire mapping is under test here.
+        let svc = nomai_core::EntryService::for_test().unwrap();
+        svc.create(nomai_core::CreateEntry {
+            title: "t".into(),
+            blocks: vec![nomai_core::BlockInput {
+                r#type: "note".into(),
+                text: "the setsid call".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+        let results = svc.fulltext_search("setsid", 10, None).unwrap();
+        let v = serialize_fulltext_result(&results[0]);
+        assert!(v.get("entry").is_some());
+        assert!(v["match_count"].as_u64().is_some());
+        assert!(v["matched_block_ids"].is_array());
+        assert_eq!(v["best_match"]["block_type"], "note");
+        assert!(v["best_match"]["snippet"].as_str().unwrap().contains("**setsid**"));
     }
 }
