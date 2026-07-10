@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`search.fulltext` results now carry match evidence (#5).** Each result
+  adds `match_count` (number of matching blocks), `matched_block_ids`
+  (soft-capped at 64), and `best_match { block_id, block_type, snippet }` —
+  a ~120-char window centered on the hit with the matched substring wrapped
+  in markdown `**…**`, with `…` at truncated ends (CJK-safe, char-based).
+  All fields are additive; existing clients are unaffected. This closes the
+  "a correct hit looks like a bug" blind spot behind #4 (where
+  `search.fulltext` always returning the README entry was a misdiagnosis —
+  the entry genuinely contained the tokens; the result just didn't show
+  *why*). `match_count` is the true total even when the id list is capped,
+  because the dedupe step now walks all matching rows instead of breaking
+  at the limit (fixes a latent undercount in the old early-break dedupe).
+
 ### Fixed
 
 - **`index.rebuild` / `index.sync` now re-embed chunks (#1).** Both RPCs
