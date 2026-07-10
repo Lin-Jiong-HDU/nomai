@@ -15,6 +15,7 @@ pub mod model;
 pub mod nomai_format;
 pub mod nomai_format_util;
 pub mod service;
+pub mod snippet;
 pub mod storage;
 
 pub use block_model::{Block, BlockInput, BlockListResult, CreateBlock};
