@@ -680,7 +680,7 @@
       "name": "provider.list"
     },
     {
-      "description": "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Each call is cached per (query, limit, block_type).",
+      "description": "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Score is relative relevance (not a boolean hit marker): higher means stronger match; near-zero means weak match. Each call is cached per (query, limit, block_type).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {

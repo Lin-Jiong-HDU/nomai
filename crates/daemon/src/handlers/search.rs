@@ -64,7 +64,7 @@ impl RpcHandler for Fulltext {
         "search.fulltext"
     }
     fn description(&self) -> &'static str {
-        "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Each call is cached per (query, limit, block_type)."
+        "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Score is relative relevance (not a boolean hit marker): higher means stronger match; near-zero means weak match. Each call is cached per (query, limit, block_type)."
     }
     fn input_schema(&self) -> Option<Value> {
         Some(schemars::schema_for!(FulltextParams).to_value())

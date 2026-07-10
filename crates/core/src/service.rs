@@ -176,6 +176,11 @@ pub struct EntryListResult {
 #[derive(Debug)]
 pub struct FulltextSearchResult {
     pub entry: Entry,
+    /// Relative relevance score, not a boolean hit marker. Higher is stronger.
+    ///
+    /// For FTS (query length >=3), this is the absolute value of SQLite FTS5
+    /// `bm25` for the best matching block in the entry. For short-query LIKE
+    /// fallback, this is `0.0` (no bm25 is available on that path).
     pub score: f32,
     /// Number of blocks in this entry that matched the query (true total;
     /// `matched_block_ids` may be shorter due to the soft cap).
