@@ -225,6 +225,11 @@ mod descriptor_tests {
         assert!(v["match_count"].as_u64().is_some());
         assert!(v["matched_block_ids"].is_array());
         assert_eq!(v["best_match"]["block_type"], "note");
-        assert!(v["best_match"]["snippet"].as_str().unwrap().contains("**setsid**"));
+        assert!(
+            v["best_match"]["snippet"]
+                .as_str()
+                .unwrap()
+                .contains("**setsid**")
+        );
     }
 }

@@ -119,7 +119,10 @@ mod tests {
         let text = "这是一段中文目标词周围还有一些其他字符用于测试窗口截取逻辑";
         let s = extract_snippet(text, "目标词");
         assert!(s.contains("**目标词**"));
-        assert!(!s.contains(char::REPLACEMENT_CHARACTER), "no broken chars: {s}");
+        assert!(
+            !s.contains(char::REPLACEMENT_CHARACTER),
+            "no broken chars: {s}"
+        );
     }
 
     #[test]

@@ -1151,14 +1151,18 @@ impl EntryService {
         block_type: Option<&str>,
     ) -> Result<Vec<FtsRow>, CoreError> {
         let sql = match block_type {
-            Some(_) => "SELECT entry_id, block_id, type, text, bm25(fts_blocks) AS rank
+            Some(_) => {
+                "SELECT entry_id, block_id, type, text, bm25(fts_blocks) AS rank
                         FROM fts_blocks
                         WHERE fts_blocks MATCH ?1 AND fts_blocks.type = ?2
-                        ORDER BY rank",
-            None => "SELECT entry_id, block_id, type, text, bm25(fts_blocks) AS rank
+                        ORDER BY rank"
+            }
+            None => {
+                "SELECT entry_id, block_id, type, text, bm25(fts_blocks) AS rank
                      FROM fts_blocks
                      WHERE fts_blocks MATCH ?1
-                     ORDER BY rank",
+                     ORDER BY rank"
+            }
         };
         let mut stmt = conn.prepare(sql)?;
         let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<FtsRow> {
@@ -1198,12 +1202,16 @@ impl EntryService {
             .collect();
         let pattern = format!("%{escaped}%");
         let sql = match block_type {
-            Some(_) => "SELECT entry_id, id, type, text FROM blocks
+            Some(_) => {
+                "SELECT entry_id, id, type, text FROM blocks
                         WHERE LOWER(text) LIKE LOWER(?1) ESCAPE '\\' AND type = ?2
-                        ORDER BY rowid DESC",
-            None => "SELECT entry_id, id, type, text FROM blocks
+                        ORDER BY rowid DESC"
+            }
+            None => {
+                "SELECT entry_id, id, type, text FROM blocks
                      WHERE LOWER(text) LIKE LOWER(?1) ESCAPE '\\'
-                     ORDER BY rowid DESC",
+                     ORDER BY rowid DESC"
+            }
         };
         let mut stmt = conn.prepare(sql)?;
         let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<FtsRow> {
@@ -1234,8 +1242,7 @@ impl EntryService {
     fn dedupe_hits(rows: Vec<FtsRow>, limit: u32) -> Vec<DedupedHit> {
         const IDS_CAP: usize = 64;
         let mut order: Vec<Ulid> = Vec::new();
-        let mut map: std::collections::HashMap<Ulid, DedupedHit> =
-            std::collections::HashMap::new();
+        let mut map: std::collections::HashMap<Ulid, DedupedHit> = std::collections::HashMap::new();
         for row in rows {
             let Ok(id) = row.entry_id.parse::<Ulid>() else {
                 continue;
