@@ -36,8 +36,8 @@ pub use nomai_format::{
     render as render_nomai,
 };
 pub use service::{
-    CreateEntry, EntryListOrder, EntryListQuery, EntryListResult, EntryService, ExportResult,
-    FulltextSearchResult, RebuildResult, SyncResult, UpdateEntry, VerifyResult,
+    BestMatch, CreateEntry, EntryListOrder, EntryListQuery, EntryListResult, EntryService,
+    ExportResult, FulltextSearchResult, RebuildResult, SyncResult, UpdateEntry, VerifyResult,
 };
 
 #[cfg(test)]

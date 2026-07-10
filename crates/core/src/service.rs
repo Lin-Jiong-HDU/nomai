@@ -177,6 +177,43 @@ pub struct EntryListResult {
 pub struct FulltextSearchResult {
     pub entry: Entry,
     pub score: f32,
+    /// Number of blocks in this entry that matched the query (true total;
+    /// `matched_block_ids` may be shorter due to the soft cap).
+    pub match_count: u32,
+    /// IDs of matching blocks, soft-capped at 64.
+    pub matched_block_ids: Vec<Ulid>,
+    /// Best (highest bm25 / most-recent LIKE) matching block's snippet.
+    pub best_match: BestMatch,
+}
+
+#[derive(Debug)]
+pub struct BestMatch {
+    pub block_id: Ulid,
+    pub block_type: String,
+    pub snippet: String,
+}
+
+/// One matching block row projected from `fts_blocks` / `blocks`. Private
+/// helper for the fulltext data flow (Step 4). Defined at module top level
+/// (Rust does not allow `struct` items inside an `impl` block).
+struct FtsRow {
+    entry_id: String,
+    block_id: String,
+    block_type: String,
+    text: String,
+    rank: f64, // bm25 (neg, more-neg = more relevant); 0.0 on the LIKE path
+}
+
+/// Per-entry aggregated hit. Private helper. Insertion/first-seen order doubles
+/// as best-rank order since rows arrive `ORDER BY rank`.
+struct DedupedHit {
+    entry_id: Ulid,
+    score: f32,
+    match_count: u32,
+    matched_block_ids: Vec<Ulid>,
+    best_block_id: Ulid,
+    best_block_type: String,
+    best_text: String,
 }
 
 impl EntryService {
@@ -1095,66 +1132,63 @@ impl EntryService {
         block_type: Option<&str>,
     ) -> Result<Vec<FulltextSearchResult>, CoreError> {
         let conn = self.conn.lock().unwrap();
-        // Strategy: FTS5's bm25() refuses to evaluate inside aggregates /
-        // subqueries in some SQLite builds ("unable to use function bm25 in
-        // the requested context"). Pull matching (entry_id, rank) pairs via
-        // a direct FTS5 query (or LIKE for short queries), dedupe in Rust
-        // keeping the best rank per entry, then fetch the entry rows.
-        let pairs = if query.chars().count() >= 3 {
-            Self::fts_match_pairs(&conn, query, block_type, limit)?
+        // Pull matching (entry_id, block_id, type, text, rank) rows via a
+        // direct FTS5 query (or LIKE for short queries), aggregate per entry
+        // in `dedupe_hits`, then fetch entry rows + build snippets.
+        let rows = if query.chars().count() >= 3 {
+            Self::fts_match_pairs(&conn, query, block_type)?
         } else {
-            Self::like_match_pairs(&conn, query, block_type, limit)?
+            Self::like_match_pairs(&conn, query, block_type)?
         };
-        Self::fetch_entries_by_ids(&conn, &pairs)
+        let hits = Self::dedupe_hits(rows, limit);
+        Self::build_results(&conn, &hits, query)
     }
 
-    /// FTS5 trigram path (queries >=3 chars): MATCH + bm25, deduped to
-    /// entries keeping the first (best) rank per entry.
+    /// FTS5 trigram path (queries >=3 chars): MATCH + bm25, ordered by rank.
     fn fts_match_pairs(
         conn: &Connection,
         query: &str,
         block_type: Option<&str>,
-        limit: u32,
-    ) -> Result<Vec<(Ulid, f64)>, CoreError> {
+    ) -> Result<Vec<FtsRow>, CoreError> {
         let sql = match block_type {
-            Some(_) => {
-                "SELECT fts_blocks.entry_id, bm25(fts_blocks) AS rank
+            Some(_) => "SELECT entry_id, block_id, type, text, bm25(fts_blocks) AS rank
                         FROM fts_blocks
                         WHERE fts_blocks MATCH ?1 AND fts_blocks.type = ?2
-                        ORDER BY rank"
-            }
-            None => {
-                "SELECT fts_blocks.entry_id, bm25(fts_blocks) AS rank
+                        ORDER BY rank",
+            None => "SELECT entry_id, block_id, type, text, bm25(fts_blocks) AS rank
                      FROM fts_blocks
                      WHERE fts_blocks MATCH ?1
-                     ORDER BY rank"
-            }
+                     ORDER BY rank",
         };
         let mut stmt = conn.prepare(sql)?;
-        let process_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, f64)> {
-            Ok((row.get(0)?, row.get(1)?))
+        let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<FtsRow> {
+            Ok(FtsRow {
+                entry_id: r.get(0)?,
+                block_id: r.get(1)?,
+                block_type: r.get(2)?,
+                text: r.get(3)?,
+                rank: r.get(4)?,
+            })
         };
-        let pairs: Vec<(String, f64)> = match block_type {
+        let rows = match block_type {
             Some(t) => stmt
-                .query_map(params![query, t], process_row)?
+                .query_map(params![query, t], map_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
             None => stmt
-                .query_map(params![query], process_row)?
+                .query_map(params![query], map_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         };
-        Ok(Self::dedupe_pairs(pairs, limit))
+        Ok(rows)
     }
 
     /// LIKE fallback (queries <3 chars): trigram returns empty for them, so
-    /// fall back to an escaped, case-insensitive substring scan. No bm25 —
-    /// ordered by `rowid DESC` (most-recent block first). User input is
-    /// escaped so `\ % _` are matched literally, never as LIKE wildcards.
+    /// fall back to an escaped, case-insensitive substring scan ordered by
+    /// recency (rowid DESC). rank=0.0 (no bm25 on this path).
     fn like_match_pairs(
         conn: &Connection,
         query: &str,
         block_type: Option<&str>,
-        limit: u32,
-    ) -> Result<Vec<(Ulid, f64)>, CoreError> {
+    ) -> Result<Vec<FtsRow>, CoreError> {
         let escaped: String = query
             .chars()
             .flat_map(|c| match c {
@@ -1164,84 +1198,112 @@ impl EntryService {
             .collect();
         let pattern = format!("%{escaped}%");
         let sql = match block_type {
-            Some(_) => {
-                "SELECT entry_id FROM blocks
+            Some(_) => "SELECT entry_id, id, type, text FROM blocks
                         WHERE LOWER(text) LIKE LOWER(?1) ESCAPE '\\' AND type = ?2
-                        ORDER BY rowid DESC"
-            }
-            None => {
-                "SELECT entry_id FROM blocks
+                        ORDER BY rowid DESC",
+            None => "SELECT entry_id, id, type, text FROM blocks
                      WHERE LOWER(text) LIKE LOWER(?1) ESCAPE '\\'
-                     ORDER BY rowid DESC"
-            }
+                     ORDER BY rowid DESC",
         };
         let mut stmt = conn.prepare(sql)?;
-        let process_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, f64)> {
-            // No bm25 on the LIKE path; score 0.0 marks "unranked".
-            Ok((row.get(0)?, 0.0))
+        let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<FtsRow> {
+            Ok(FtsRow {
+                entry_id: r.get(0)?,
+                block_id: r.get(1)?,
+                block_type: r.get(2)?,
+                text: r.get(3)?,
+                rank: 0.0,
+            })
         };
-        let pairs: Vec<(String, f64)> = match block_type {
+        let rows = match block_type {
             Some(t) => stmt
-                .query_map(params![pattern, t], process_row)?
+                .query_map(params![pattern, t], map_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
             None => stmt
-                .query_map(params![pattern], process_row)?
+                .query_map(params![pattern], map_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         };
-        Ok(Self::dedupe_pairs(pairs, limit))
+        Ok(rows)
     }
 
-    /// Fetch full Entry rows for the deduped id list, preserving pair order.
-    /// Skips ids whose entry row has vanished (defensive; should not happen
-    /// given the FK graph, but a vanished entry is not a hard error).
-    fn fetch_entries_by_ids(
+    /// Aggregate `FtsRow`s per entry: count all matches (true total), collect
+    /// up to `IDS_CAP` block ids, and remember the first-seen (best) block.
+    /// Returns entries in best-rank-first order, capped at `limit`. Walks ALL
+    /// rows so match_count is accurate (does NOT early-break like the old
+    /// dedupe_pairs, which dropped post-break matches of already-seen entries).
+    fn dedupe_hits(rows: Vec<FtsRow>, limit: u32) -> Vec<DedupedHit> {
+        const IDS_CAP: usize = 64;
+        let mut order: Vec<Ulid> = Vec::new();
+        let mut map: std::collections::HashMap<Ulid, DedupedHit> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let Ok(id) = row.entry_id.parse::<Ulid>() else {
+                continue;
+            };
+            let Ok(bid) = row.block_id.parse::<Ulid>() else {
+                continue;
+            };
+            let hit = map.entry(id).or_insert_with(|| {
+                order.push(id);
+                DedupedHit {
+                    entry_id: id,
+                    score: row.rank.abs() as f32,
+                    match_count: 0,
+                    matched_block_ids: Vec::new(),
+                    best_block_id: bid,
+                    best_block_type: row.block_type.clone(),
+                    best_text: row.text.clone(),
+                }
+            });
+            hit.match_count += 1;
+            if hit.matched_block_ids.len() < IDS_CAP {
+                hit.matched_block_ids.push(bid);
+            }
+        }
+        order
+            .into_iter()
+            .take(limit as usize)
+            .filter_map(|id| map.remove(&id))
+            .collect()
+    }
+
+    /// Fetch entry rows for the deduped hits and build `FulltextSearchResult`s,
+    /// preserving hit order. Skips vanished entries (defensive; FK graph makes
+    /// this impossible in practice).
+    fn build_results(
         conn: &Connection,
-        pairs: &[(Ulid, f64)],
+        hits: &[DedupedHit],
+        query: &str,
     ) -> Result<Vec<FulltextSearchResult>, CoreError> {
-        if pairs.is_empty() {
+        if hits.is_empty() {
             return Ok(Vec::new());
         }
-        let mut results: Vec<FulltextSearchResult> = Vec::with_capacity(pairs.len());
-        for (id, rank) in pairs {
+        let mut results: Vec<FulltextSearchResult> = Vec::with_capacity(hits.len());
+        for hit in hits {
             let entry = match conn.query_row(
                 "SELECT id, title, tags, attrs, source, created_at, updated_at
                  FROM entries WHERE id = ?1",
-                params![id.to_string()],
+                params![hit.entry_id.to_string()],
                 |row| row_to_entry(row, 0),
             ) {
                 Ok(e) => e,
                 Err(rusqlite::Error::QueryReturnedNoRows) => continue,
                 Err(e) => return Err(CoreError::Storage(e)),
             };
+            let snippet = crate::snippet::extract_snippet(&hit.best_text, query);
             results.push(FulltextSearchResult {
                 entry,
-                score: rank.abs() as f32,
+                score: hit.score,
+                match_count: hit.match_count,
+                matched_block_ids: hit.matched_block_ids.clone(),
+                best_match: BestMatch {
+                    block_id: hit.best_block_id,
+                    block_type: hit.best_block_type.clone(),
+                    snippet,
+                },
             });
         }
         Ok(results)
-    }
-
-    /// Dedupe `(entry_id_str, rank)` pairs by entry, keeping the first
-    /// (best) occurrence, and parse to `Ulid`. Stops after `limit` unique
-    /// entries. ids in `fts_blocks.entry_id` / `blocks.entry_id` are always
-    /// well-formed ULIDs written by the service layer; an unparseable id
-    /// indicates index corruption and is skipped rather than propagated as
-    /// a misleading FromSqlConversionFailure.
-    fn dedupe_pairs(pairs: Vec<(String, f64)>, limit: u32) -> Vec<(Ulid, f64)> {
-        let mut seen: std::collections::HashSet<Ulid> = std::collections::HashSet::new();
-        let mut ordered: Vec<(Ulid, f64)> = Vec::new();
-        for (id_str, rank) in pairs {
-            let Ok(id) = id_str.parse::<Ulid>() else {
-                continue;
-            };
-            if seen.insert(id) {
-                ordered.push((id, rank));
-                if ordered.len() >= limit as usize {
-                    break;
-                }
-            }
-        }
-        ordered
     }
 
     /// Test-only constructor backed by an in-memory SQLite database.
@@ -2058,6 +2120,101 @@ mod tests {
         // Two blocks in one entry both match "keyword" — entry appears once.
         let hits = svc.fulltext_search("keyword", 10, None).unwrap();
         assert_eq!(hits.len(), 1, "FTS path dedupes by entry");
+    }
+
+    #[test]
+    fn fulltext_result_carries_match_evidence() {
+        let svc = EntryService::for_test().unwrap();
+        // Two blocks in one entry both contain "orbit"; a second entry is unrelated.
+        svc.create(CreateEntry {
+            title: "orbits".into(),
+            blocks: vec![
+                crate::block_model::BlockInput {
+                    r#type: "note".into(),
+                    text: "Earth orbit one".into(),
+                    attrs: None,
+                },
+                crate::block_model::BlockInput {
+                    r#type: "claim".into(),
+                    text: "Earth orbit two".into(),
+                    attrs: None,
+                },
+            ],
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+        svc.create(CreateEntry {
+            title: "unrelated".into(),
+            blocks: vec![crate::block_model::BlockInput {
+                r#type: "note".into(),
+                text: "completely different topic".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+
+        let hits = svc.fulltext_search("orbit", 10, None).unwrap();
+        assert_eq!(hits.len(), 1, "only the orbit entry matches");
+        let h = &hits[0];
+        assert_eq!(h.match_count, 2, "both blocks matched: {}", h.match_count);
+        assert_eq!(h.matched_block_ids.len(), 2);
+        assert!(h.best_match.snippet.contains("**orbit**"));
+        assert!(!h.best_match.block_type.is_empty());
+    }
+
+    #[test]
+    fn fulltext_like_path_carries_match_evidence() {
+        let svc = EntryService::for_test().unwrap();
+        svc.create(CreateEntry {
+            title: "short".into(),
+            blocks: vec![crate::block_model::BlockInput {
+                r#type: "note".into(),
+                text: "Rust 入门指南".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+        // "入门" is 2 chars -> LIKE path.
+        let hits = svc.fulltext_search("入门", 10, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        let h = &hits[0];
+        assert_eq!(h.match_count, 1);
+        assert_eq!(h.matched_block_ids.len(), 1);
+        assert!(h.best_match.snippet.contains("**入门**"));
+        assert_eq!(h.score, 0.0);
+    }
+
+    #[test]
+    fn fulltext_match_count_caps_block_ids_but_keeps_true_count() {
+        let svc = EntryService::for_test().unwrap();
+        // 70 blocks all containing "kw" -> match_count=70, ids capped at 64.
+        let blocks: Vec<_> = (0..70)
+            .map(|_| crate::block_model::BlockInput {
+                r#type: "note".into(),
+                text: "kw token".into(),
+                attrs: None,
+            })
+            .collect();
+        svc.create(CreateEntry {
+            title: "many".into(),
+            blocks,
+            tags: None,
+            attrs: None,
+            source: None,
+        })
+        .unwrap();
+        let hits = svc.fulltext_search("token", 10, None).unwrap();
+        let h = &hits[0];
+        assert_eq!(h.match_count, 70, "true count preserved");
+        assert_eq!(h.matched_block_ids.len(), 64, "ids capped at 64");
     }
 
     #[test]
