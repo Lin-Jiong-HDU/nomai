@@ -2195,7 +2195,7 @@ mod tests {
     #[test]
     fn fulltext_match_count_caps_block_ids_but_keeps_true_count() {
         let svc = EntryService::for_test().unwrap();
-        // 70 blocks all containing "kw" -> match_count=70, ids capped at 64.
+        // 70 blocks all containing "token" -> match_count=70, ids capped at 64.
         let blocks: Vec<_> = (0..70)
             .map(|_| crate::block_model::BlockInput {
                 r#type: "note".into(),

@@ -78,6 +78,33 @@ mod tests {
         assert!(s.starts_with('…'), "prefix ellipsis: {s}");
         assert!(s.ends_with('…'), "suffix ellipsis: {s}");
         assert!(s.contains("**target**"));
+        // The hit sits roughly in the center of the snippet window.
+        let idx = s.find("**target**").unwrap();
+        let mid = (s.len() - "**target**".len()) / 2;
+        assert!(
+            (idx as isize - mid as isize).abs() <= 10,
+            "hit should be ~centered: idx={idx}, mid={mid}, s={s}"
+        );
+    }
+
+    #[test]
+    fn ellipsis_hit_near_start_no_leading_ellipsis() {
+        // Hit at index 0: left padding clamps to 0, so no leading ellipsis.
+        let text = format!("target{}", "b".repeat(200));
+        let s = extract_snippet(&text, "target");
+        assert!(!s.starts_with('…'), "no leading ellipsis near start: {s}");
+        assert!(s.ends_with('…'), "trailing ellipsis near start: {s}");
+        assert!(s.contains("**target**"));
+    }
+
+    #[test]
+    fn ellipsis_hit_near_end_no_trailing_ellipsis() {
+        // Hit near the end: right padding clamps, so no trailing ellipsis.
+        let text = format!("{}target", "a".repeat(200));
+        let s = extract_snippet(&text, "target");
+        assert!(s.starts_with('…'), "leading ellipsis near end: {s}");
+        assert!(!s.ends_with('…'), "no trailing ellipsis near end: {s}");
+        assert!(s.contains("**target**"));
     }
 
     #[test]
