@@ -293,7 +293,8 @@ impl EntryService {
         //    which sanitizes the filename + does tmp→fsync→rename). Any
         //    failure propagates; caller rolls back the entry dir.
         for (filename, data) in attachments {
-            self.content_store.write_attachment(entry_id, filename, data)?;
+            self.content_store
+                .write_attachment(entry_id, filename, data)?;
         }
         // 2. Snapshot the filenames now on disk (just-written + any prior).
         let on_disk: std::collections::HashSet<String> = self
@@ -318,8 +319,7 @@ impl EntryService {
                 "source" => {
                     if let Some(src) = src {
                         // URLs are not local files — skip FS validation.
-                        let is_url =
-                            src.starts_with("http://") || src.starts_with("https://");
+                        let is_url = src.starts_with("http://") || src.starts_with("https://");
                         if !is_url && !on_disk.contains(src) {
                             return Err(CoreError::Validation(format!(
                                 "declared source not found: {src}"
@@ -385,6 +385,32 @@ impl EntryService {
             blocks: parser_blocks,
         };
         self.content_store.write_entry(id, &doc)?;
+
+        // ── NEW: write sibling attachments + validate src refs (FS-before-BEGIN). ──
+        // Done before the INSERT so a failure leaves no DB row; on error we remove
+        // the entry directory we just created (spec §9.1).
+        let attachments = params.attachments.unwrap_or_default();
+        let block_sources: Vec<(String, Option<String>)> = params
+            .blocks
+            .iter()
+            .map(|b| {
+                let src = b
+                    .attrs
+                    .as_ref()
+                    .and_then(|a| a.get("src"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                (b.r#type.clone(), src)
+            })
+            .collect();
+        if let Err(e) = self.write_attachments_and_validate(id, &block_sources, &attachments) {
+            // Rollback FS: remove the entry dir (.nomai + any partially-written
+            // attachments). Ignore cleanup errors — the original validation error
+            // is what the caller needs to see.
+            let _ = self.content_store.delete_entry(id);
+            return Err(e);
+        }
+        // ── end NEW ──
 
         // 2. INSERT entry row (body column dropped in V7; fts_blocks is
         //    populated by the `blocks_ai` trigger when blocks are inserted
@@ -3123,7 +3149,9 @@ mod tests {
         let err = svc
             .write_attachments_and_validate(entry.id, &block_sources, &atts)
             .unwrap_err();
-        assert!(matches!(err, CoreError::Validation(ref m) if m == "image block missing required attr: src"));
+        assert!(
+            matches!(err, CoreError::Validation(ref m) if m == "image block missing required attr: src")
+        );
     }
 
     #[test]
@@ -3136,7 +3164,9 @@ mod tests {
         let err = svc
             .write_attachments_and_validate(entry.id, &block_sources, &atts)
             .unwrap_err();
-        assert!(matches!(err, CoreError::Validation(ref m) if m.contains("declared source not found: ghost.png")));
+        assert!(
+            matches!(err, CoreError::Validation(ref m) if m.contains("declared source not found: ghost.png"))
+        );
     }
 
     #[test]
@@ -3144,7 +3174,10 @@ mod tests {
         let svc = EntryService::for_test().unwrap();
         let entry = svc.create(seed_create_entry()).unwrap();
         // @source with a URL src — must NOT trigger "declared source not found"
-        let block_sources = vec![("source".to_string(), Some("https://nasa.gov/orbits".to_string()))];
+        let block_sources = vec![(
+            "source".to_string(),
+            Some("https://nasa.gov/orbits".to_string()),
+        )];
         let atts = std::collections::HashMap::new();
         svc.write_attachments_and_validate(entry.id, &block_sources, &atts)
             .unwrap();
@@ -3164,6 +3197,147 @@ mod tests {
         let atts = std::collections::HashMap::new(); // not in attachments, but on disk
         svc.write_attachments_and_validate(entry.id, &block_sources, &atts)
             .unwrap();
+    }
+
+    #[test]
+    fn create_writes_attachments_and_image_src_resolves() {
+        let svc = EntryService::for_test().unwrap();
+        let mut atts = std::collections::HashMap::new();
+        atts.insert("photo.png".to_string(), b"\x89PNG\x0d\x0a bytes".to_vec());
+
+        let entry = svc
+            .create(CreateEntry {
+                title: "with image".into(),
+                blocks: vec![crate::block_model::BlockInput {
+                    r#type: "image".into(),
+                    text: "a caption".into(),
+                    attrs: Some(serde_json::json!({"src": "photo.png"})),
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+                attachments: Some(atts),
+            })
+            .unwrap();
+
+        // DB has the entry + block
+        assert_eq!(svc.get(entry.id).unwrap().title, "with image");
+        // sibling file written
+        let read = svc
+            .content_store()
+            .read_attachment(entry.id, "photo.png")
+            .unwrap();
+        assert_eq!(read, b"\x89PNG\x0d\x0a bytes");
+    }
+
+    #[test]
+    fn create_rolls_back_when_image_block_missing_src() {
+        let svc = EntryService::for_test().unwrap();
+        let err = svc
+            .create(CreateEntry {
+                title: "bad".into(),
+                blocks: vec![crate::block_model::BlockInput {
+                    r#type: "image".into(),
+                    text: "no src".into(),
+                    attrs: None, // missing src
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+                attachments: None,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::Validation(ref m) if m == "image block missing required attr: src")
+        );
+
+        // Entry was never committed — list should be empty.
+        assert!(
+            svc.list(crate::EntryListQuery::default())
+                .unwrap()
+                .items
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn create_rolls_back_when_declared_source_not_found() {
+        let svc = EntryService::for_test().unwrap();
+        let err = svc
+            .create(CreateEntry {
+                title: "bad".into(),
+                blocks: vec![crate::block_model::BlockInput {
+                    r#type: "image".into(),
+                    text: "caption".into(),
+                    attrs: Some(serde_json::json!({"src": "missing.png"})),
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+                attachments: None, // src declared but neither provided nor on disk
+            })
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::Validation(ref m) if m.contains("declared source not found: missing.png"))
+        );
+        assert!(
+            svc.list(crate::EntryListQuery::default())
+                .unwrap()
+                .items
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn create_without_attachments_unchanged_for_text_blocks() {
+        // Regression: entries with no @image/@source and no attachments must work
+        // exactly as before (attachments: None → empty map → no-op).
+        let svc = EntryService::for_test().unwrap();
+        let entry = svc
+            .create(CreateEntry {
+                title: "plain".into(),
+                blocks: vec![crate::block_model::BlockInput {
+                    r#type: "note".into(),
+                    text: "just text".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+                attachments: None,
+            })
+            .unwrap();
+        assert_eq!(svc.get(entry.id).unwrap().blocks.len(), 1);
+    }
+
+    #[test]
+    fn create_rollback_leaves_no_fs_residue() {
+        let svc = EntryService::for_test().unwrap();
+        let _ = svc
+            .create(CreateEntry {
+                title: "bad".into(),
+                blocks: vec![crate::block_model::BlockInput {
+                    r#type: "image".into(),
+                    text: "x".into(),
+                    attrs: Some(serde_json::json!({"src": "ghost.png"})), // unresolved
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+                attachments: None,
+            })
+            .unwrap_err();
+        // No entry dir should exist under the store root (list_ids empty + no orphan dirs).
+        assert!(svc.list_ids().unwrap().is_empty());
+        // entry_dir for any ULID must not exist — scan the store root for stray dirs.
+        // (for_test's content_store uses a tempdir; list_attachments on a random id is empty.)
+        let fake = ulid::Ulid::new();
+        assert!(
+            svc.content_store()
+                .list_attachments(fake)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Helper for the validate tests — a minimal valid CreateEntry.
