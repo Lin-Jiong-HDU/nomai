@@ -16,6 +16,24 @@ use nomai_providers::{
 use crate::config::Config;
 use crate::rpc::RpcHandler;
 
+/// DI seam over the accept syscall so the serve loop's transient-error
+/// recovery is testable. The real impl wraps `UnixListener`; tests inject a
+/// scripted sequence to assert the loop survives `accept` errors (EMFILE /
+/// ENOMEM / ECONNABORTED…) instead of tearing the resident daemon down.
+#[cfg(unix)]
+#[async_trait::async_trait]
+pub trait Accept: Send {
+    async fn accept(&mut self) -> std::io::Result<tokio::net::UnixStream>;
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl Accept for tokio::net::UnixListener {
+    async fn accept(&mut self) -> std::io::Result<tokio::net::UnixStream> {
+        tokio::net::UnixListener::accept(self).await.map(|(s, _)| s)
+    }
+}
+
 pub struct Daemon {
     pub(crate) entries: Arc<EntryService>,
     pub(crate) links: Arc<LinkService>,
@@ -339,9 +357,9 @@ impl Daemon {
     /// either (a) `idle_timeout` elapses with zero active connections, or
     /// (b) SIGTERM / SIGINT arrives. Spec §5.
     #[cfg(unix)]
-    pub async fn run_serve(
+    pub async fn run_serve<L: Accept>(
         self,
-        listener: tokio::net::UnixListener,
+        mut listener: L,
         idle_timeout: std::time::Duration,
     ) -> Result<(), CoreError> {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -376,8 +394,19 @@ impl Daemon {
                 biased;
                 _ = shutdown_rx.recv() => break,
                 res = listener.accept() => {
-                    let (stream, _addr) =
-                        res.map_err(|e| CoreError::Config(format!("accept: {e}")))?;
+                    let stream = match res {
+                        Ok(s) => s,
+                        Err(e) => {
+                            // Transient accept errors (EMFILE / ENOMEM /
+                            // ECONNABORTED…) must not tear down the resident
+                            // daemon — a single kernel resource shortage would
+                            // force every client to reconnect (shim respawn is
+                            // the only self-heal today). Log and retry; only
+                            // shutdown / idle break the loop.
+                            eprintln!("nomai-daemon: accept error, continuing: {e}");
+                            continue;
+                        }
+                    };
                     active.fetch_add(1, Ordering::SeqCst);
                     let daemon_c = Arc::clone(&daemon);
                     let active_c = Arc::clone(&active);
@@ -758,6 +787,90 @@ mod tests {
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         serde_json::from_str(line.trim()).unwrap()
+    }
+
+    /// Scripted accept source for run_serve's transient-error recovery test.
+    /// Pops a pre-loaded sequence of accept results; once empty, parks forever
+    /// so the serve loop's idle/shutdown arms win the select (no busy-loop).
+    struct ScriptedListener {
+        items:
+            std::sync::Mutex<std::collections::VecDeque<std::io::Result<tokio::net::UnixStream>>>,
+    }
+
+    impl ScriptedListener {
+        fn push_err(&mut self, e: std::io::Error) {
+            self.items.lock().unwrap().push_back(Err(e));
+        }
+        fn push_ok(&mut self, s: tokio::net::UnixStream) {
+            self.items.lock().unwrap().push_back(Ok(s));
+        }
+    }
+
+    impl Default for ScriptedListener {
+        fn default() -> Self {
+            Self {
+                items: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl super::Accept for ScriptedListener {
+        async fn accept(&mut self) -> std::io::Result<tokio::net::UnixStream> {
+            // Bind to a local so the MutexGuard drops at the statement's end —
+            // a guard held across the `.await` below is !Send and would make
+            // this future unspawnable.
+            let next = self.items.lock().unwrap().pop_front();
+            match next {
+                Some(r) => r,
+                None => {
+                    // Exhausted: park forever so idle/shutdown arms win the
+                    // select instead of busy-looping on repeated errors.
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_serve_continues_after_transient_accept_error() {
+        // First accept() returns a transient EMFILE (kernel out of fds/memory).
+        // Pre-fix this tore the resident daemon down via `?`; post-fix the loop
+        // logs and continues, so the next accept's stream is served normally.
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let mut scripted = ScriptedListener::default();
+        scripted.push_err(std::io::Error::from_raw_os_error(libc::EMFILE));
+        scripted.push_ok(server);
+        let daemon = null_daemon().await;
+
+        let serve_task = tokio::spawn(async move {
+            daemon
+                .run_serve(scripted, std::time::Duration::from_secs(30))
+                .await
+                .unwrap();
+        });
+
+        // Drive the stream that should be served *despite* the earlier error.
+        let (cr, mut cw) = client.into_split();
+        cw.write_all(req_line(1, "entry.list").as_bytes())
+            .await
+            .unwrap();
+        cw.write_all(b"\n").await.unwrap();
+        let mut reader = tokio::io::BufReader::new(cr);
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            reader.read_line(&mut line),
+        )
+        .await
+        .expect("timed out: daemon did not serve the request")
+        .expect("EOF: daemon exited on transient accept error instead of continuing");
+        let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(v["id"], 1);
+        assert!(v.get("result").is_some());
+
+        serve_task.abort();
     }
 
     #[tokio::test]

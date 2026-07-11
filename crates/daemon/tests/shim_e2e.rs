@@ -57,8 +57,25 @@ fn shim_serves_a_readonly_rpc_via_resident_daemon() {
         .spawn()
         .expect("spawn shim");
 
-    // Give the shim a moment to bring up the resident daemon.
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Wait for the resident daemon to be accepting on its socket — poll
+    // instead of a fixed sleep so we proceed the instant it's ready (and fail
+    // loudly if it never comes up), removing the flake risk of a blind delay.
+    // The probe stream is held for the whole test so the daemon always sees an
+    // active connection and can't idle out (idle_timeout_secs = 2) before we
+    // drive the shim.
+    let sock = dir.path().join("run").join("nomai.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let _probe = loop {
+        match std::os::unix::net::UnixStream::connect(&sock) {
+            Ok(s) => break s,
+            Err(_) => {
+                if std::time::Instant::now() > deadline {
+                    panic!("resident daemon socket never came up at {sock:?}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    };
 
     let mut stdin = shim.stdin.take().unwrap();
     // entry.list is read-only — no embedding call.
@@ -75,13 +92,15 @@ fn shim_serves_a_readonly_rpc_via_resident_daemon() {
     reader.read_line(&mut line).expect("read response");
     let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
     assert_eq!(v["id"], 1);
-    assert!(v.get("result").is_some() || v.get("error").is_some());
+    // Strong assertion: entry.list is read-only and must succeed — accepting
+    // an `error` here (the old weak `result || error` form) would mask a
+    // regression in the resident-daemon serve path.
+    assert!(v.get("result").is_some(), "entry.list must succeed: {v}");
 
-    // Confirm the resident-daemon path was taken (not the in-process fallback):
-    // a live `nomai.sock` next to the db means the spawned `--serve` child
-    // bound the socket and is serving us over it.
-    let sock = dir.path().join("run").join("nomai.sock");
-    assert!(sock.exists(), "resident daemon socket missing at {sock:?}");
+    // The poll-connect above already proved the resident-daemon path was taken
+    // (not the in-process fallback): the spawned `--serve` child bound the
+    // socket and accepted our probe. A separate `sock.exists()` check would be
+    // strictly weaker and redundant.
 
     drop(stdin); // → shim exits → resident daemon idles out (2s).
     let _ = shim.wait();

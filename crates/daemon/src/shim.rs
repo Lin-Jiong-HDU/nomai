@@ -91,13 +91,19 @@ where
     use tokio::io::AsyncWriteExt;
     let (mut sock_read, mut sock_write) = stream.into_split();
     // stdin → socket; on EOF, shut the write half so the daemon sees EOF.
+    // A copy error here (e.g. the daemon RSTs mid-stream) is non-fatal — the
+    // other pump still drains — but is logged so the shim never exits silent.
     let to_socket = async {
-        let _ = tokio::io::copy(&mut stdin, &mut sock_write).await;
+        if let Err(e) = tokio::io::copy(&mut stdin, &mut sock_write).await {
+            eprintln!("nomai-shim: bridge stdin→socket copy error: {e}");
+        }
         let _ = sock_write.shutdown().await;
     };
     // socket → stdout (drains until the daemon closes its write half).
     let from_socket = async {
-        let _ = tokio::io::copy(&mut sock_read, &mut stdout).await;
+        if let Err(e) = tokio::io::copy(&mut sock_read, &mut stdout).await {
+            eprintln!("nomai-shim: bridge socket→stdout copy error: {e}");
+        }
     };
     let _ = tokio::join!(to_socket, from_socket);
     Ok(())
@@ -208,5 +214,51 @@ mod tests {
         drop(stdin_w);
         drop(stdout_r);
         let _ = bridge_task.await;
+    }
+
+    /// An `AsyncRead` whose every `poll_read` fails — stands in for a stdio
+    /// half whose underlying copy blows up (e.g. the daemon RSTs mid-stream).
+    struct ErrorReader;
+    impl tokio::io::AsyncRead for ErrorReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::other("stdin copy boom")))
+        }
+    }
+
+    /// Contract guard for issue #3 item ②: a copy error in ONE direction must
+    /// not propagate, panic, or starve the other direction — `bridge` still
+    /// drains the daemon's response and returns Ok. (The accompanying
+    /// `eprintln!` diagnostic is a stderr side-effect this suite can't capture;
+    /// the error *isolation* is the testable contract.)
+    #[tokio::test]
+    async fn bridge_keeps_draining_socket_when_stdin_copy_errors() {
+        let (a, b) = tokio::net::UnixStream::pair().unwrap();
+        let (stdout_w, mut stdout_r) = tokio::io::duplex(64);
+
+        let bridge_task = tokio::spawn(bridge(ErrorReader, stdout_w, a));
+
+        // Peer (daemon side): emit a response, then close → from_socket EOFs.
+        let peer = tokio::spawn(async move {
+            let (_, mut write_half) = b.into_split();
+            write_half.write_all(b"response\n").await.unwrap();
+            write_half.flush().await.unwrap();
+        });
+
+        let mut got = String::new();
+        let mut sr = BufReader::new(&mut stdout_r);
+        sr.read_line(&mut got).await.unwrap();
+        assert_eq!(got, "response\n");
+
+        peer.await.unwrap();
+        drop(stdout_r);
+        let outcome = bridge_task.await.unwrap();
+        assert!(
+            outcome.is_ok(),
+            "bridge must not propagate copy errors: {outcome:?}"
+        );
     }
 }

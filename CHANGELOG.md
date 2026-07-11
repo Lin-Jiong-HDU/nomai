@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-11
+
 ### Added
 
 - **`search.fulltext` results now carry match evidence (#5).** Each result
@@ -23,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at the limit (fixes a latent undercount in the old early-break dedupe).
 
 ### Fixed
+
+- **Resident daemon no longer exits on transient `accept` errors (#3).**
+  `serve`'s accept loop treated any `accept()` failure as fatal, so a single
+  kernel resource shortage (EMFILE/ENOMEM) tore down the resident daemon and
+  forced every client to reconnect (the shim respawn was the only self-heal).
+  The loop now logs and retries on `accept` errors, breaking only on shutdown
+  or idle. Also from #3: `shim::bridge` no longer swallows `io::copy` errors
+  silently — a mid-response daemon RST now leaves a diagnostic on stderr
+  instead of an unexplained shim exit; and the e2e shim smoke test replaces
+  its fixed 500 ms bring-up sleep with a poll-connect-until-ready loop plus a
+  strict `result` assertion, removing flake risk and a weak `result || error`
+  form that could mask regressions.
 
 - **`index.rebuild` / `index.sync` now re-embed chunks (#1).** Both RPCs
   re-derive chunks + FTS via `reindex_one`, which clears
@@ -238,7 +252,9 @@ empty `.nomai` files. To regenerate from current state:
 - No built-in sync (the `events` primitive is the substrate; build on top).
 - No CLI subcommands — every operation is an RPC over stdio.
 
-[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Lin-Jiong-HDU/nomai/releases/tag/v0.2.1
