@@ -22,7 +22,7 @@ pub use block_model::{Block, BlockInput, BlockListResult, CreateBlock};
 pub use block_service::BlockService;
 pub use chunk_model::{Chunk, ChunkListResult, ChunkSearchResult, DimReconciliation};
 pub use chunk_service::ChunkService;
-pub use content_store::ContentStore;
+pub use content_store::{AttachmentMeta, ContentStore};
 pub use error::CoreError;
 pub use event_model::{Event, EventListOrder, ListEventsQuery, ListEventsResult, PurgeQuery};
 pub use event_service::EventService;

@@ -26,6 +26,16 @@ pub struct ContentStore {
     _cleanup: Option<tempfile::TempDir>,
 }
 
+/// Metadata for one sibling attachment file. Returned by `list_attachments`.
+/// Not stored in SQLite — derived from FS on each call (spec §11.1: no
+/// attachment manifest table).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AttachmentMeta {
+    pub filename: String,
+    pub size: u64,
+    pub modified: chrono::DateTime<chrono::Utc>,
+}
+
 impl ContentStore {
     /// Create a store rooted at `root`. The directory need not exist yet;
     /// callers should ensure `root` is writable when invoking write methods.
@@ -136,6 +146,78 @@ impl ContentStore {
         let mtime = metadata.modified().ok()?;
         Some(chrono::DateTime::<chrono::Utc>::from(mtime))
     }
+
+    /// Write `data` as a sibling attachment file `filename` under the entry
+    /// directory. Overwrites atomically if the file exists (tmp→rename).
+    /// `filename` is validated by `sanitize_attachment_filename`.
+    pub fn write_attachment(
+        &self,
+        entry_id: Ulid,
+        filename: &str,
+        data: &[u8],
+    ) -> Result<(), CoreError> {
+        let safe = sanitize_attachment_filename(filename)?;
+        let path = self.entry_dir(entry_id).join(&safe);
+        atomic_write_bytes(&path, data)
+    }
+
+    /// Read a sibling attachment file. Returns `Validation("attachment not
+    /// found: <name>")` (NOT `NotFound` — that variant carries an entry ULID)
+    /// when the file is absent.
+    pub fn read_attachment(&self, entry_id: Ulid, filename: &str) -> Result<Vec<u8>, CoreError> {
+        let safe = sanitize_attachment_filename(filename)?;
+        let path = self.entry_dir(entry_id).join(&safe);
+        std::fs::read(&path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                CoreError::Validation(format!("attachment not found: {filename}"))
+            } else {
+                CoreError::Io(e)
+            }
+        })
+    }
+
+    /// List sibling attachment files under the entry directory, excluding
+    /// `entry.nomai` itself. Returns empty `Vec` if the entry directory does
+    /// not exist yet (not an error). Sorted by filename for stable output.
+    pub fn list_attachments(&self, entry_id: Ulid) -> Result<Vec<AttachmentMeta>, CoreError> {
+        let dir = self.entry_dir(entry_id);
+        let mut out = Vec::new();
+        match std::fs::read_dir(&dir) {
+            Ok(rd) => {
+                for entry in rd.flatten() {
+                    let name = entry.file_name();
+                    let name_str = match name.to_str() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    if name_str == "entry.nomai" {
+                        continue;
+                    }
+                    if !entry
+                        .file_type()
+                        .map(|t| t.is_file())
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let meta = entry.metadata()?;
+                    let modified = meta
+                        .modified()
+                        .map(chrono::DateTime::<chrono::Utc>::from)
+                        .unwrap_or_else(|_| chrono::Utc::now());
+                    out.push(AttachmentMeta {
+                        filename: name_str.to_string(),
+                        size: meta.len(),
+                        modified,
+                    });
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(CoreError::Io(e)),
+        }
+        out.sort_by(|a, b| a.filename.cmp(&b.filename));
+        Ok(out)
+    }
 }
 
 /// Atomically write `content` to `path`. Writes to `<path>.tmp`, fsyncs, then
@@ -160,6 +242,59 @@ pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), CoreError> 
 
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Atomically write `data` (raw bytes) to `path`. Same tmp→fsync→rename
+/// semantics as `atomic_write`, but for binary content. The tmp name is
+/// hand-computed (`<name>.tmp`) because `Path::with_extension` mangles
+/// multi-dot (e.g. `sunset.png` → `sunset.tmp`) and dotless filenames.
+pub(crate) fn atomic_write_bytes(path: &Path, data: &[u8]) -> Result<(), CoreError> {
+    use std::fs::{self, File};
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = {
+        let mut name = path
+            .file_name()
+            .ok_or_else(|| CoreError::Validation(format!("unsafe attachment path: {}", path.display())))?
+            .to_os_string();
+        name.push(".tmp");
+        path.with_file_name(name)
+    };
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Validate an attachment filename is a single safe path segment. Rejects
+/// empty, absolute paths, `~`, path separators (`/`, `\`), `.`/`..`, NUL,
+/// and Windows-reserved chars (`: < > * ? | "`). This is the only line of
+/// defense against path traversal — `entry_id` is a ULID (safe), but
+/// `filename` comes from RPC callers.
+fn sanitize_attachment_filename(filename: &str) -> Result<String, CoreError> {
+    let bad = filename.is_empty()
+        || filename.starts_with('/')
+        || filename.starts_with('~')
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename == "."
+        || filename == ".."
+        || filename.contains('\0')
+        || filename
+            .chars()
+            .any(|c| matches!(c, ':' | '<' | '>' | '*' | '?' | '|' | '"'));
+    if bad {
+        return Err(CoreError::Validation(format!(
+            "unsafe attachment filename: {filename}"
+        )));
+    }
+    Ok(filename.to_string())
 }
 
 #[cfg(test)]
@@ -349,5 +484,90 @@ mod tests {
         let store = ContentStore::new(tmp.path().to_path_buf());
         let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
         assert!(store.entry_mtime(id).is_none());
+    }
+
+    #[test]
+    fn attachment_write_then_read_roundtrips_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        // entry dir must exist for attachment writes — create via write_entry first
+        let doc = sample_doc();
+        store.write_entry(id, &doc).unwrap();
+
+        let data = b"\x89PNG\r\n\x1a\nfake-png-bytes\xff\x00\x7f";
+        store.write_attachment(id, "sunset.png", data).unwrap();
+
+        let got = store.read_attachment(id, "sunset.png").unwrap();
+        assert_eq!(got, data);
+    }
+
+    #[test]
+    fn list_attachments_excludes_nomai_and_sorts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        store.write_entry(id, &sample_doc()).unwrap();
+
+        store.write_attachment(id, "zebra.png", b"z").unwrap();
+        store.write_attachment(id, "alpha.pdf", b"a").unwrap();
+
+        let list = store.list_attachments(id).unwrap();
+        let names: Vec<&str> = list.iter().map(|m| m.filename.as_str()).collect();
+        assert_eq!(names, vec!["alpha.pdf", "zebra.png"], "sorted, no entry.nomai");
+        assert!(list.iter().all(|m| m.size >= 1));
+    }
+
+    #[test]
+    fn list_attachments_missing_entry_dir_is_empty_not_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        // no write_entry — dir absent
+        let list = store.list_attachments(id).unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn attachment_filename_traversal_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        store.write_entry(id, &sample_doc()).unwrap();
+
+        for bad in ["../evil", "/etc/passwd", "~/secret", "a/b", "a\\b", ".", "..", "", "a:b"] {
+            let err = store.write_attachment(id, bad, b"x").unwrap_err();
+            assert!(
+                matches!(err, CoreError::Validation(ref m) if m.contains("unsafe attachment filename")),
+                "expected Validation for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_read_missing_file_is_validation_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        store.write_entry(id, &sample_doc()).unwrap();
+
+        let err = store.read_attachment(id, "nope.png").unwrap_err();
+        assert!(
+            matches!(err, CoreError::Validation(ref m) if m.contains("attachment not found")),
+            "expected Validation('attachment not found'), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn attachment_overwrite_replaces_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        store.write_entry(id, &sample_doc()).unwrap();
+
+        store.write_attachment(id, "f.bin", b"v1").unwrap();
+        store.write_attachment(id, "f.bin", b"\x00\x01\x02\xff").unwrap();
+        let got = store.read_attachment(id, "f.bin").unwrap();
+        assert_eq!(got, b"\x00\x01\x02\xff", "overwrite wins, binary-safe");
     }
 }
