@@ -80,6 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tags: None,
         attrs: None,
         source: None,
+        attachments: None,
     })?;
     entries.create(nomai_core::CreateEntry {
         title: "Second".into(),
@@ -91,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tags: None,
         attrs: None,
         source: None,
+        attachments: None,
     })?;
 
     // 4. Build Daemon via from_services (no config.toml needed)

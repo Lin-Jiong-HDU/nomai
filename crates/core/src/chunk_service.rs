@@ -307,6 +307,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
         let blocks = crate::BlockService::new(conn.clone(), 1024).unwrap();
@@ -429,6 +430,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
         let b = entries
@@ -442,6 +444,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
         let blocks = crate::BlockService::new(conn.clone(), 1024).unwrap();
@@ -735,6 +738,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
         let b = entries
@@ -748,6 +752,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
         let blocks = crate::BlockService::new(conn.clone(), 1024).unwrap();

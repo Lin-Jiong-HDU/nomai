@@ -54,6 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tags: Some(vec!["astronomy".into()]),
         attrs: None,
         source: None,
+        attachments: None,
     })?;
     println!(
         "Created entry {} with {} block(s):",

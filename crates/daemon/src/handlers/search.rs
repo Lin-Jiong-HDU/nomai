@@ -217,6 +217,7 @@ mod descriptor_tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
         let results = svc.fulltext_search("setsid", 10, None).unwrap();

@@ -99,6 +99,12 @@ pub struct CreateEntry {
     pub attrs: Option<Value>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Sibling attachment files (bytes) to write under the entry directory,
+    /// keyed by filename. Referenced by `@image`/`@source` block `src` attrs.
+    /// base64 → bytes decoding happens at the daemon layer (Plan 3); core
+    /// only handles raw bytes.
+    #[serde(default)]
+    pub attachments: Option<std::collections::HashMap<String, Vec<u8>>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -263,6 +269,68 @@ impl EntryService {
                 Err(e)
             }
         }
+    }
+
+    /// Write sibling attachment files and validate every `@image`/`@source`
+    /// block's `src` refers to a file that exists (just-written via `attachments`,
+    /// or already on disk). Called from the FS-before-BEGIN write path — on
+    /// failure the caller MUST roll back the entry directory (e.g. via
+    /// `ContentStore::delete_entry`).
+    ///
+    /// `block_sources`: `(block_type, src_attr_value)` per block to validate.
+    /// Only `@image` and `@source` blocks are checked:
+    /// - `@image` requires `src` (a local sibling filename — never a URL); missing
+    ///   or unresolved → `Validation`.
+    /// - `@source`'s `src` may be a URL (`http://`/`https://`) — URLs are skipped;
+    ///   local filenames are validated like `@image`.
+    pub fn write_attachments_and_validate(
+        &self,
+        entry_id: ulid::Ulid,
+        block_sources: &[(String, Option<String>)],
+        attachments: &std::collections::HashMap<String, Vec<u8>>,
+    ) -> Result<(), CoreError> {
+        // 1. Write all attachments (each via ContentStore::write_attachment,
+        //    which sanitizes the filename + does tmp→fsync→rename). Any
+        //    failure propagates; caller rolls back the entry dir.
+        for (filename, data) in attachments {
+            self.content_store.write_attachment(entry_id, filename, data)?;
+        }
+        // 2. Snapshot the filenames now on disk (just-written + any prior).
+        let on_disk: std::collections::HashSet<String> = self
+            .content_store
+            .list_attachments(entry_id)?
+            .into_iter()
+            .map(|m| m.filename)
+            .collect();
+        // 3. Validate each block's src.
+        for (block_type, src) in block_sources {
+            match block_type.as_str() {
+                "image" => {
+                    let src = src.as_deref().ok_or_else(|| {
+                        CoreError::Validation("image block missing required attr: src".into())
+                    })?;
+                    if !on_disk.contains(src) {
+                        return Err(CoreError::Validation(format!(
+                            "declared source not found: {src}"
+                        )));
+                    }
+                }
+                "source" => {
+                    if let Some(src) = src {
+                        // URLs are not local files — skip FS validation.
+                        let is_url =
+                            src.starts_with("http://") || src.starts_with("https://");
+                        if !is_url && !on_disk.contains(src) {
+                            return Err(CoreError::Validation(format!(
+                                "declared source not found: {src}"
+                            )));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Execute create within an existing transaction. Caller controls BEGIN/COMMIT.
@@ -1543,6 +1611,7 @@ mod tests {
                 tags: Some(vec!["a".into(), "b".into()]),
                 attrs: Some(json!({"k": "v"})),
                 source: Some("test".into()),
+                attachments: None,
             })
             .unwrap();
         let fetched = svc.get(created.id).unwrap();
@@ -1559,6 +1628,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
         assert_eq!(created.attrs, json!({}));
@@ -1576,6 +1646,7 @@ mod tests {
                 tags: None,
                 attrs: Some(json!([1, 2, 3])),
                 source: None,
+                attachments: None,
             })
             .unwrap_err();
         assert!(matches!(err, CoreError::Validation(_)));
@@ -1591,6 +1662,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap_err();
         assert!(matches!(err, CoreError::Validation(_)));
@@ -1611,6 +1683,7 @@ mod tests {
             tags: Some(tags.into_iter().map(String::from).collect()),
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap()
     }
@@ -1655,6 +1728,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: Some("orig".into()),
+                attachments: None,
             })
             .unwrap();
         let updated = svc
@@ -1784,6 +1858,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
         }
@@ -1817,6 +1892,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
         }
@@ -1847,6 +1923,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
         }
@@ -1887,6 +1964,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
         svc.create(CreateEntry {
@@ -1895,6 +1973,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
 
@@ -1925,6 +2004,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
         let id = e.id;
@@ -1959,6 +2039,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
 
@@ -1994,6 +2075,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
         let hits = svc.fulltext_search("Nomai 文化", 10, None).unwrap();
@@ -2013,6 +2095,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
         // "入门" is 2 chars — trigram returns empty; LIKE must catch it.
@@ -2033,6 +2116,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
         let hits = svc.fulltext_search("Rust", 10, None).unwrap();
@@ -2059,6 +2143,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
         // >=3 char path with block_type filter: "keyword" is in the claim block.
@@ -2086,6 +2171,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
         svc.create(CreateEntry {
@@ -2098,6 +2184,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
         // "0%" is 2 chars → LIKE path. With % escaped, only the entry
@@ -2127,6 +2214,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
         // Two blocks in one entry both match "keyword" — entry appears once.
@@ -2155,6 +2243,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
         svc.create(CreateEntry {
@@ -2167,6 +2256,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
 
@@ -2192,6 +2282,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
         // "入门" is 2 chars -> LIKE path.
@@ -2221,6 +2312,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
         let hits = svc.fulltext_search("token", 10, None).unwrap();
@@ -2249,6 +2341,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap();
 
@@ -2293,6 +2386,7 @@ mod tests {
                 tags: Some(vec!["a".into()]),
                 attrs: Some(serde_json::json!({"k": "v"})),
                 source: Some("test".into()),
+                attachments: None,
             })
             .unwrap();
 
@@ -2329,6 +2423,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
 
@@ -2373,6 +2468,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
 
@@ -2409,6 +2505,7 @@ mod tests {
                     tags: None,
                     attrs: None,
                     source: None,
+                    attachments: None,
                 },
             )
             .unwrap();
@@ -2436,6 +2533,7 @@ mod tests {
                     tags: None,
                     attrs: None,
                     source: None,
+                    attachments: None,
                 },
             )
             .unwrap();
@@ -2463,6 +2561,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
 
@@ -2499,6 +2598,7 @@ mod tests {
                 tags: Some(vec!["x".into()]),
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
 
@@ -2519,6 +2619,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
         assert!(svc.content_store.read_entry(entry.id).is_ok());
@@ -2539,6 +2640,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
 
@@ -2587,6 +2689,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
 
@@ -2609,6 +2712,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
 
@@ -2786,6 +2890,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
 
@@ -2856,6 +2961,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
 
@@ -2908,6 +3014,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
 
@@ -2940,6 +3047,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
 
@@ -2971,5 +3079,106 @@ mod tests {
         // Index must still reflect the old title — verify_fs is read-only.
         let fetched = svc.get(entry.id).unwrap();
         assert_eq!(fetched.title, "T", "verify_fs should not reindex");
+    }
+
+    #[test]
+    fn write_attachments_and_validate_writes_and_accepts_image_src() {
+        let svc = EntryService::for_test().unwrap();
+        let entry = svc
+            .create(CreateEntry {
+                title: "t".into(),
+                blocks: vec![crate::block_model::BlockInput {
+                    r#type: "note".into(),
+                    text: "seed".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+                attachments: None, // field added in this task; compile requires it
+            })
+            .unwrap();
+
+        let mut atts = std::collections::HashMap::new();
+        atts.insert("sunset.png".to_string(), b"\x89PNG fake".to_vec());
+        // image block whose src matches the attachment
+        let block_sources = vec![("image".to_string(), Some("sunset.png".to_string()))];
+
+        svc.write_attachments_and_validate(entry.id, &block_sources, &atts)
+            .unwrap();
+        // attachment written to disk
+        let read = svc
+            .content_store()
+            .read_attachment(entry.id, "sunset.png")
+            .unwrap();
+        assert_eq!(read, b"\x89PNG fake");
+    }
+
+    #[test]
+    fn validate_rejects_image_block_missing_src() {
+        let svc = EntryService::for_test().unwrap();
+        let entry = svc.create(seed_create_entry()).unwrap();
+        let block_sources = vec![("image".to_string(), None)]; // no src
+        let atts = std::collections::HashMap::new();
+        let err = svc
+            .write_attachments_and_validate(entry.id, &block_sources, &atts)
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Validation(ref m) if m == "image block missing required attr: src"));
+    }
+
+    #[test]
+    fn validate_rejects_declared_source_not_found() {
+        let svc = EntryService::for_test().unwrap();
+        let entry = svc.create(seed_create_entry()).unwrap();
+        // src points to a file that was neither provided nor pre-existing
+        let block_sources = vec![("image".to_string(), Some("ghost.png".to_string()))];
+        let atts = std::collections::HashMap::new();
+        let err = svc
+            .write_attachments_and_validate(entry.id, &block_sources, &atts)
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Validation(ref m) if m.contains("declared source not found: ghost.png")));
+    }
+
+    #[test]
+    fn validate_skips_url_src_for_source_blocks() {
+        let svc = EntryService::for_test().unwrap();
+        let entry = svc.create(seed_create_entry()).unwrap();
+        // @source with a URL src — must NOT trigger "declared source not found"
+        let block_sources = vec![("source".to_string(), Some("https://nasa.gov/orbits".to_string()))];
+        let atts = std::collections::HashMap::new();
+        svc.write_attachments_and_validate(entry.id, &block_sources, &atts)
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_pre_existing_sibling_not_in_attachments() {
+        // A src that resolves to a file already on disk (not passed via attachments)
+        // must pass — supports the "declare an existing file" case from spec §11.2.
+        let svc = EntryService::for_test().unwrap();
+        let entry = svc.create(seed_create_entry()).unwrap();
+        // Pre-place a sibling file directly via content_store
+        svc.content_store()
+            .write_attachment(entry.id, "prior.pdf", b"existing")
+            .unwrap();
+        let block_sources = vec![("source".to_string(), Some("prior.pdf".to_string()))];
+        let atts = std::collections::HashMap::new(); // not in attachments, but on disk
+        svc.write_attachments_and_validate(entry.id, &block_sources, &atts)
+            .unwrap();
+    }
+
+    /// Helper for the validate tests — a minimal valid CreateEntry.
+    fn seed_create_entry() -> CreateEntry {
+        CreateEntry {
+            title: "t".into(),
+            blocks: vec![crate::block_model::BlockInput {
+                r#type: "note".into(),
+                text: "seed".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: None,
+            source: None,
+            attachments: None,
+        }
     }
 }

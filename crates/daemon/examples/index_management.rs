@@ -48,6 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tags: None,
         attrs: None,
         source: None,
+        attachments: None,
     })?;
     println!("Created entry {}", entry.id);
 

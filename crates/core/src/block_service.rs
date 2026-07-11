@@ -967,6 +967,7 @@ mod tests {
                 tags: None,
                 attrs: None,
                 source: None,
+                attachments: None,
             })
             .unwrap();
         // CreateEntry above created block at ordinal 0; add two more at 1, 2.

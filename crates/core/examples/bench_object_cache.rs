@@ -79,6 +79,7 @@ fn main() {
                 tags: Some(vec![format!("tag-{}", i % 10), format!("cat-{}", i % 5)]),
                 attrs: Some(serde_json::json!({"index": i, "bucket": i / 100})),
                 source: None,
+                attachments: None,
             })
             .unwrap();
         ids.push(e.id);

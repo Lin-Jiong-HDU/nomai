@@ -426,6 +426,7 @@ mod tests {
             tags: None,
             attrs: None,
             source: None,
+            attachments: None,
         })
         .unwrap()
         .id
