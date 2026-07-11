@@ -49,6 +49,7 @@ pub enum BlockType {
     Source,
     Note,
     Connection,
+    Image,
 }
 
 impl BlockType {
@@ -60,6 +61,7 @@ impl BlockType {
             BlockType::Source => "source",
             BlockType::Note => "note",
             BlockType::Connection => "connection",
+            BlockType::Image => "image",
         }
     }
 
@@ -72,6 +74,7 @@ impl BlockType {
             "source" => Some(BlockType::Source),
             "note" => Some(BlockType::Note),
             "connection" => Some(BlockType::Connection),
+            "image" => Some(BlockType::Image),
             _ => None,
         }
     }
@@ -1252,5 +1255,81 @@ Body.
             doc.blocks[0].attrs["key"],
             serde_json::Value::String("".into())
         );
+    }
+
+    #[test]
+    fn image_block_round_trips_with_caption_and_attrs() {
+        let original = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Sunset
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@image src=sunset.png alt=\"海边日落\"
+夕阳下的海面，金红色波光延伸到地平线。
+";
+        let doc = parse(original).unwrap();
+        assert_eq!(doc.blocks.len(), 1);
+        assert_eq!(doc.blocks[0].r#type, BlockType::Image);
+        assert_eq!(
+            doc.blocks[0].attrs.get("src").and_then(|v| v.as_str()),
+            Some("sunset.png")
+        );
+        assert_eq!(
+            doc.blocks[0].attrs.get("alt").and_then(|v| v.as_str()),
+            Some("海边日落")
+        );
+        assert!(doc.blocks[0].text.contains("夕阳下的海面"));
+
+        // render → parse must be idempotent
+        let rendered = render(&doc);
+        let reparsed = parse(&rendered).unwrap();
+        assert_eq!(doc, reparsed);
+    }
+
+    #[test]
+    fn image_block_without_caption_round_trips() {
+        let original = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Diagram
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@image src=diagram.png
+";
+        let doc = parse(original).unwrap();
+        assert_eq!(doc.blocks[0].r#type, BlockType::Image);
+        assert_eq!(doc.blocks[0].text, ""); // empty caption
+        let reparsed = parse(&render(&doc)).unwrap();
+        assert_eq!(doc, reparsed);
+    }
+
+    #[test]
+    fn image_block_parser_does_not_require_src() {
+        // spec §5: src required-ness is enforced at the service write path,
+        // NOT at the parser. Parser accepts @image with no src (like @note).
+        let original = "\
+#format_version 1
+#id 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#title Caption Only
+#created_at 2026-06-23T10:00:00Z
+#updated_at 2026-06-23T10:00:00Z
+
+@image
+a caption without a source file
+";
+        let doc = parse(original).unwrap();
+        assert_eq!(doc.blocks[0].r#type, BlockType::Image);
+        assert!(doc.blocks[0].attrs.is_empty());
+    }
+
+    #[test]
+    fn from_str_image_returns_image_not_fallback() {
+        // Guards nomai_format_util::storage_block_to_parser_block, which does
+        // BlockType::from_str(&b.r#type).unwrap_or(BlockType::Note). If this
+        // test breaks, image blocks silently downgrade to note on storage round-trip.
+        assert_eq!(BlockType::from_str("image"), Some(BlockType::Image));
     }
 }
