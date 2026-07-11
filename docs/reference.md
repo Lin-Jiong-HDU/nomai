@@ -65,7 +65,7 @@ Each mutation rewrites the parent entry's `.nomai` file automatically (no separa
 
 `index.verify` is read-only. `index.sync` is incremental (diffs FS vs DB mtime). `index.rebuild` is destructive but doesn't touch `events` (daemon history) or `emb_cache` (deterministic, reusable).
 
-Daemon runs `index.sync` automatically at boot. If FS differs from the index (e.g. user manually dropped a `.nomai` file in `entries/`), the daemon picks it up.
+Daemon runs `index.sync` automatically at boot. If FS differs from the index (e.g. user manually dropped an `entries/<ULID>/entry.nomai` file), the daemon picks it up.
 
 ### link.{#link-methods}
 
