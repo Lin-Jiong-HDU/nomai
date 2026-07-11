@@ -3329,14 +3329,10 @@ mod tests {
             .unwrap_err();
         // No entry dir should exist under the store root (list_ids empty + no orphan dirs).
         assert!(svc.list_ids().unwrap().is_empty());
-        // entry_dir for any ULID must not exist — scan the store root for stray dirs.
-        // (for_test's content_store uses a tempdir; list_attachments on a random id is empty.)
-        let fake = ulid::Ulid::new();
+        // entry_dir for any ULID must not linger on FS — scan the store root directly.
         assert!(
-            svc.content_store()
-                .list_attachments(fake)
-                .unwrap()
-                .is_empty()
+            svc.content_store().scan_entry_ids().is_empty(),
+            "rolled-back entry dir must not linger on FS"
         );
     }
 
