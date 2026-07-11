@@ -193,11 +193,7 @@ impl ContentStore {
                     if name_str == "entry.nomai" {
                         continue;
                     }
-                    if !entry
-                        .file_type()
-                        .map(|t| t.is_file())
-                        .unwrap_or(false)
-                    {
+                    if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
                         continue;
                     }
                     let meta = match entry.metadata() {
@@ -261,7 +257,9 @@ pub(crate) fn atomic_write_bytes(path: &Path, data: &[u8]) -> Result<(), CoreErr
     let tmp = {
         let mut name = path
             .file_name()
-            .ok_or_else(|| CoreError::Validation(format!("unsafe attachment path: {}", path.display())))?
+            .ok_or_else(|| {
+                CoreError::Validation(format!("unsafe attachment path: {}", path.display()))
+            })?
             .to_os_string();
         name.push(".tmp");
         path.with_file_name(name)
@@ -517,7 +515,11 @@ mod tests {
 
         let list = store.list_attachments(id).unwrap();
         let names: Vec<&str> = list.iter().map(|m| m.filename.as_str()).collect();
-        assert_eq!(names, vec!["alpha.pdf", "zebra.png"], "sorted, no entry.nomai");
+        assert_eq!(
+            names,
+            vec!["alpha.pdf", "zebra.png"],
+            "sorted, no entry.nomai"
+        );
         assert!(list.iter().all(|m| m.size >= 1));
     }
 
@@ -538,7 +540,17 @@ mod tests {
         let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
         store.write_entry(id, &sample_doc()).unwrap();
 
-        for bad in ["../evil", "/etc/passwd", "~/secret", "a/b", "a\\b", ".", "..", "", "a:b"] {
+        for bad in [
+            "../evil",
+            "/etc/passwd",
+            "~/secret",
+            "a/b",
+            "a\\b",
+            ".",
+            "..",
+            "",
+            "a:b",
+        ] {
             let err = store.write_attachment(id, bad, b"x").unwrap_err();
             assert!(
                 matches!(err, CoreError::Validation(ref m) if m.contains("unsafe attachment filename")),
@@ -569,7 +581,9 @@ mod tests {
         store.write_entry(id, &sample_doc()).unwrap();
 
         store.write_attachment(id, "f.bin", b"v1").unwrap();
-        store.write_attachment(id, "f.bin", b"\x00\x01\x02\xff").unwrap();
+        store
+            .write_attachment(id, "f.bin", b"\x00\x01\x02\xff")
+            .unwrap();
         let got = store.read_attachment(id, "f.bin").unwrap();
         assert_eq!(got, b"\x00\x01\x02\xff", "overwrite wins, binary-safe");
     }
