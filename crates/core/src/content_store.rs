@@ -200,7 +200,10 @@ impl ContentStore {
                     {
                         continue;
                     }
-                    let meta = entry.metadata()?;
+                    let meta = match entry.metadata() {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
                     let modified = meta
                         .modified()
                         .map(chrono::DateTime::<chrono::Utc>::from)
