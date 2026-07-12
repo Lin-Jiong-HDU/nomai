@@ -33,6 +33,11 @@ pub struct AppendParams {
     #[serde(default)]
     #[schemars(default)]
     pub attrs: Option<serde_json::Value>,
+    /// `{filename: base64_string}` — decoded to bytes and written as sibling
+    /// files before the block is appended. Plan 3 multimodal-image.
+    #[serde(default)]
+    #[schemars(default)]
+    pub attachments: Option<std::collections::HashMap<String, String>>,
 }
 
 pub struct Append;
@@ -54,6 +59,36 @@ impl RpcHandler for Append {
 
         let entries: Arc<EntryService> = daemon.entries.clone();
         let entry_id = p.entry_id;
+
+        // Pre-validate attachments + src BEFORE appending the block. Plan 3
+        // Task 3: `BlockService::append` commits its own transaction, so the
+        // only way to keep `block.append` atomic (no block row left on a src-
+        // validation failure) is to validate before the append. Order:
+        // decode → write_attachments_and_validate → append → rerender → embed.
+        //
+        // The single-call form: always validate (decode to a map — empty when
+        // no attachments). `@image` blocks must resolve src on disk even when
+        // the client sends no attachments (e.g. the file was pre-placed or
+        // written by a prior block); for non-image types the helper's src
+        // check is a no-op, so the call is harmless.
+        let decoded = crate::handlers::attachment::decode_attachments(
+            p.attachments.clone().unwrap_or_default(),
+        )?;
+        let src = p
+            .attrs
+            .as_ref()
+            .and_then(|a| a.get("src"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let block_sources = vec![(p.r#type.clone(), src)];
+        {
+            let entries = entries.clone();
+            blocking(move || {
+                entries.write_attachments_and_validate(entry_id, &block_sources, &decoded)
+            })
+            .await??;
+        }
+
         let ty = p.r#type;
         let text = p.text;
         let attrs = p.attrs;
@@ -89,6 +124,11 @@ pub struct UpdateParams {
     #[serde(default)]
     #[schemars(default)]
     pub attrs: Option<serde_json::Value>,
+    /// `{filename: base64_string}` — decoded to bytes and written as sibling
+    /// files before the block is updated. Plan 3 multimodal-image.
+    #[serde(default)]
+    #[schemars(default)]
+    pub attachments: Option<std::collections::HashMap<String, String>>,
 }
 
 pub struct Update;
@@ -110,6 +150,38 @@ impl RpcHandler for Update {
 
         let entries: Arc<EntryService> = daemon.entries.clone();
         let id = p.id;
+
+        // Fetch existing FIRST to compute the post-update type/src for
+        // pre-validation. If the update doesn't change type/attrs, the
+        // existing values are what must still validate.
+        let existing = {
+            let entries = entries.clone();
+            blocking(move || entries.block_service().get(id)).await??
+        };
+        let post_type = p.r#type.clone().unwrap_or_else(|| existing.r#type.clone());
+        let post_attrs = p.attrs.clone().unwrap_or_else(|| existing.attrs.clone());
+        let post_src = post_attrs
+            .get("src")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let entry_id = existing.entry_id;
+
+        // Pre-validate (decode → write_attachments_and_validate) BEFORE
+        // BlockService::update, so a validation failure leaves the block row
+        // untouched. Mirrors Append::call. `BlockService::update` commits its
+        // own tx; pre-validate is the only atomicity lever.
+        let decoded = crate::handlers::attachment::decode_attachments(
+            p.attachments.clone().unwrap_or_default(),
+        )?;
+        let block_sources = vec![(post_type, post_src)];
+        {
+            let entries = entries.clone();
+            blocking(move || {
+                entries.write_attachments_and_validate(entry_id, &block_sources, &decoded)
+            })
+            .await??;
+        }
+
         let ty = p.r#type;
         let text = p.text;
         let attrs = p.attrs;

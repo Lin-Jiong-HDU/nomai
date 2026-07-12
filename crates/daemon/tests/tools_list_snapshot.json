@@ -97,6 +97,17 @@
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "attachments": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": null,
+            "description": "`{filename: base64_string}` — decoded to bytes and written as sibling\nfiles before the block is appended. Plan 3 multimodal-image.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "attrs": {
             "default": null
           },
@@ -177,6 +188,17 @@
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "attachments": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": null,
+            "description": "`{filename: base64_string}` — decoded to bytes and written as sibling\nfiles before the block is updated. Plan 3 multimodal-image.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "attrs": {
             "default": null
           },
