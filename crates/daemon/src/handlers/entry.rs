@@ -10,6 +10,26 @@ use nomai_core::{CoreError, CreateEntry, EntryListQuery, UpdateEntry};
 use crate::daemon::Daemon;
 use crate::rpc::RpcHandler;
 
+/// Daemon-layer input for `entry.create`. Mirrors core `CreateEntry` except
+/// `attachments` carries base64 strings (MCP tools/call is text-only) instead
+/// of raw bytes. `call` decodes via `attachment::decode_attachments` before
+/// constructing the core struct. `serde::Deserialize` only — `Create` uses a
+/// hand-written `json!` schema (see `Create::input_schema`).
+#[derive(Deserialize)]
+struct CreateEntryInput {
+    title: String,
+    blocks: Vec<nomai_core::block_model::BlockInput>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    attrs: Option<Value>,
+    #[serde(default)]
+    source: Option<String>,
+    /// `{filename: base64_string}` — decoded to bytes before reaching core.
+    #[serde(default)]
+    attachments: Option<std::collections::HashMap<String, String>>,
+}
+
 /// Wrap a sync closure as a spawn_blocking task, mapping JoinError to CoreError.
 ///
 /// Returns a nested `Result<Result<T, CoreError>, CoreError>` so callers can use
@@ -51,18 +71,33 @@ impl RpcHandler for Create {
                 "blocks": {"type": "array", "items": block_input, "minItems": 1},
                 "tags": {"type": "array", "items": {"type": "string"}},
                 "attrs": {"type": "object"},
-                "source": {"type": "string"}
+                "source": {"type": "string"},
+                "attachments": {
+                    "type": "object",
+                    "description": "Sibling attachment files (image/PDF/...), keyed by filename. Values are base64-encoded bytes. Referenced by @image/@source block `src` attrs.",
+                    "additionalProperties": {"type": "string"}
+                }
             },
             "required": ["title", "blocks"],
             "additionalProperties": false
         }))
     }
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
-        let input: CreateEntry = serde_json::from_value(params)
+        let input: CreateEntryInput = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+        let attachments =
+            crate::handlers::attachment::decode_attachments(input.attachments.unwrap_or_default())?;
+        let create = CreateEntry {
+            title: input.title,
+            blocks: input.blocks,
+            tags: input.tags,
+            attrs: input.attrs,
+            source: input.source,
+            attachments: Some(attachments),
+        };
 
         let entries = daemon.entries.clone();
-        let entry = blocking(move || entries.create(input)).await??;
+        let entry = blocking(move || entries.create(create)).await??;
 
         // 0.2.3: embed the entry's chunks so search.semantic works. Was a v1
         // gap (the "background embedder" was never implemented); now done

@@ -24,7 +24,6 @@ use crate::rpc::RpcHandler;
 /// Shared by `entry.create` / `block.append` / `block.update` wiring
 /// (Task 2/3) — those handlers accept base64 over the wire (MCP tools/call
 /// is text-only) and call this to recover the raw bytes core expects.
-#[allow(dead_code)] // wired in by Task 2/3 (entry.create / block.append / block.update)
 pub(crate) fn decode_attachments(
     atts: HashMap<String, String>,
 ) -> Result<HashMap<String, Vec<u8>>, CoreError> {

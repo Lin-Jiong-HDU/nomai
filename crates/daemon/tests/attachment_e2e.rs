@@ -205,3 +205,117 @@ async fn attachment_read_mime_for_other_extensions() {
     let result = read.result.unwrap();
     assert_eq!(result["mime"], "application/pdf");
 }
+
+// ---- Plan 3 Task 2: entry.create `attachments` (base64 → bytes) ----
+//
+// These tests exercise the full RPC path: client sends base64 strings in
+// `attachments`, daemon decodes via decode_attachments, core writes the
+// sibling files and validates block `src` references against them.
+
+#[tokio::test]
+async fn entry_create_with_attachments_writes_sibling() {
+    use base64::prelude::*;
+
+    let daemon = build_test_daemon().await;
+
+    // Client sends a PNG as base64 alongside an @image block that references
+    // it by filename. Daemon must decode + pass bytes to core, core writes
+    // the sibling file, src validation passes.
+    let png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00".to_vec();
+    let b64 = BASE64_STANDARD.encode(&png_bytes);
+
+    let create = daemon
+        .dispatch(req(
+            "entry.create",
+            json!({
+                "title": "img",
+                "blocks": [
+                    {"type": "image", "text": "sunset", "attrs": {"src": "sunset.png"}}
+                ],
+                "attachments": {"sunset.png": b64}
+            }),
+        ))
+        .await;
+    assert!(create.error.is_none(), "{:?}", create.error);
+    let entry_id = create.result.unwrap()["id"].as_str().unwrap().to_string();
+
+    // Sibling was written: attachment.read returns the same bytes we sent.
+    let read = daemon
+        .dispatch(req(
+            "attachment.read",
+            json!({ "entry_id": entry_id, "filename": "sunset.png" }),
+        ))
+        .await;
+    assert!(read.error.is_none(), "{:?}", read.error);
+    let result = read.result.unwrap();
+    assert_eq!(result["filename"], "sunset.png");
+    assert_eq!(result["mime"], "image/png");
+    let decoded = BASE64_STANDARD
+        .decode(result["base64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(decoded, png_bytes);
+}
+
+#[tokio::test]
+async fn entry_create_rejects_image_block_missing_src_via_rpc() {
+    let daemon = build_test_daemon().await;
+
+    // @image block with no src attr → core src-validation fires.
+    let resp = daemon
+        .dispatch(req(
+            "entry.create",
+            json!({
+                "title": "broken",
+                "blocks": [{"type": "image", "text": "no src"}]
+            }),
+        ))
+        .await;
+    let err = resp.error.expect("missing src must error");
+    assert_eq!(err.code, 1003, "{:?}", err);
+    assert_eq!(err.message, "image block missing required attr: src");
+}
+
+#[tokio::test]
+async fn entry_create_rejects_declared_source_not_found_via_rpc() {
+    let daemon = build_test_daemon().await;
+
+    // @image block declares a src that no attachment provides → core
+    // src-validation surfaces "declared source not found".
+    let resp = daemon
+        .dispatch(req(
+            "entry.create",
+            json!({
+                "title": "dangling",
+                "blocks": [
+                    {"type": "image", "text": "see ghost", "attrs": {"src": "ghost.png"}}
+                ]
+            }),
+        ))
+        .await;
+    let err = resp.error.expect("dangling src must error");
+    assert_eq!(err.code, 1003, "{:?}", err);
+    assert!(err.message.contains("declared source not found: ghost.png"));
+}
+
+#[tokio::test]
+async fn entry_create_rejects_invalid_base64_attachment_via_rpc() {
+    let daemon = build_test_daemon().await;
+
+    // Malformed base64 → daemon-layer decode_attachments rejection.
+    let resp = daemon
+        .dispatch(req(
+            "entry.create",
+            json!({
+                "title": "bad",
+                "blocks": [{"type": "note", "text": "x"}],
+                "attachments": {"bad.png": "!!!not-base64!!!"}
+            }),
+        ))
+        .await;
+    let err = resp.error.expect("invalid base64 must error");
+    assert_eq!(err.code, 1003, "{:?}", err);
+    assert!(
+        err.message
+            .contains("invalid base64 for attachment: bad.png")
+    );
+}

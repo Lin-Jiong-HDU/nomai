@@ -304,6 +304,13 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "attachments": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Sibling attachment files (image/PDF/...), keyed by filename. Values are base64-encoded bytes. Referenced by @image/@source block `src` attrs.",
+            "type": "object"
+          },
           "attrs": {
             "type": "object"
           },
