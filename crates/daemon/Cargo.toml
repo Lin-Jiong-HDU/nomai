@@ -19,9 +19,9 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
-nomai-protocol = { path = "../protocol", version = "0.3" }
-nomai-core = { path = "../core", version = "0.3" }
-nomai-providers = { path = "../providers", version = "0.3" }
+nomai-protocol = { path = "../protocol", version = "0.4" }
+nomai-core = { path = "../core", version = "0.4" }
+nomai-providers = { path = "../providers", version = "0.4" }
 async-trait = "0.1"
 base64 = "0.22"
 blake3 = "1"

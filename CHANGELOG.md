@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-12
+
 ### Added
 
 - **Multimodal image support.** `@image` block type (caption as body, reused
@@ -16,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config (default 10 MiB). Image captions flow through the existing
   chunk/FTS/embedding pipeline — searchable via `search.semantic` /
   `search.fulltext`. See `docs/reference.md` §attachment.
+
+### Changed
+
+- **Breaking (lib mode):** `Daemon::from_services` gains an `attachment_max_bytes: usize` parameter (mirror of `chunk_target_size`), threaded from `[data] attachment_max_bytes` config. Update direct call sites, or use `DaemonBuilder.attachment_max_bytes(...)`. RPC / MCP clients are unaffected — the `attachments` param is optional on the three mutation RPCs.
 
 ## [0.3.1] - 2026-07-11
 
@@ -262,7 +268,8 @@ empty `.nomai` files. To regenerate from current state:
 - No built-in sync (the `events` primitive is the substrate; build on top).
 - No CLI subcommands — every operation is an RPC over stdio.
 
-[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.2.2...v0.2.3

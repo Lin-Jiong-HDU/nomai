@@ -12,7 +12,7 @@ keywords = ["nomai", "embeddings", "llm", "openai", "rag"]
 categories = ["api-bindings", "text-processing"]
 
 [dependencies]
-nomai-protocol = { path = "../protocol", version = "0.3" }
+nomai-protocol = { path = "../protocol", version = "0.4" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = "0.1"
