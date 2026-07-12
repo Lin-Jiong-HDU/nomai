@@ -1101,6 +1101,7 @@ name = "nomai-daemon"
 version = "0.3.1"
 dependencies = [
  "async-trait",
+ "base64",
  "blake3",
  "chrono",
  "dashmap",

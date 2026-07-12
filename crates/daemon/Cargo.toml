@@ -23,6 +23,7 @@ nomai-protocol = { path = "../protocol", version = "0.3" }
 nomai-core = { path = "../core", version = "0.3" }
 nomai-providers = { path = "../providers", version = "0.3" }
 async-trait = "0.1"
+base64 = "0.22"
 blake3 = "1"
 dashmap = "6"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -41,3 +42,4 @@ chrono = { version = "0.4", features = ["serde"] }
 wiremock = "0.6"
 tempfile = "3"
 jsonschema = { workspace = true }
+base64 = "0.22"

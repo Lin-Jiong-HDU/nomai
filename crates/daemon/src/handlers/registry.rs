@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::handlers::{
-    batch, block, cache, chunk, entry, events, index, link, mcp, provider, search, system,
+    attachment, batch, block, cache, chunk, entry, events, index, link, mcp, provider, search,
+    system,
 };
 use crate::rpc::RpcHandler;
 
@@ -59,6 +60,12 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     let h = block::List;
     m.insert(h.method(), Arc::new(h));
     let h = block::Get;
+    m.insert(h.method(), Arc::new(h));
+
+    // attachment.* (multimodal-image Plan 3: sibling file read/list)
+    let h = attachment::Read;
+    m.insert(h.method(), Arc::new(h));
+    let h = attachment::List;
     m.insert(h.method(), Arc::new(h));
 
     // index.* (Plan 5: FS↔SQLite reconciliation. Plan 6: read-only verify.)

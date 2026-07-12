@@ -1,6 +1,46 @@
 {
   "tools": [
     {
+      "description": "List sibling attachment files for an entry (excludes entry.nomai). Returns {items: [{filename, size, modified}]}. Empty list if the entry has no attachments.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "entry_id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id"
+        ],
+        "title": "ListParams",
+        "type": "object"
+      },
+      "name": "attachment.list"
+    },
+    {
+      "description": "Read a sibling attachment file (image/PDF/...) for an entry. Returns {filename, mime, base64}. The file must already exist under the entry directory (written via entry.create/block.append/block.update `attachments`, or pre-placed).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "entry_id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_id",
+          "filename"
+        ],
+        "title": "ReadParams",
+        "type": "object"
+      },
+      "name": "attachment.read"
+    },
+    {
       "description": "Execute multiple mutation ops (entry.create/update/delete, link.create/delete) in a single atomic transaction. Ops may reference each other via {\"$ref\": \"op_id\"} or {\"$ref\": \"op_id.field\"}. Atomic mode only (any failure rolls back the whole batch). See docs/reference.md for full semantics.",
       "inputSchema": {
         "additionalProperties": false,

@@ -3,6 +3,7 @@
 //! Each method is a zero-sized struct implementing `RpcHandler`. The daemon
 //! looks up handlers by method name in a `HashMap` populated by `registry()`.
 
+pub mod attachment;
 pub mod batch;
 pub mod block;
 pub mod cache;
@@ -1316,10 +1317,10 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 30 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:5,
-        // events:3, search:2, provider:1, cache:2, batch:1, index:3,
-        // system:1).
-        assert_eq!(tools.len(), 30);
+        // 32 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:5,
+        // attachment:2, events:3, search:2, provider:1, cache:2, batch:1,
+        // index:3, system:1).
+        assert_eq!(tools.len(), 32);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1451,7 +1452,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 31); // 30 built-in + custom.echo
+        assert_eq!(tools.len(), 33); // 32 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----

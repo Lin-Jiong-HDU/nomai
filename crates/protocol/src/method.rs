@@ -109,6 +109,15 @@ pub mod cache {
     pub const CLEAR: &str = "cache.clear";
 }
 
+pub mod attachment {
+    /// Read a sibling attachment file as base64. Returns
+    /// `{filename, mime, base64}`. MIME inferred from extension.
+    pub const READ: &str = "attachment.read";
+    /// List sibling attachment files for an entry (excludes `entry.nomai`).
+    /// Returns `{items: [{filename, size, modified}]}`.
+    pub const LIST: &str = "attachment.list";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +193,11 @@ mod tests {
     fn cache_namespace_methods() {
         assert_eq!(cache::STATS, "cache.stats");
         assert_eq!(cache::CLEAR, "cache.clear");
+    }
+
+    #[test]
+    fn attachment_namespace_methods() {
+        assert_eq!(attachment::READ, "attachment.read");
+        assert_eq!(attachment::LIST, "attachment.list");
     }
 }
