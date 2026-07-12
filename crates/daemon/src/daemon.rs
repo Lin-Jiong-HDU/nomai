@@ -59,6 +59,9 @@ pub struct Daemon {
     /// been baked into the `EntryService` block_service at construction.
     #[allow(dead_code)]
     pub(crate) chunk_target_size: usize,
+    /// Per-file attachment size cap (bytes), from `config.data.attachment_max_bytes`.
+    /// Enforced in `decode_attachments` (daemon boundary).
+    pub(crate) attachment_max_bytes: usize,
     pub(crate) handlers: HashMap<&'static str, Arc<dyn RpcHandler>>,
 }
 
@@ -91,6 +94,7 @@ impl Daemon {
         // sole embedding surface).
         let chunk_target_size = config.chunking.target_size;
         eprintln!("info: chunk_target_size={chunk_target_size} chars");
+        let attachment_max_bytes = config.data.attachment_max_bytes;
         let entries = Arc::new(EntryService::new(
             conn.clone(),
             content_store,
@@ -160,6 +164,7 @@ impl Daemon {
             llm_model: config.llm.model,
             embedding_dim: config.embedding.dim,
             chunk_target_size,
+            attachment_max_bytes,
             handlers: crate::handlers::registry(),
         })
     }
@@ -206,6 +211,9 @@ impl Daemon {
             llm_model,
             embedding_dim,
             chunk_target_size,
+            // Test helper mirrors the production default; tests that need a
+            // smaller cap construct via Daemon::from_services instead.
+            attachment_max_bytes: 10 * 1024 * 1024,
             handlers: crate::handlers::registry(),
         }
     }
@@ -273,6 +281,7 @@ impl Daemon {
         chunk_target_size: usize,
         cache_model: impl Into<String>,
         warn_rows: u64,
+        attachment_max_bytes: usize,
     ) -> Result<Self, CoreError> {
         let entries = Arc::new(EntryService::new(
             conn.clone(),
@@ -297,6 +306,7 @@ impl Daemon {
             llm_model: String::new(),
             embedding_dim,
             chunk_target_size,
+            attachment_max_bytes,
             handlers,
         })
     }
@@ -477,6 +487,7 @@ pub struct DaemonBuilder {
     chunk_target_size: Option<usize>,
     cache_model: Option<String>,
     warn_rows: Option<u64>,
+    attachment_max_bytes: Option<usize>,
 }
 
 #[allow(dead_code)] // lib-mode extension point; binary daemon doesn't use this
@@ -491,6 +502,7 @@ impl DaemonBuilder {
             chunk_target_size: None,
             cache_model: None,
             warn_rows: None,
+            attachment_max_bytes: None,
         }
     }
 
@@ -526,6 +538,13 @@ impl DaemonBuilder {
         self.warn_rows = Some(v);
         self
     }
+    /// Per-file attachment size cap (bytes). Optional; defaults to the
+    /// production `config.data.attachment_max_bytes` default of 10 MiB when
+    /// unset (mirroring `Daemon::new`).
+    pub fn attachment_max_bytes(mut self, v: usize) -> Self {
+        self.attachment_max_bytes = Some(v);
+        self
+    }
 
     pub fn build(self) -> Result<Daemon, CoreError> {
         Daemon::from_services(
@@ -546,6 +565,9 @@ impl DaemonBuilder {
                 .ok_or_else(|| CoreError::Config("DaemonBuilder: cache_model required".into()))?,
             self.warn_rows
                 .ok_or_else(|| CoreError::Config("DaemonBuilder: warn_rows required".into()))?,
+            // Default to the production cap when the builder omitted it; this
+            // mirrors Daemon::new (config.data.attachment_max_bytes default).
+            self.attachment_max_bytes.unwrap_or(10 * 1024 * 1024),
         )
     }
 }

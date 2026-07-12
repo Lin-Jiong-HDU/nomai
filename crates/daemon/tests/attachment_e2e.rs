@@ -59,6 +59,61 @@ async fn build_test_daemon() -> Daemon {
         1024,
         "test-embed",
         100_000,
+        10 * 1024 * 1024,
+    )
+    .expect("daemon builds")
+}
+
+/// Same as `build_test_daemon` but with a tiny per-file attachment cap, for
+/// exercising the `attachment too large` rejection (Plan 4 Task 1). The
+/// default 10 MiB cap would require a multi-megabyte fixture.
+async fn build_test_daemon_with_cap(attachment_max_bytes: usize) -> Daemon {
+    let entries = Arc::new(nomai_core::EntryService::for_test().unwrap());
+
+    struct NullEmbed;
+    #[async_trait]
+    impl nomai_providers::EmbeddingProvider for NullEmbed {
+        async fn embed(
+            &self,
+            _texts: &[&str],
+        ) -> Result<Vec<Vec<f32>>, nomai_protocol::ProviderError> {
+            Ok(vec![])
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+        fn name(&self) -> &str {
+            "null-embed"
+        }
+    }
+    struct NullLlm;
+    #[async_trait]
+    impl nomai_providers::LlmProvider for NullLlm {
+        async fn complete(
+            &self,
+            _req: nomai_providers::CompletionRequest,
+        ) -> Result<nomai_providers::CompletionResponse, nomai_protocol::ProviderError> {
+            Err(nomai_protocol::ProviderError::new(
+                nomai_protocol::ProviderErrorKind::Unknown,
+                "null llm",
+                None,
+            ))
+        }
+        fn name(&self) -> &str {
+            "null-llm"
+        }
+    }
+
+    Daemon::from_services(
+        entries.conn_for_test(),
+        entries.content_store().clone(),
+        Arc::new(NullEmbed),
+        Arc::new(NullLlm),
+        8,
+        1024,
+        "test-embed",
+        100_000,
+        attachment_max_bytes,
     )
     .expect("daemon builds")
 }
@@ -317,5 +372,65 @@ async fn entry_create_rejects_invalid_base64_attachment_via_rpc() {
     assert!(
         err.message
             .contains("invalid base64 for attachment: bad.png")
+    );
+}
+
+// ---- Plan 4 Task 1: attachment_max_bytes enforcement ----
+
+#[tokio::test]
+async fn entry_create_rejects_attachment_exceeding_max_bytes() {
+    use base64::prelude::*;
+
+    // Build a daemon with a tiny per-file cap (4 bytes) so a small fixture
+    // exercises the overflow path without a multi-megabyte payload.
+    let daemon = build_test_daemon_with_cap(4).await;
+
+    // 5 decoded bytes > 4-byte cap.
+    let big = b"\x00\x01\x02\x03\x04";
+    let b64 = BASE64_STANDARD.encode(big);
+
+    let resp = daemon
+        .dispatch(req(
+            "entry.create",
+            json!({
+                "title": "too-big",
+                "blocks": [{"type": "note", "text": "x"}],
+                "attachments": {"big.bin": b64}
+            }),
+        ))
+        .await;
+    let err = resp.error.expect("oversized attachment must error");
+    assert_eq!(err.code, 1003, "{:?}", err);
+    assert!(
+        err.message
+            .contains("attachment too large: big.bin (5 bytes > 4)"),
+        "unexpected message: {:?}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn entry_create_accepts_attachment_at_exactly_max_bytes() {
+    use base64::prelude::*;
+
+    // Boundary: bytes.len() == max_bytes is allowed (check is strict >).
+    let daemon = build_test_daemon_with_cap(4).await;
+    let exact = b"\x00\x01\x02\x03"; // 4 bytes == 4-byte cap
+    let b64 = BASE64_STANDARD.encode(exact);
+
+    let resp = daemon
+        .dispatch(req(
+            "entry.create",
+            json!({
+                "title": "exact",
+                "blocks": [{"type": "note", "text": "x"}],
+                "attachments": {"exact.bin": b64}
+            }),
+        ))
+        .await;
+    assert!(
+        resp.error.is_none(),
+        "boundary-size attachment rejected: {:?}",
+        resp.error
     );
 }

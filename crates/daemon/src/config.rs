@@ -29,6 +29,12 @@ pub struct DataConfig {
     /// Tilde (`~`) prefixes are expanded at read time in `Daemon::new`.
     #[serde(default)]
     pub knowledge_root: Option<PathBuf>,
+    /// Soft per-file cap on attachment size (bytes). `entry.create` /
+    /// `block.append` / `block.update` reject attachments whose decoded
+    /// bytes exceed this with `Validation("attachment too large: ...")`.
+    /// Default 10 MiB — the practical ceiling for base64-in-JSON-RPC.
+    #[serde(default = "default_attachment_max_bytes")]
+    pub attachment_max_bytes: usize,
 }
 
 impl Default for DataConfig {
@@ -36,6 +42,7 @@ impl Default for DataConfig {
         Self {
             db_path: default_db_path(),
             knowledge_root: None,
+            attachment_max_bytes: default_attachment_max_bytes(),
         }
     }
 }
@@ -134,6 +141,10 @@ fn default_db_path() -> PathBuf {
     ProjectDirs::from("dev", "nomai", "nomai")
         .map(|d| d.data_dir().join("db.sqlite"))
         .unwrap_or_else(|| PathBuf::from("nomai.sqlite"))
+}
+
+fn default_attachment_max_bytes() -> usize {
+    10 * 1024 * 1024
 }
 
 /// Resolve a `knowledge_root` config value to a concrete path. If the user
@@ -313,6 +324,60 @@ target_size = 2048
         std::fs::write(tmp.path(), toml_text).unwrap();
         let config = Config::load_from(tmp.path()).unwrap();
         assert_eq!(config.chunking.target_size, 2048);
+        restore("TEST_OPENAI_KEY", old);
+    }
+
+    #[test]
+    fn data_section_defaults_attachment_max_bytes_to_10mib() {
+        let _guard = lock();
+        let old = unset("TEST_OPENAI_KEY");
+        // SAFETY: tests are single-threaded within this module.
+        unsafe { std::env::set_var("TEST_OPENAI_KEY", "sk") };
+        let toml_text = r#"
+[embedding]
+base_url = "https://example.com/v1"
+api_key_env = "TEST_OPENAI_KEY"
+model = "x"
+dim = 8
+
+[llm]
+base_url = "https://example.com/v1"
+api_key_env = "TEST_OPENAI_KEY"
+model = "x"
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), toml_text).unwrap();
+        let config = Config::load_from(tmp.path()).unwrap();
+        // Default is 10 MiB.
+        assert_eq!(config.data.attachment_max_bytes, 10 * 1024 * 1024);
+        restore("TEST_OPENAI_KEY", old);
+    }
+
+    #[test]
+    fn data_section_accepts_custom_attachment_max_bytes() {
+        let _guard = lock();
+        let old = unset("TEST_OPENAI_KEY");
+        // SAFETY: tests are single-threaded within this module.
+        unsafe { std::env::set_var("TEST_OPENAI_KEY", "sk") };
+        let toml_text = r#"
+[data]
+attachment_max_bytes = 2048
+
+[embedding]
+base_url = "https://example.com/v1"
+api_key_env = "TEST_OPENAI_KEY"
+model = "x"
+dim = 8
+
+[llm]
+base_url = "https://example.com/v1"
+api_key_env = "TEST_OPENAI_KEY"
+model = "x"
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), toml_text).unwrap();
+        let config = Config::load_from(tmp.path()).unwrap();
+        assert_eq!(config.data.attachment_max_bytes, 2048);
         restore("TEST_OPENAI_KEY", old);
     }
 

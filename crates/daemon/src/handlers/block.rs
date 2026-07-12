@@ -73,6 +73,7 @@ impl RpcHandler for Append {
         // check is a no-op, so the call is harmless.
         let decoded = crate::handlers::attachment::decode_attachments(
             p.attachments.clone().unwrap_or_default(),
+            daemon.attachment_max_bytes,
         )?;
         let src = p
             .attrs
@@ -172,6 +173,7 @@ impl RpcHandler for Update {
         // own tx; pre-validate is the only atomicity lever.
         let decoded = crate::handlers::attachment::decode_attachments(
             p.attachments.clone().unwrap_or_default(),
+            daemon.attachment_max_bytes,
         )?;
         let block_sources = vec![(post_type, post_src)];
         {

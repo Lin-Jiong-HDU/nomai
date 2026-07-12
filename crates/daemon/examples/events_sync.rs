@@ -56,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         1024,
         "example-model",
         100_000,
+        10 * 1024 * 1024,
     )?;
 
     // Poll events since cursor

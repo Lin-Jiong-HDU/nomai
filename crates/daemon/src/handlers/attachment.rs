@@ -20,12 +20,17 @@ use crate::rpc::RpcHandler;
 
 /// Decode a `{filename: base64_string}` map into `{filename: bytes}`. Any
 /// malformed base64 → `Validation("invalid base64 for attachment: <name>")`.
+/// Decoded bytes exceeding `max_bytes` →
+/// `Validation("attachment too large: <name> (<N> bytes > <max>)")`.
 ///
 /// Shared by `entry.create` / `block.append` / `block.update` wiring
 /// (Task 2/3) — those handlers accept base64 over the wire (MCP tools/call
 /// is text-only) and call this to recover the raw bytes core expects.
+/// Size enforcement lives here at the daemon boundary (policy); core stays
+/// pure mechanism and only sees the resulting bytes.
 pub(crate) fn decode_attachments(
     atts: HashMap<String, String>,
+    max_bytes: usize,
 ) -> Result<HashMap<String, Vec<u8>>, CoreError> {
     use base64::prelude::*;
     let mut out = HashMap::with_capacity(atts.len());
@@ -33,6 +38,12 @@ pub(crate) fn decode_attachments(
         let bytes = BASE64_STANDARD.decode(b64.as_bytes()).map_err(|_| {
             CoreError::Validation(format!("invalid base64 for attachment: {filename}"))
         })?;
+        if bytes.len() > max_bytes {
+            return Err(CoreError::Validation(format!(
+                "attachment too large: {filename} ({} bytes > {max_bytes})",
+                bytes.len()
+            )));
+        }
         out.insert(filename, bytes);
     }
     Ok(out)

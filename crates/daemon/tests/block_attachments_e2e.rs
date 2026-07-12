@@ -63,6 +63,7 @@ async fn build_test_daemon() -> Daemon {
         1024,
         "test-embed",
         100_000,
+        10 * 1024 * 1024,
     )
     .expect("daemon builds")
 }

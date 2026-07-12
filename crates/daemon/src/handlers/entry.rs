@@ -85,8 +85,10 @@ impl RpcHandler for Create {
     async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
         let input: CreateEntryInput = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
-        let attachments =
-            crate::handlers::attachment::decode_attachments(input.attachments.unwrap_or_default())?;
+        let attachments = crate::handlers::attachment::decode_attachments(
+            input.attachments.unwrap_or_default(),
+            daemon.attachment_max_bytes,
+        )?;
         let create = CreateEntry {
             title: input.title,
             blocks: input.blocks,
