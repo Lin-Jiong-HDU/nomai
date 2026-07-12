@@ -6,7 +6,7 @@
 
 ## What it is
 
-nomai is a single-binary daemon that stores knowledge entries on the file system (one directory per entry, holding a typed-blocks `.nomai` file plus optional source attachments) and exposes five **primitives** — Entry, Block, Links, Events, Chunks — through a JSON-RPC 2.0 interface over NDJSON/stdio. Clients (TUI, web UI, CLI tools, sync agents) connect by piping JSON-RPC requests to the daemon's stdin and reading responses from stdout.
+nomai is a single-binary daemon that stores knowledge entries on the file system (one directory per entry, holding a typed-blocks `.nomai` file plus optional source attachments — images/PDFs via the `attachments` RPC parameter and `attachment.read` / `attachment.list`) and exposes five **primitives** — Entry, Block, Links, Events, Chunks — through a JSON-RPC 2.0 interface over NDJSON/stdio. Clients (TUI, web UI, CLI tools, sync agents) connect by piping JSON-RPC requests to the daemon's stdin and reading responses from stdout.
 
 The core is deliberately mechanism, not policy: it stores, indexes, and emits events. It does not impose a specific RAG strategy, sync target, or schema. You compose those on top.
 
@@ -17,7 +17,7 @@ Early alpha. API surface is stabilizing but may change before 1.0. Currently sin
 ## Key features
 
 - **5 primitives**: Entry / Block / Links / Events / Chunks — composable building blocks
-- **Blocks primitive**: each entry is composed of typed blocks (`claim` / `evidence` / `question` / `source` / `note` / `connection`) — see `.nomai` format
+- **Blocks primitive**: each entry is composed of typed blocks (`claim` / `evidence` / `question` / `source` / `note` / `connection` / `image`) — see `.nomai` format
 - **File-system as source of truth**: every entry has a `.nomai` file on disk; the SQLite index is derived and can be rebuilt via `index.rebuild`
 - **Batch RPC**: `$ref` inter-op references + atomic transactions — compose multi-step workflows in one request
 - **MCP server**: native Model Context Protocol compatibility — Claude Desktop / Cursor / any MCP client can connect directly
@@ -108,7 +108,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"entry.create","params":{"title":"Hello",
    └─────────────────┘  └──────────────────┘
 ```
 
-The file system is the source of truth — every entry has a `.nomai` file (typed blocks + metadata) on disk, plus any source attachments in the same directory. SQLite holds the derived index (FTS5 full-text, sqlite-vec chunk embeddings) and can be dropped and rebuilt via `index.rebuild` if it drifts.
+The file system is the source of truth — every entry has a `.nomai` file (typed blocks + metadata) on disk, plus any source attachments in the same directory. Attachments are first-class: `entry.create` / `block.append` / `block.update` accept an `attachments: {filename: base64}` parameter that writes sibling files, and `attachment.read` / `attachment.list` round-trip them back; an `@image` block (`src=<filename>`, caption as body) points at one. SQLite holds the derived index (FTS5 full-text, sqlite-vec chunk embeddings) and can be dropped and rebuilt via `index.rebuild` if it drifts.
 
 **Lib mode**: `nomai-core` is a plain Rust crate. If you don't want the daemon overhead, depend on it directly and call `EntryService` / `BlockService` / `LinkService` / etc. from your own binary. Or use `nomai-daemon`'s `Daemon::from_services()` constructor to build a full daemon (with RPC dispatch + MCP + batch) in-process, and `register_handler()` to add custom RPCs.
 

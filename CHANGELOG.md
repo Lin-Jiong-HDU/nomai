@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Multimodal image support.** `@image` block type (caption as body, reused
+  for search); binary attachments as sibling files (`entry.create` /
+  `block.append` / `block.update` accept `attachments: {filename: base64}`);
+  `attachment.read` / `attachment.list` RPCs; `[data] attachment_max_bytes`
+  config (default 10 MiB). Image captions flow through the existing
+  chunk/FTS/embedding pipeline — searchable via `search.semantic` /
+  `search.fulltext`. See `docs/reference.md` §attachment.
+
 ## [0.3.1] - 2026-07-11
 
 ### Added

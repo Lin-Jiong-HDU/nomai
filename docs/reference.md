@@ -7,6 +7,7 @@ Complete reference for the JSON-RPC API, error codes, configuration, and cache i
 - [RPC reference](#rpc-reference)
   - [entry.\*](#entry-methods)
   - [block.\*](#block-methods)
+  - [attachment.\*](#attachment-methods)
   - [index.\* / system.\*](#index--system)
   - [link.\*](#link-methods)
   - [events.\*](#events-methods)
@@ -32,20 +33,20 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 
 | Method         | Params                                                | Returns             | Notes                                                                             |
 | -------------- | ----------------------------------------------------- | ------------------- | --------------------------------------------------------------------------------- |
-| `entry.create` | `title`, `blocks: [{type, text, attrs?}]`, `tags?`, `attrs?`, `source?` | `Entry` | Auto-embeds block texts if non-empty                                              |
+| `entry.create` | `title`, `blocks: [{type, text, attrs?}]`, `tags?`, `attrs?`, `source?`, `attachments?` | `Entry` | Auto-embeds block texts if non-empty. `attachments: {filename: base64}` writes sibling files under the entry dir; `@image`/`@source` `src` validated against disk |
 | `entry.get`    | `id`                                                  | `Entry`             | 1001 if not found                                                                 |
 | `entry.update` | `id`, `title?`, `blocks?`, `tags?`, `attrs?`, `source?` | `Entry`           | Re-embeds if blocks change; clears embedding if blocks become empty               |
 | `entry.delete` | `id`                                                  | `{"deleted": true, "id": "<ulid>"}` | Cascades to links + chunks + chunk embeddings. `id` added in 0.2.0 (Spec 8 Plan 1 / F-entry-1) for consistency with `block.delete` |
 | `entry.list`   | `tag?`, `limit?`(50), `offset?`(0), `order?`          | `{items, total, has_more}`    | `order`: `created_desc`(default) / `created_asc` / `updated_desc` / `updated_asc`. `has_more` (added in 0.2.0, Spec 8 Plan 1 / F-entry-4) is true when `total > offset + items.len()` |
 
-**Block input shape**: `BlockInput` is `{ type: String, text: String, attrs?: Value }`. Valid types: `claim`, `evidence`, `question`, `source`, `note`, `connection` (the `@connection` type requires `target` and `relation` attrs).
+**Block input shape**: `BlockInput` is `{ type: String, text: String, attrs?: Value }`. Valid types: `claim`, `evidence`, `question`, `source`, `note`, `connection`, `image` (the `@connection` type requires `target` and `relation` attrs; `@image` requires `src` attr — see below).
 
 ### block.{#block-methods}
 
 | Method         | Params                                  | Returns             | Notes                                         |
 | -------------- | --------------------------------------- | ------------------- | --------------------------------------------- |
-| `block.append` | `entry_id`, `type`, `text`, `attrs?`    | `Block`             | Auto-assigned `ordinal = max(ordinal)+1`      |
-| `block.update` | `id`, `type?`, `text?`, `attrs?`        | `Block`             | Re-chunks if text changed                     |
+| `block.append` | `entry_id`, `type`, `text`, `attrs?`, `attachments?`    | `Block`             | Auto-assigned `ordinal = max(ordinal)+1`. Optional `attachments: {filename: base64}` writes sibling files |
+| `block.update` | `id`, `type?`, `text?`, `attrs?`, `attachments?`        | `Block`             | Re-chunks if text changed. Optional `attachments: {filename: base64}` writes sibling files |
 | `block.delete` | `id`                                    | `{"deleted": true, "id": "<ulid>"}` | 1001 if not found              |
 | `block.get`    | `id`                                    | `Block`             | 1001 if not found                             |
 | `block.list`   | `entry_id`                              | `{items, total}`    | Sorted by `ordinal` ascending. Added in 0.2.0 (Spec 8 Plan 1 / F-block-1) for namespace completeness |
@@ -53,6 +54,15 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 Each mutation rewrites the parent entry's `.nomai` file automatically (no separate RPC needed). Chunk re-derivation is automatic on `text` change. Chunks are split at `config.chunking.target_size` characters (default 1024) via paragraph → sentence → hard-cut fallback.
 
 **`@connection` blocks**: setting `type: "connection"` requires `attrs: { target: "<entry_id>", relation: "<string>" }`. These blocks also populate the `links` table — `link.neighbors` will see the typed edge.
+
+**`@image` blocks**: setting `type: "image"` requires `attrs: { src: "<filename>" }`, where `src` is a sibling file under the entry dir (a local filename, never a URL). The block `text` is the caption — it flows through the normal chunk / FTS / embedding pipeline, so image captions are searchable via `search.semantic` / `search.fulltext` like any other block. Optional attrs: `alt` (accessibility text), `width`. The referenced file must exist on disk (validated on write); missing file → code 1003. Attach the binary itself via the `attachments` param on `entry.create` / `block.append` / `block.update`, or by placing the file in the entry dir out-of-band.
+
+### attachment.{#attachment-methods}
+
+| Method            | Params                          | Returns                                       | Notes                                                                                       |
+| ----------------- | ------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `attachment.list` | `entry_id`                      | `{items: [{filename, size, modified}]}`       | Sibling files under the entry dir (excludes `entry.nomai`). Empty `items` if none.          |
+| `attachment.read` | `entry_id`, `filename`          | `{filename, mime, base64}`                    | MIME from extension (png/jpeg/gif/webp/pdf/…, else `application/octet-stream`). base64 transport. 1003 if not found. |
 
 ### index.* / system.*{#index--system}
 
@@ -104,7 +114,7 @@ Note: `chunk.create` / `chunk.delete` constants exist in `protocol::method::chun
 | `search.semantic` | `query`, `limit?`(10), `granularity?`("entry"=default\|"chunk"), `block_type?` | `{items}`        | Chunk-level KNN via `vec_chunk_embeddings`; optional `block_type` filter |
 | `search.hybrid`   | —                                                               | —                           | **Reserved**: returns -32601                   |
 
-**Block type filter**: `block_type` accepts one of `claim` / `evidence` / `question` / `source` / `note` / `connection`. Omit for all types. Example: `search.fulltext` with `block_type: "claim"` returns only matches in claim blocks.
+**Block type filter**: `block_type` accepts one of `claim` / `evidence` / `question` / `source` / `note` / `connection` / `image`. Omit for all types. Example: `search.fulltext` with `block_type: "claim"` returns only matches in claim blocks.
 
 **`search.semantic` return shapes**:
 
@@ -239,7 +249,7 @@ Example MCP handshake:
 | `-32603` | Internal error   | Unexpected server error                                                               |
 | `1001`   | NotFound         | Entry / link / event / chunk id does not exist                                        |
 | `1002`   | Provider error   | Embedding or LLM HTTP failure (data has `kind` field)                                 |
-| `1003`   | Validation error | Bad attrs (non-object), FK violation, UNIQUE conflict, missing required params        |
+| `1003`   | Validation error | Bad attrs (non-object), FK violation, UNIQUE conflict, missing required params. Attachment-specific messages: `attachment too large: <name> (<N> bytes > <max>)`, `declared source not found: <name>`, `image block missing required attr: src`, `invalid base64 for attachment: <name>`, `unsafe attachment filename: <name>`, `attachment not found: <name>` |
 | `1004`   | Config error     | Missing env var, malformed config                                                     |
 | `1005`   | FS error         | Filesystem I/O failure (data has `kind` field from `io::ErrorKind`)                   |
 | `1006`   | .nomai format    | Parse error in a `.nomai` file (data has `parse_error` field)                         |
@@ -267,6 +277,7 @@ Config lives at `~/.config/nomai/config.toml` (Linux), or override with `nomai-d
 ```toml
 [data]
 db_path = "~/.local/share/nomai/db.sqlite"   # ~ expansion supported
+attachment_max_bytes = 10485760              # 10 MiB default; decode-time cap on each attachment (1003 if exceeded)
 
 [embedding]
 base_url    = "https://your-embedding-endpoint/v1"
