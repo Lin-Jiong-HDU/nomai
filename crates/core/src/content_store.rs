@@ -289,7 +289,14 @@ fn sanitize_attachment_filename(filename: &str) -> Result<String, CoreError> {
         || filename.contains('\0')
         || filename
             .chars()
-            .any(|c| matches!(c, ':' | '<' | '>' | '*' | '?' | '|' | '"'));
+            .any(|c| matches!(c, ':' | '<' | '>' | '*' | '?' | '|' | '"'))
+        // hardening (#5): reject whitespace-only, leading/trailing whitespace,
+        // and control chars (C0/C1 + DEL). Not a traversal fix (../, /, \
+        // already blocked above) — portability + RPC ergonomics (filenames
+        // surface to attachment.list/read callers).
+        || filename.trim().is_empty()
+        || filename != filename.trim()
+        || filename.chars().any(|c| c.is_control());
     if bad {
         return Err(CoreError::Validation(format!(
             "unsafe attachment filename: {filename}"
@@ -550,6 +557,31 @@ mod tests {
             "..",
             "",
             "a:b",
+        ] {
+            let err = store.write_attachment(id, bad, b"x").unwrap_err();
+            assert!(
+                matches!(err, CoreError::Validation(ref m) if m.contains("unsafe attachment filename")),
+                "expected Validation for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_filename_rejects_whitespace_and_control_chars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path().to_path_buf());
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        store.write_entry(id, &sample_doc()).unwrap();
+
+        for bad in [
+            " leading.png",
+            "trailing.png ",
+            " ",
+            "\t",
+            "\n",
+            "x\ny.png",
+            "a\tb",
+            "\x7f",
         ] {
             let err = store.write_attachment(id, bad, b"x").unwrap_err();
             assert!(
