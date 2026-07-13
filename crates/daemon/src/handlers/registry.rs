@@ -30,6 +30,8 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     m.insert(h.method(), Arc::new(h));
     let h = entry::List;
     m.insert(h.method(), Arc::new(h));
+    let h = entry::PurgeTransient;
+    m.insert(h.method(), Arc::new(h));
 
     // link.*
     let h = link::Create;

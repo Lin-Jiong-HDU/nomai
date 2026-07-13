@@ -276,6 +276,81 @@ impl RpcHandler for List {
     }
 }
 
+pub struct PurgeTransient;
+#[async_trait]
+impl RpcHandler for PurgeTransient {
+    fn method(&self) -> &'static str {
+        "entries.purge_transient"
+    }
+    fn description(&self) -> &'static str {
+        "Purge transient (short-term) entries — those created with attrs.transient=true. SAFE BY DEFAULT: returns a preview without deleting (dry_run defaults to true). Call again with dry_run=false to actually delete. Only affects transient entries; permanent entries are never touched. Use older_than_secs to limit to entries older than a threshold (e.g. 604800 for 7 days). Returns {dry_run, count, entries:[{id,title,created_at}...max50], truncated} in preview mode, or {dry_run:false, deleted, ids, failed:[{id,error}]} in real mode."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "older_than_secs": {"type": "integer", "minimum": 0,
+                    "description": "Only purge transient entries older than this many seconds. Omit = all transient entries."},
+                "dry_run": {"type": "boolean", "default": true,
+                    "description": "If true (default), return a preview without deleting. Set false to actually delete."}
+            },
+            "additionalProperties": false
+        }))
+    }
+    async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
+        #[derive(serde::Deserialize)]
+        struct P {
+            #[serde(default)]
+            older_than_secs: Option<u64>,
+            #[serde(default = "default_dry_run")]
+            dry_run: bool,
+        }
+        fn default_dry_run() -> bool {
+            true
+        }
+
+        let p: P = serde_json::from_value(params)
+            .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+        let older_than = p.older_than_secs.map(std::time::Duration::from_secs);
+
+        let entries = daemon.entries.clone();
+        let result = blocking(move || entries.purge_transient(older_than, p.dry_run)).await??;
+
+        // Real deletes invalidate the search cache (purged entries may still
+        // appear in cached hits). Bump generation so the next search recomputes.
+        if !result.dry_run && !result.deleted_ids.is_empty() {
+            daemon.search_cache.bump_generation();
+        }
+
+        if result.dry_run {
+            let entries_json: Vec<Value> = result
+                .candidates
+                .iter()
+                .map(|c| json!({ "id": c.id, "title": c.title, "created_at": c.created_at }))
+                .collect();
+            Ok(json!({
+                "dry_run": true,
+                "count": result.total_candidates,
+                "entries": entries_json,
+                "truncated": result.truncated,
+            }))
+        } else {
+            let ids: Vec<String> = result.deleted_ids.iter().map(|u| u.to_string()).collect();
+            let failed: Vec<Value> = result
+                .failed
+                .iter()
+                .map(|(id, e)| json!({ "id": id, "error": e }))
+                .collect();
+            Ok(json!({
+                "dry_run": false,
+                "deleted": result.deleted_ids.len(),
+                "ids": ids,
+                "failed": failed,
+            }))
+        }
+    }
+}
+
 #[cfg(test)]
 mod descriptor_tests {
     use super::*;
@@ -366,5 +441,13 @@ mod descriptor_tests {
         assert!(validate(&schema, &json!({"transient": true})).is_ok());
         assert!(validate(&schema, &json!({"transient": false})).is_ok());
         assert!(validate(&schema, &json!({})).is_ok());
+    }
+
+    #[test]
+    fn purge_transient_schema_defaults_dry_run_true() {
+        let schema = PurgeTransient.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_ok());
+        assert!(validate(&schema, &json!({"older_than_secs": 3600})).is_ok());
+        assert!(validate(&schema, &json!({"dry_run": false})).is_ok());
     }
 }

@@ -12,6 +12,11 @@ pub mod entry {
     pub const LIST: &str = "entry.list";
 }
 
+pub mod entries {
+    /// Purge transient (short-term) entries (Spec transient §6.2).
+    pub const PURGE_TRANSIENT: &str = "entries.purge_transient";
+}
+
 pub mod search {
     pub const FULLTEXT: &str = "search.fulltext";
     pub const SEMANTIC: &str = "search.semantic";

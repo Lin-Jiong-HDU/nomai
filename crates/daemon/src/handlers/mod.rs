@@ -858,6 +858,57 @@ mod tests {
         assert_eq!(err.code, 1001);
     }
 
+    async fn create_entry_with_attrs(daemon: &Daemon, title: &str, attrs: Value) {
+        daemon
+            .dispatch(req(
+                "entry.create",
+                json!({"title": title, "blocks": [{"type":"note","text":"x"}], "attrs": attrs}),
+            ))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn entries_purge_transient_dry_run_is_default_and_safe() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+        create_entry_with_attrs(&daemon, "long", json!({})).await;
+        create_entry_with_attrs(&daemon, "short-1", json!({"transient": true})).await;
+        create_entry_with_attrs(&daemon, "short-2", json!({"transient": true})).await;
+
+        // dry_run defaults to true → preview, nothing deleted
+        let resp = daemon
+            .dispatch(req("entries.purge_transient", json!({})))
+            .await;
+        let r = resp.result.unwrap();
+        assert_eq!(r["dry_run"], true);
+        assert_eq!(r["count"], 2);
+        assert_eq!(r["entries"].as_array().unwrap().len(), 2);
+        // All 3 entries still present
+        let listed = daemon.dispatch(req("entry.list", json!({}))).await;
+        assert_eq!(listed.result.unwrap()["total"], 3);
+    }
+
+    #[tokio::test]
+    async fn entries_purge_transient_real_delete_works() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+        create_entry_with_attrs(&daemon, "long", json!({})).await;
+        create_entry_with_attrs(&daemon, "short-1", json!({"transient": true})).await;
+
+        let resp = daemon
+            .dispatch(req("entries.purge_transient", json!({"dry_run": false})))
+            .await;
+        let r = resp.result.unwrap();
+        assert_eq!(r["dry_run"], false);
+        assert_eq!(r["deleted"], 1);
+        assert_eq!(r["ids"].as_array().unwrap().len(), 1);
+        // Only the long entry remains
+        let listed = daemon.dispatch(req("entry.list", json!({}))).await;
+        assert_eq!(listed.result.unwrap()["total"], 1);
+    }
+
     #[tokio::test]
     async fn events_purge_deletes_old_events() {
         let server = MockServer::start().await;
@@ -1320,7 +1371,7 @@ mod tests {
         // 32 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:5,
         // attachment:2, events:3, search:2, provider:1, cache:2, batch:1,
         // index:3, system:1).
-        assert_eq!(tools.len(), 32);
+        assert_eq!(tools.len(), 33);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1452,7 +1503,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 33); // 32 built-in + custom.echo
+        assert_eq!(tools.len(), 34); // 33 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----
