@@ -195,6 +195,50 @@ pub struct EntryListResult {
     pub has_more: bool,
 }
 
+/// One transient entry matched by purge. Used for the dry-run preview.
+#[derive(Debug, Clone)]
+pub struct TransientCandidate {
+    pub id: Ulid,
+    pub title: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Result of `EntryService::purge_transient`.
+///
+/// `candidates` / `total_candidates` / `truncated` are populated in both
+/// modes (the preview slice is capped at `PURGE_PREVIEW_LIMIT`, the count is
+/// the true total). `deleted_ids` / `failed` are only meaningful when
+/// `dry_run == false`.
+#[derive(Debug)]
+pub struct PurgeTransientResult {
+    pub dry_run: bool,
+    pub total_candidates: u64,
+    pub candidates: Vec<TransientCandidate>,
+    pub truncated: bool,
+    pub deleted_ids: Vec<Ulid>,
+    pub failed: Vec<(Ulid, String)>,
+}
+
+/// Maximum number of preview entries returned in a dry-run. The true count
+/// is always reported in `total_candidates`; this only caps the serialized
+/// preview to bound client context.
+pub const PURGE_PREVIEW_LIMIT: usize = 50;
+
+/// Map a purge candidate row `(id, title, created_at)` to a
+/// `TransientCandidate`. Shared by the threshold / no-threshold branches of
+/// `purge_transient`.
+fn parse_transient_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransientCandidate> {
+    let id_str: String = row.get(0)?;
+    let title: String = row.get(1)?;
+    let created_str: String = row.get(2)?;
+    Ok(TransientCandidate {
+        id: crate::storage::from_text(0, &id_str, ulid::Ulid::from_string)?,
+        title,
+        created_at: crate::storage::from_text(2, &created_str, chrono::DateTime::parse_from_rfc3339)?
+            .with_timezone(&chrono::Utc),
+    })
+}
+
 #[derive(Debug)]
 pub struct FulltextSearchResult {
     pub entry: Entry,
@@ -1249,6 +1293,111 @@ impl EntryService {
         })
     }
 
+    /// Return the subset of `ids` that are marked transient. Used by the
+    /// search demotion policy (Spec transient §5.2) to identify which cached
+    /// hits to down-rank — without re-running the search and without caching
+    /// a possibly-stale transient snapshot.
+    pub fn transient_ids_among(
+        &self,
+        ids: &[String],
+    ) -> Result<std::collections::HashSet<String>, CoreError> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT e.id FROM entries e WHERE {TRANSIENT_PREDICATE_TRUE} AND e.id IN ({placeholders})"
+        );
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&sql)?;
+        let bind: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(bind.as_slice(), |row| row.get::<_, String>(0))?;
+        let mut set = std::collections::HashSet::new();
+        for r in rows {
+            set.insert(r?);
+        }
+        Ok(set)
+    }
+
+    /// Purge transient entries. See Spec §6.2 / §7.
+    ///
+    /// `older_than`: when `Some(d)`, only entries created more than `d` ago
+    /// (strict `created_at < now - d`). `None` → all transient entries.
+    ///
+    /// `dry_run = true`: select candidates, return a capped preview, delete
+    /// nothing. `dry_run = false`: re-select candidates under the same
+    /// predicate (don't trust a stale preview id list), then call `delete(id)`
+    /// per entry. A single failure does NOT abort the batch — it is recorded
+    /// in `failed` and the loop continues (`daemon never panics`).
+    pub fn purge_transient(
+        &self,
+        older_than: Option<std::time::Duration>,
+        dry_run: bool,
+    ) -> Result<PurgeTransientResult, CoreError> {
+        let threshold =
+            older_than.map(|d| Utc::now() - chrono::Duration::from_std(d).unwrap());
+        let sql = match &threshold {
+            Some(_) => format!(
+                "SELECT e.id, e.title, e.created_at FROM entries e \
+                 WHERE {TRANSIENT_PREDICATE_TRUE} AND e.created_at < ? \
+                 ORDER BY e.created_at ASC"
+            ),
+            None => format!(
+                "SELECT e.id, e.title, e.created_at FROM entries e \
+                 WHERE {TRANSIENT_PREDICATE_TRUE} \
+                 ORDER BY e.created_at ASC"
+            ),
+        };
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = match &threshold {
+            Some(t) => stmt
+                .query_map(params![t.to_rfc3339()], parse_transient_candidate)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+            None => stmt
+                .query_map([], parse_transient_candidate)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        };
+        drop(stmt);
+        drop(conn);
+
+        let total = rows.len() as u64;
+        let truncated = rows.len() > PURGE_PREVIEW_LIMIT;
+        let candidates: Vec<TransientCandidate> =
+            rows.iter().take(PURGE_PREVIEW_LIMIT).cloned().collect();
+
+        if dry_run {
+            return Ok(PurgeTransientResult {
+                dry_run: true,
+                total_candidates: total,
+                candidates,
+                truncated,
+                deleted_ids: vec![],
+                failed: vec![],
+            });
+        }
+
+        // Real delete: per-entry delete(), collect results, tolerate failures.
+        let mut deleted_ids = Vec::new();
+        let mut failed = Vec::new();
+        for c in &rows {
+            match self.delete(c.id) {
+                Ok(()) => deleted_ids.push(c.id),
+                Err(e) => failed.push((c.id, e.to_string())),
+            }
+        }
+
+        Ok(PurgeTransientResult {
+            dry_run: false,
+            total_candidates: total,
+            candidates,
+            truncated,
+            deleted_ids,
+            failed,
+        })
+    }
+
     /// Fulltext search over `fts_blocks` (per-block FTS5, trigram tokenizer).
     /// Optional `block_type` filter narrows matches to a single block type.
     /// Results are deduplicated to entries (an entry with multiple matching
@@ -1983,6 +2132,99 @@ mod tests {
             .unwrap();
         assert_eq!(result.total, 1);
         assert_eq!(result.items[0].title, "s-tagged");
+    }
+
+    #[test]
+    fn purge_transient_dry_run_deletes_nothing() {
+        let svc = EntryService::for_test().unwrap();
+        seed(&svc, "long", vec![]);
+        seed_transient(&svc, "short-1", true);
+        seed_transient(&svc, "short-2", true);
+        let result = svc.purge_transient(None, true).unwrap();
+        assert!(result.dry_run);
+        assert_eq!(result.total_candidates, 2);
+        assert_eq!(result.candidates.len(), 2);
+        assert!(!result.truncated);
+        assert!(result.deleted_ids.is_empty());
+        assert_eq!(svc.list(EntryListQuery::default()).unwrap().total, 3);
+    }
+
+    #[test]
+    fn purge_transient_real_delete_removes_only_transient() {
+        let svc = EntryService::for_test().unwrap();
+        let long = seed(&svc, "long", vec![]);
+        let s1 = seed_transient(&svc, "short-1", true);
+        let _s2 = seed_transient(&svc, "short-2", true);
+        let result = svc.purge_transient(None, false).unwrap();
+        assert!(!result.dry_run);
+        assert_eq!(result.deleted_ids.len(), 2);
+        assert!(result.failed.is_empty());
+        let remaining = svc.list(EntryListQuery::default()).unwrap();
+        assert_eq!(remaining.total, 1);
+        assert_eq!(remaining.items[0].id, long.id);
+        assert!(svc.get(s1.id).is_err());
+    }
+
+    #[test]
+    fn purge_transient_emits_entry_deleted_events() {
+        let svc = EntryService::for_test().unwrap();
+        let events = crate::event_service::EventService::for_test_shared_with_entries(&svc);
+        seed_transient(&svc, "short", true);
+        let before = events.list(Default::default()).unwrap().items.len();
+        svc.purge_transient(None, false).unwrap();
+        let after = events.list(Default::default()).unwrap();
+        assert_eq!(after.items.len() - before, 1);
+        let last_type = after.items[after.items.len() - 1].type_.clone();
+        assert_eq!(last_type, "entry.deleted");
+    }
+
+    #[test]
+    fn purge_transient_respects_older_than_filter() {
+        let svc = EntryService::for_test().unwrap();
+        seed_transient(&svc, "a", true);
+        seed_transient(&svc, "b", true);
+        // 极大 older_than:刚创建的不够老 → 0 命中(创建时间不早于 now-1年)
+        let old = svc
+            .purge_transient(Some(std::time::Duration::from_secs(365 * 86400)), true)
+            .unwrap();
+        assert_eq!(old.total_candidates, 0);
+        // None → 全部 transient
+        let all = svc.purge_transient(None, true).unwrap();
+        assert_eq!(all.total_candidates, 2);
+    }
+
+    #[test]
+    fn purge_transient_empty_set_is_noop() {
+        let svc = EntryService::for_test().unwrap();
+        seed(&svc, "long", vec![]);
+        let dry = svc.purge_transient(None, true).unwrap();
+        assert_eq!(dry.total_candidates, 0);
+        let real = svc.purge_transient(None, false).unwrap();
+        assert_eq!(real.deleted_ids.len(), 0);
+        assert_eq!(svc.list(EntryListQuery::default()).unwrap().total, 1);
+    }
+
+    #[test]
+    fn purge_transient_preview_truncates_with_true_count() {
+        let svc = EntryService::for_test().unwrap();
+        for i in 0..(PURGE_PREVIEW_LIMIT + 10) {
+            seed_transient(&svc, &format!("s{i}"), true);
+        }
+        let result = svc.purge_transient(None, true).unwrap();
+        assert_eq!(result.candidates.len(), PURGE_PREVIEW_LIMIT);
+        assert!(result.truncated);
+        assert_eq!(result.total_candidates as usize, PURGE_PREVIEW_LIMIT + 10);
+    }
+
+    #[test]
+    fn transient_ids_among_returns_only_transient_subset() {
+        let svc = EntryService::for_test().unwrap();
+        let long = seed(&svc, "long", vec![]);
+        let short = seed_transient(&svc, "short", true);
+        let ids = vec![long.id.to_string(), short.id.to_string()];
+        let set = svc.transient_ids_among(&ids).unwrap();
+        assert_eq!(set.len(), 1);
+        assert!(set.contains(&short.id.to_string()));
     }
 
     // ----- has_more tests (Spec 8 Plan 1 / F-entry-4) -----
