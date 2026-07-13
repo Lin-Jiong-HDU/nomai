@@ -322,6 +322,26 @@
       "name": "chunk.list"
     },
     {
+      "description": "Purge transient (short-term) entries — those created with attrs.transient=true. SAFE BY DEFAULT: returns a preview without deleting (dry_run defaults to true). Call again with dry_run=false to actually delete. Only affects transient entries; permanent entries are never touched. Use older_than_secs to limit to entries older than a threshold (e.g. 604800 for 7 days). Returns {dry_run, count, entries:[{id,title,created_at}...max50], truncated} in preview mode, or {dry_run:false, deleted, ids, failed:[{id,error}]} in real mode.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "dry_run": {
+            "default": true,
+            "description": "If true (default), return a preview without deleting. Set false to actually delete.",
+            "type": "boolean"
+          },
+          "older_than_secs": {
+            "description": "Only purge transient entries older than this many seconds. Omit = all transient entries.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "entries.purge_transient"
+    },
+    {
       "description": "Create a new knowledge entry with title and content blocks. Chunks and embeddings are derived automatically. Returns the created entry with its generated ULID.",
       "inputSchema": {
         "additionalProperties": false,
@@ -445,6 +465,10 @@
           },
           "tag": {
             "type": "string"
+          },
+          "transient": {
+            "description": "Filter by short-term marker: true → only transient entries, false → only long-term, omit → all.",
+            "type": "boolean"
           }
         },
         "type": "object"

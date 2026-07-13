@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Transient (short-term) entries.** Entries created with `attrs.transient=true`
+  are now down-ranked in `search.semantic` / `search.fulltext` (score × 0.5,
+  applied live over the search cache — policy stays out of the cache key), can
+  be listed via `entry.list(transient: true|false)`, and purged in bulk via the
+  new `entries.purge_transient` RPC (safe by default — `dry_run=true` previews
+  first, scope hard-limited to transient entries, reuses the existing per-entry
+  delete cascade). No schema migration; the marker lives in `attrs`.
+
 ## [0.4.0] - 2026-07-12
 
 ### Added
