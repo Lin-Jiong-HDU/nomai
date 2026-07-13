@@ -83,6 +83,7 @@ pub struct ExportResult {
     pub errors: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct EntryService {
     conn: Arc<Mutex<Connection>>,
     content_store: Arc<crate::content_store::ContentStore>,

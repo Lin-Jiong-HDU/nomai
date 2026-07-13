@@ -57,6 +57,70 @@ fn serialize_fulltext_result(r: &nomai_core::FulltextSearchResult) -> serde_json
     })
 }
 
+/// Search demotion penalty for transient entries (Spec §5). Hardcoded for
+/// now; promote to config only if a real need appears (YAGNI).
+const TRANSIENT_PENALTY: f64 = 0.5;
+
+/// Collect the transient subset among `entry_ids` via a single IN query
+/// (policy applied live — never a stale snapshot, Spec §5.2).
+async fn transient_set(
+    entries: &nomai_core::EntryService,
+    entry_ids: Vec<String>,
+) -> Result<std::collections::HashSet<String>, CoreError> {
+    if entry_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let entries = entries.clone();
+    blocking(move || entries.transient_ids_among(&entry_ids)).await?
+}
+
+/// Demote transient hits (score *= TRANSIENT_PENALTY) and re-sort by score
+/// desc. `entry_id_of` extracts the owning entry id from each wire item.
+fn downrank_inner(
+    items: &mut [Value],
+    transient: &std::collections::HashSet<String>,
+    entry_id_of: impl Fn(&Value) -> Option<String>,
+) {
+    for it in items.iter_mut() {
+        let is_t = entry_id_of(it)
+            .map(|id| transient.contains(&id))
+            .unwrap_or(false);
+        if is_t {
+            if let Some(s) = it["score"].as_f64() {
+                it["score"] = json!(s * TRANSIENT_PENALTY);
+            }
+        }
+    }
+    items.sort_by(|a, b| {
+        b["score"]
+            .as_f64()
+            .partial_cmp(&a["score"].as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+/// Fulltext wire items expose `entry.id`.
+fn downrank_fulltext(
+    mut items: Vec<Value>,
+    transient: &std::collections::HashSet<String>,
+) -> Vec<Value> {
+    downrank_inner(&mut items, transient, |v| {
+        v["entry"]["id"].as_str().map(String::from)
+    });
+    items
+}
+
+/// Semantic wire items expose `entry_id`.
+fn downrank_semantic(
+    mut items: Vec<Value>,
+    transient: &std::collections::HashSet<String>,
+) -> Vec<Value> {
+    downrank_inner(&mut items, transient, |v| {
+        v["entry_id"].as_str().map(String::from)
+    });
+    items
+}
+
 pub struct Fulltext;
 #[async_trait]
 impl RpcHandler for Fulltext {
@@ -107,7 +171,14 @@ impl RpcHandler for Fulltext {
                 },
             )
             .await?;
-        Ok(json!({ "items": cached.as_ref() }))
+        let items: Vec<Value> = cached.as_ref().clone();
+        let ids: Vec<String> = items
+            .iter()
+            .filter_map(|v| v["entry"]["id"].as_str().map(String::from))
+            .collect();
+        let transient = transient_set(&daemon.entries, ids).await?;
+        let items = downrank_fulltext(items, &transient);
+        Ok(json!({ "items": items }))
     }
 }
 
@@ -158,19 +229,82 @@ impl RpcHandler for Semantic {
                         .await??;
                         Ok(items_inner
                             .into_iter()
-                            .map(|r| json!({ "chunk": r.chunk, "score": r.score }))
+                            .map(|r| json!({ "chunk": r.chunk, "score": r.score, "entry_id": r.entry_id }))
                             .collect::<Vec<_>>())
                     }
                 },
             )
             .await?;
-        Ok(json!({ "items": cached.as_ref() }))
+        let items: Vec<Value> = cached.as_ref().clone();
+        let ids: Vec<String> = items
+            .iter()
+            .filter_map(|v| v["entry_id"].as_str().map(String::from))
+            .collect();
+        let transient = transient_set(&daemon.entries, ids).await?;
+        let items = downrank_semantic(items, &transient);
+        Ok(json!({ "items": items }))
     }
 }
 
 #[cfg(test)]
 mod descriptor_tests {
     use super::*;
+
+    fn downrank_transient_fulltext_for_test(
+        items: Vec<Value>,
+        svc: &nomai_core::EntryService,
+    ) -> Result<Vec<Value>, CoreError> {
+        let ids: Vec<String> = items
+            .iter()
+            .filter_map(|v| v["entry"]["id"].as_str().map(String::from))
+            .collect();
+        let set = svc.transient_ids_among(&ids)?;
+        Ok(downrank_fulltext(items, &set))
+    }
+
+    #[test]
+    fn downrank_demotes_transient_and_resorts() {
+        let svc = nomai_core::EntryService::for_test().unwrap();
+        svc.create(nomai_core::CreateEntry {
+            title: "long".into(),
+            blocks: vec![nomai_core::BlockInput {
+                r#type: "note".into(),
+                text: "rust ownership borrow".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: None,
+            source: None,
+            attachments: None,
+        })
+        .unwrap();
+        svc.create(nomai_core::CreateEntry {
+            title: "short".into(),
+            blocks: vec![nomai_core::BlockInput {
+                r#type: "note".into(),
+                text: "rust ownership borrow".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: Some(json!({"transient": true})),
+            source: None,
+            attachments: None,
+        })
+        .unwrap();
+        let hits = svc.fulltext_search("rust", 10, None).unwrap();
+        let items: Vec<Value> = hits.iter().map(serialize_fulltext_result).collect();
+        let demoted = downrank_transient_fulltext_for_test(items, &svc).unwrap();
+        // 长期必须排到第一(其 score 未变,短期 score *= 0.5 沉后)
+        assert_eq!(demoted[0]["entry"]["title"].as_str(), Some("long"));
+        // 短期 score 被乘 0.5
+        let short_item = demoted
+            .iter()
+            .find(|v| v["entry"]["title"].as_str() == Some("short"))
+            .unwrap();
+        let demoted_score = short_item["score"].as_f64().unwrap();
+        let orig = hits.iter().find(|h| h.entry.title == "short").unwrap().score as f64;
+        assert!((demoted_score - orig * 0.5).abs() < 1e-5);
+    }
 
     fn validate(schema: &Value, params: &Value) -> Result<(), Vec<String>> {
         let v = jsonschema::validator_for(schema).unwrap();
