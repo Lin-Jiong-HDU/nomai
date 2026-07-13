@@ -33,6 +33,10 @@ pub struct ChunkListResult {
 pub struct ChunkSearchResult {
     pub chunk: Chunk,
     pub score: f32,
+    /// The entry this chunk's block belongs to. Exposed so callers (notably
+    /// the search demotion policy) can group hits by entry without an extra
+    /// JOIN. `Chunk` itself stays block-addressed (Spec 4 design).
+    pub entry_id: Ulid,
 }
 
 /// Action taken by `ChunkService::ensure_vec_chunk_embeddings` to reconcile

@@ -202,7 +202,7 @@ impl ChunkService {
         let sql = match block_type {
             Some(_) => {
                 "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
-                        vec.distance
+                        b.entry_id, vec.distance
                  FROM vec_chunk_embeddings vec
                  JOIN chunks c ON c.id = vec.chunk_id
                  JOIN blocks b ON b.id = c.block_id
@@ -211,9 +211,10 @@ impl ChunkService {
             }
             None => {
                 "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
-                        vec.distance
+                        b.entry_id, vec.distance
                  FROM vec_chunk_embeddings vec
                  JOIN chunks c ON c.id = vec.chunk_id
+                 JOIN blocks b ON b.id = c.block_id
                  WHERE vec.embedding MATCH ?1 AND k = ?2
                  ORDER BY vec.distance"
             }
@@ -223,20 +224,32 @@ impl ChunkService {
             Some(t) => stmt
                 .query_map(params![&query_bytes, limit as i64, t], |row| {
                     let chunk = row_to_chunk(row, 0)?;
-                    let distance: f64 = row.get(7)?;
+                    let entry_id_str: String = row.get(7)?;
+                    let distance: f64 = row.get(8)?;
                     Ok(ChunkSearchResult {
                         chunk,
                         score: (1.0 - distance) as f32,
+                        entry_id: crate::storage::from_text(
+                            7,
+                            &entry_id_str,
+                            ulid::Ulid::from_string,
+                        )?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?,
             None => stmt
                 .query_map(params![&query_bytes, limit as i64], |row| {
                     let chunk = row_to_chunk(row, 0)?;
-                    let distance: f64 = row.get(7)?;
+                    let entry_id_str: String = row.get(7)?;
+                    let distance: f64 = row.get(8)?;
                     Ok(ChunkSearchResult {
                         chunk,
                         score: (1.0 - distance) as f32,
+                        entry_id: crate::storage::from_text(
+                            7,
+                            &entry_id_str,
+                            ulid::Ulid::from_string,
+                        )?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?,
@@ -668,6 +681,33 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].chunk.id, near, "near should rank first");
         assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn semantic_search_result_carries_entry_id() {
+        crate::storage::init_sqlite_extensions();
+        let (entry_id, block_id, conn) = seed_entry_and_block();
+        let chunks = ChunkService::new(conn.clone()).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
+        // Replace auto-derived chunks with a single known chunk.
+        {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "DELETE FROM chunks WHERE block_id = ?1",
+                params![block_id.to_string()],
+            )
+            .unwrap();
+        }
+        let near = insert_chunk_sql(&conn, block_id, 0, "near", json!({}));
+        chunks.write_embedding(near, &vec_1536(&[1.0])).unwrap();
+        let hits = chunks
+            .semantic_search(&vec_1536(&[0.9, 0.1, 0.0]), 10, None)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].entry_id, entry_id,
+            "semantic result must expose the owning entry_id"
+        );
     }
 
     #[test]
