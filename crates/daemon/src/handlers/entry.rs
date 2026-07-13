@@ -252,7 +252,11 @@ impl RpcHandler for List {
                     "enum": ["created_desc", "created_asc", "updated_desc", "updated_asc"],
                     "default": "created_desc"
                 },
-                "include_blocks": {"type": "boolean"}
+                "include_blocks": {"type": "boolean"},
+                "transient": {
+                    "type": "boolean",
+                    "description": "Filter by short-term marker: true → only transient entries, false → only long-term, omit → all."
+                }
             },
             "additionalProperties": false
         }))
@@ -354,5 +358,13 @@ mod descriptor_tests {
     fn list_schema_accepts_limit() {
         let schema = List.input_schema().unwrap();
         assert!(validate(&schema, &json!({"limit": 10})).is_ok());
+    }
+
+    #[test]
+    fn list_schema_accepts_transient_filter() {
+        let schema = List.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"transient": true})).is_ok());
+        assert!(validate(&schema, &json!({"transient": false})).is_ok());
+        assert!(validate(&schema, &json!({})).is_ok());
     }
 }
