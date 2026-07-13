@@ -127,6 +127,17 @@ fn parse_block_type(s: &str) -> Result<crate::nomai_format::BlockType, CoreError
         .ok_or_else(|| CoreError::Validation(format!("unknown block type: {s}")))
 }
 
+/// SQL predicate matching entries marked transient. Accepts the canonical
+/// string `"true"` (the form produced by a `.nomai` round-trip) AND boolean
+/// `true` / integer `1` (the raw RPC form before any round-trip —
+/// `create_in_tx` serializes `attrs` verbatim). Used by list filter,
+/// purge_transient candidate selection, and (via transient_ids_among) the
+/// search demotion policy. Table alias `e` is baked in — callers query
+/// `FROM entries e ...`.
+pub const TRANSIENT_PREDICATE_TRUE: &str =
+    "(json_extract(e.attrs, '$.transient') = 'true' \
+     OR json_extract(e.attrs, '$.transient') = 1)";
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryListOrder {
@@ -152,6 +163,10 @@ pub struct EntryListQuery {
     /// need block content without N+1 follow-up `entry.get` calls.
     #[serde(default)]
     pub include_blocks: Option<bool>,
+    /// Optional transient filter: `Some(true)` → only short-term entries;
+    /// `Some(false)` → only long-term entries; `None` → all (default).
+    #[serde(default)]
+    pub transient: Option<bool>,
 }
 
 fn default_limit() -> u32 {
@@ -166,6 +181,7 @@ impl Default for EntryListQuery {
             offset: 0,
             order: EntryListOrder::default(),
             include_blocks: None,
+            transient: None,
         }
     }
 }
@@ -1157,44 +1173,62 @@ impl EntryService {
 
         let conn = self.conn.lock().unwrap();
 
-        let items: Vec<Entry> = if let Some(tag) = &query.tag {
-            let sql = format!(
-                "SELECT e.id, e.title, e.tags, e.attrs, e.source, e.created_at, e.updated_at
-                 FROM entries e, json_each(e.tags) AS t
-                 WHERE t.value = ?1
-                 ORDER BY e.{order_clause}
-                 LIMIT ?2 OFFSET ?3"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(params![tag, query.limit, query.offset], |row| {
-                row_to_entry(row, 0)
-            })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        // Dynamic FROM/WHERE construction. `tag` uses json_each (a JOIN in the
+        // FROM clause); `transient` uses a json_extract predicate (WHERE).
+        // Both optional and independent — any combination works.
+        let mut from_extra = String::new();
+        let mut wheres: Vec<&str> = Vec::new();
+        let mut filter_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(tag) = &query.tag {
+            from_extra = ", json_each(e.tags) AS t".to_string();
+            wheres.push("t.value = ?");
+            filter_params.push(Box::new(tag.clone()));
+        }
+        match query.transient {
+            Some(true) => wheres.push(TRANSIENT_PREDICATE_TRUE),
+            Some(false) => wheres.push(
+                "(json_extract(e.attrs, '$.transient') IS NULL OR (json_extract(e.attrs, '$.transient') != 'true' AND json_extract(e.attrs, '$.transient') != 1))",
+            ),
+            None => {}
+        }
+
+        let where_sql = if wheres.is_empty() {
+            String::new()
         } else {
-            let sql = format!(
-                "SELECT id, title, tags, attrs, source, created_at, updated_at
-                 FROM entries
-                 ORDER BY {order_clause}
-                 LIMIT ?1 OFFSET ?2"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(params![query.limit, query.offset], |row| {
-                row_to_entry(row, 0)
-            })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
+            format!(" WHERE {}", wheres.join(" AND "))
         };
 
-        let total: u64 = if let Some(tag) = &query.tag {
-            conn.query_row(
-                "SELECT COUNT(*) FROM entries e, json_each(e.tags) AS t WHERE t.value = ?1",
-                params![tag],
-                |row| row.get::<_, i64>(0),
-            )? as u64
+        // Items query: filter params first, then limit/offset.
+        let items_sql = format!(
+            "SELECT e.id, e.title, e.tags, e.attrs, e.source, e.created_at, e.updated_at
+             FROM entries e{from_extra}{where_sql}
+             ORDER BY e.{order_clause}
+             LIMIT ? OFFSET ?"
+        );
+        let mut items_params = filter_params;
+        items_params.push(Box::new(query.limit as i64));
+        items_params.push(Box::new(query.offset as i64));
+        let items_refs: Vec<&dyn rusqlite::ToSql> =
+            items_params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&items_sql)?;
+        let rows = stmt.query_map(items_refs.as_slice(), |row| row_to_entry(row, 0))?;
+        let items: Vec<Entry> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+
+        // Count query: same FROM/WHERE, no limit/offset. Rebuild filter params
+        // (transient predicate is a literal — only tag binds a value).
+        let count_sql = format!("SELECT COUNT(*) FROM entries e{from_extra}{where_sql}");
+        let count_params: Vec<Box<dyn rusqlite::ToSql>> = if let Some(tag) = &query.tag {
+            vec![Box::new(tag.clone())]
         } else {
-            conn.query_row("SELECT COUNT(*) FROM entries", [], |row| {
-                row.get::<_, i64>(0)
-            })? as u64
+            vec![]
         };
+        let count_refs: Vec<&dyn rusqlite::ToSql> =
+            count_params.iter().map(|p| p.as_ref()).collect();
+        let total: u64 =
+            conn.query_row(&count_sql, count_refs.as_slice(), |row| row.get::<_, i64>(0))?
+                as u64;
         drop(conn);
 
         let mut items = items;
@@ -1830,6 +1864,7 @@ mod tests {
                 offset: 0,
                 order: EntryListOrder::CreatedAsc,
                 include_blocks: None,
+                transient: None,
             })
             .unwrap();
         assert_eq!(page1.items.len(), 2);
@@ -1842,6 +1877,7 @@ mod tests {
                 offset: 2,
                 order: EntryListOrder::CreatedAsc,
                 include_blocks: None,
+                transient: None,
             })
             .unwrap();
         assert_eq!(page2.items.len(), 2);
@@ -1861,10 +1897,92 @@ mod tests {
                 offset: 0,
                 order: EntryListOrder::CreatedAsc,
                 include_blocks: None,
+                transient: None,
             })
             .unwrap();
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.total, 2);
+    }
+
+    fn seed_transient(svc: &EntryService, title: &str, transient: bool) -> Entry {
+        svc.create(CreateEntry {
+            title: title.into(),
+            blocks: vec![note_block(format!("body of {title}"))],
+            tags: None,
+            attrs: Some(json!({ "transient": transient })),
+            source: None,
+            attachments: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn list_filters_transient_true_returns_only_short_term() {
+        let svc = EntryService::for_test().unwrap();
+        seed(&svc, "long-a", vec![]);
+        seed_transient(&svc, "short-b", true);
+        seed_transient(&svc, "short-c", true);
+        let result = svc
+            .list(EntryListQuery {
+                transient: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+        let titles: Vec<_> = result.items.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(result.total, 2);
+        assert!(titles.contains(&"short-b"));
+        assert!(titles.contains(&"short-c"));
+        assert!(!titles.contains(&"long-a"));
+    }
+
+    #[test]
+    fn list_filters_transient_false_returns_only_long_term() {
+        let svc = EntryService::for_test().unwrap();
+        seed(&svc, "long-a", vec![]);
+        seed_transient(&svc, "short-b", true);
+        let result = svc
+            .list(EntryListQuery {
+                transient: Some(false),
+                ..Default::default()
+            })
+            .unwrap();
+        let titles: Vec<_> = result.items.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(result.total, 1);
+        assert!(titles.contains(&"long-a"));
+        assert!(!titles.contains(&"short-b"));
+    }
+
+    #[test]
+    fn list_without_transient_filter_returns_all() {
+        let svc = EntryService::for_test().unwrap();
+        seed(&svc, "long-a", vec![]);
+        seed_transient(&svc, "short-b", true);
+        let result = svc.list(EntryListQuery::default()).unwrap();
+        assert_eq!(result.total, 2);
+    }
+
+    #[test]
+    fn list_combines_transient_and_tag_filters() {
+        let svc = EntryService::for_test().unwrap();
+        seed_transient(&svc, "s-red", true); // 短期但无 tag
+        svc.create(CreateEntry {
+            title: "s-tagged".into(),
+            blocks: vec![note_block("x")],
+            tags: Some(vec!["red".into()]),
+            attrs: Some(json!({ "transient": true })),
+            source: None,
+            attachments: None,
+        })
+        .unwrap();
+        let result = svc
+            .list(EntryListQuery {
+                tag: Some("red".into()),
+                transient: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(result.total, 1);
+        assert_eq!(result.items[0].title, "s-tagged");
     }
 
     // ----- has_more tests (Spec 8 Plan 1 / F-entry-4) -----
