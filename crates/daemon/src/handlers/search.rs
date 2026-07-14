@@ -302,7 +302,11 @@ mod descriptor_tests {
             .find(|v| v["entry"]["title"].as_str() == Some("short"))
             .unwrap();
         let demoted_score = short_item["score"].as_f64().unwrap();
-        let orig = hits.iter().find(|h| h.entry.title == "short").unwrap().score as f64;
+        let orig = hits
+            .iter()
+            .find(|h| h.entry.title == "short")
+            .unwrap()
+            .score as f64;
         assert!((demoted_score - orig * 0.5).abs() < 1e-5);
     }
 

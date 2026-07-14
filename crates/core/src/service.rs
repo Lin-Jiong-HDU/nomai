@@ -135,8 +135,7 @@ fn parse_block_type(s: &str) -> Result<crate::nomai_format::BlockType, CoreError
 /// purge_transient candidate selection, and (via transient_ids_among) the
 /// search demotion policy. Table alias `e` is baked in — callers query
 /// `FROM entries e ...`.
-pub const TRANSIENT_PREDICATE_TRUE: &str =
-    "(json_extract(e.attrs, '$.transient') = 'true' \
+pub const TRANSIENT_PREDICATE_TRUE: &str = "(json_extract(e.attrs, '$.transient') = 'true' \
      OR json_extract(e.attrs, '$.transient') = 1)";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -235,8 +234,12 @@ fn parse_transient_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<Transi
     Ok(TransientCandidate {
         id: crate::storage::from_text(0, &id_str, ulid::Ulid::from_string)?,
         title,
-        created_at: crate::storage::from_text(2, &created_str, chrono::DateTime::parse_from_rfc3339)?
-            .with_timezone(&chrono::Utc),
+        created_at: crate::storage::from_text(
+            2,
+            &created_str,
+            chrono::DateTime::parse_from_rfc3339,
+        )?
+        .with_timezone(&chrono::Utc),
     })
 }
 
@@ -1271,9 +1274,9 @@ impl EntryService {
         };
         let count_refs: Vec<&dyn rusqlite::ToSql> =
             count_params.iter().map(|p| p.as_ref()).collect();
-        let total: u64 =
-            conn.query_row(&count_sql, count_refs.as_slice(), |row| row.get::<_, i64>(0))?
-                as u64;
+        let total: u64 = conn.query_row(&count_sql, count_refs.as_slice(), |row| {
+            row.get::<_, i64>(0)
+        })? as u64;
         drop(conn);
 
         let mut items = items;
@@ -1336,8 +1339,7 @@ impl EntryService {
         older_than: Option<std::time::Duration>,
         dry_run: bool,
     ) -> Result<PurgeTransientResult, CoreError> {
-        let threshold =
-            older_than.map(|d| Utc::now() - chrono::Duration::from_std(d).unwrap());
+        let threshold = older_than.map(|d| Utc::now() - chrono::Duration::from_std(d).unwrap());
         let sql = match &threshold {
             Some(_) => format!(
                 "SELECT e.id, e.title, e.created_at FROM entries e \
