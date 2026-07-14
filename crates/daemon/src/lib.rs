@@ -6,9 +6,6 @@ pub mod handlers;
 pub mod io;
 pub mod rpc;
 pub mod search_cache;
-#[cfg(unix)]
 pub mod serve;
-#[cfg(unix)]
 pub mod shim;
-#[cfg(unix)]
 pub mod socket;

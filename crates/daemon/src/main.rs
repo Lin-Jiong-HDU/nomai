@@ -12,11 +12,8 @@ mod rpc;
 mod search_cache;
 // socket.rs is a shared source file (lib re-exports it as `pub`). The bin's
 // private copy is consumed transitively by `serve`/`shim`.
-#[cfg(unix)]
 mod serve;
-#[cfg(unix)]
 mod shim;
-#[cfg(unix)]
 #[allow(dead_code)]
 mod socket;
 

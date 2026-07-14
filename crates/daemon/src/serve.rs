@@ -1,4 +1,3 @@
-#![cfg(unix)]
 //! Resident `--serve` daemon: detach, claim the socket, boot the Daemon,
 //! run the serve loop, clean up on exit.
 
@@ -54,23 +53,31 @@ impl Drop for PidfileGuard {
 /// shim (and its CC parent) exiting. `setsid` makes us a session leader
 /// with no controlling terminal.
 fn detach_session() -> Result<(), CoreError> {
-    // SAFETY: `setsid()` creates a new session and process group, returning
-    // the new session id (or -1 on error). It touches only kernel process
-    // metadata — no memory-safety implications.
-    let rc = unsafe { libc::setsid() };
-    if rc == -1 {
-        return Err(CoreError::Config(format!(
-            "setsid failed: {}",
-            std::io::Error::last_os_error()
-        )));
+    #[cfg(unix)]
+    {
+        // SAFETY: `setsid()` creates a new session and process group, returning
+        // the new session id (or -1 on error). It touches only kernel process
+        // metadata — no memory-safety implications.
+        let rc = unsafe { libc::setsid() };
+        if rc == -1 {
+            return Err(CoreError::Config(format!(
+                "setsid failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(windows)]
+    {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn detach_session_does_not_panic_in_test_process() {
         // A test process may already be a session leader (setsid → EPERM) or

@@ -1,13 +1,12 @@
-#![cfg(unix)]
 //! Stdio↔socket shim. CC spawns this binary with no args; it attaches to the
-//! resident daemon over a Unix socket (spawning one if absent), then bridges
+//! resident daemon over a platform transport (Unix socket / loopback TCP),
+//! spawning one if absent, then bridges
 //! stdin/stdout to the socket byte-for-byte. If the resident daemon can't be
 //! reached/started, the caller falls back to in-process stdio serve.
 
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::UnixStream;
 
 use nomai_core::CoreError;
 
@@ -33,18 +32,18 @@ pub async fn ensure_daemon<F>(
     socket_path: &std::path::Path,
     ready_timeout: Duration,
     spawn: F,
-) -> Result<UnixStream, SpawnError>
+) -> Result<crate::socket::DaemonStream, SpawnError>
 where
     F: FnOnce() -> std::io::Result<()>,
 {
-    if let Ok(stream) = UnixStream::connect(socket_path).await {
+    if let Ok(stream) = crate::socket::connect(socket_path).await {
         return Ok(stream);
     }
     spawn().map_err(SpawnError::SpawnFailed)?;
 
     let deadline = tokio::time::Instant::now() + ready_timeout;
     loop {
-        if let Ok(stream) = UnixStream::connect(socket_path).await {
+        if let Ok(stream) = crate::socket::connect(socket_path).await {
             return Ok(stream);
         }
         if tokio::time::Instant::now() >= deadline {
@@ -56,7 +55,7 @@ where
 
 /// Spawn `nomai-daemon --serve --config <NOMAI_CONFIG_PATH>` detached. Uses
 /// `std::process` (a one-shot spawn; we never wait) — no tokio `process`
-/// feature needed. The child detaches itself via `serve::run`'s `setsid`.
+/// feature needed.
 pub fn spawn_serve() -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
@@ -83,13 +82,31 @@ pub fn spawn_serve() -> std::io::Result<()> {
 /// keeps the socket open (idle) and the shim never exits — a half-close
 /// deadlock. The socket→stdout pump then drains the daemon's final response
 /// and returns once the daemon closes its end.
-pub async fn bridge<R, W>(mut stdin: R, mut stdout: W, stream: UnixStream) -> Result<(), CoreError>
+pub async fn bridge<R, W>(
+    stdin: R,
+    stdout: W,
+    stream: crate::socket::DaemonStream,
+) -> Result<(), CoreError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    match stream {
+        #[cfg(unix)]
+        crate::socket::DaemonStream::Unix(stream) => bridge_stream(stdin, stdout, stream).await,
+        #[cfg(windows)]
+        crate::socket::DaemonStream::Tcp(stream) => bridge_stream(stdin, stdout, stream).await,
+    }
+}
+
+async fn bridge_stream<R, W, S>(mut stdin: R, mut stdout: W, stream: S) -> Result<(), CoreError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     use tokio::io::AsyncWriteExt;
-    let (mut sock_read, mut sock_write) = stream.into_split();
+    let (mut sock_read, mut sock_write) = tokio::io::split(stream);
     // stdin → socket; on EOF, shut the write half so the daemon sees EOF.
     // A copy error here (e.g. the daemon RSTs mid-stream) is non-fatal — the
     // other pump still drains — but is logged so the shim never exits silent.
@@ -134,6 +151,7 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn ensure_daemon_connects_if_already_listening() {
         let sock =
@@ -183,13 +201,18 @@ mod tests {
         let _ = std::fs::remove_file(&sock);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bridge_pumps_both_directions_until_eof() {
         let (a, b) = tokio::net::UnixStream::pair().unwrap();
         let (mut stdin_w, stdin_r) = tokio::io::duplex(64);
         let (stdout_w, mut stdout_r) = tokio::io::duplex(64);
 
-        let bridge_task = tokio::spawn(bridge(stdin_r, stdout_w, a));
+        let bridge_task = tokio::spawn(bridge(
+            stdin_r,
+            stdout_w,
+            crate::socket::DaemonStream::Unix(a),
+        ));
 
         // Peer: read "ping" from socket, echo "pong" back.
         let peer = tokio::spawn(async move {
@@ -218,7 +241,9 @@ mod tests {
 
     /// An `AsyncRead` whose every `poll_read` fails — stands in for a stdio
     /// half whose underlying copy blows up (e.g. the daemon RSTs mid-stream).
+    #[cfg(unix)]
     struct ErrorReader;
+    #[cfg(unix)]
     impl tokio::io::AsyncRead for ErrorReader {
         fn poll_read(
             self: std::pin::Pin<&mut Self>,
@@ -234,12 +259,17 @@ mod tests {
     /// drains the daemon's response and returns Ok. (The accompanying
     /// `eprintln!` diagnostic is a stderr side-effect this suite can't capture;
     /// the error *isolation* is the testable contract.)
+    #[cfg(unix)]
     #[tokio::test]
     async fn bridge_keeps_draining_socket_when_stdin_copy_errors() {
         let (a, b) = tokio::net::UnixStream::pair().unwrap();
         let (stdout_w, mut stdout_r) = tokio::io::duplex(64);
 
-        let bridge_task = tokio::spawn(bridge(ErrorReader, stdout_w, a));
+        let bridge_task = tokio::spawn(bridge(
+            ErrorReader,
+            stdout_w,
+            crate::socket::DaemonStream::Unix(a),
+        ));
 
         // Peer (daemon side): emit a response, then close → from_socket EOFs.
         let peer = tokio::spawn(async move {
