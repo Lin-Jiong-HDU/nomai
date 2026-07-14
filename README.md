@@ -24,6 +24,7 @@ Early alpha. API surface is stabilizing but may change before 1.0. Currently sin
 - **Plugin registry**: `RpcHandler` trait + `register_handler` — add custom RPCs without forking
 - **Embedding cache**: transparent `CachedEmbedder` wrapper persists `(model, blake3(body)) → embedding` in SQLite — repeated bodies skip the network API call entirely (zero invalidate logic; embeddings are deterministic)
 - **Search results cache**: transparent in-memory cache for `search.semantic` / `search.fulltext` results — same query twice hits the cache, skips the FTS5/KNN work. Generation-based invalidation: every `entry.*` / `block.*` mutation bumps the cache generation atomically, so cached results are always consistent with current state.
+- **Transient entries**: mark short-term entries with `attrs.transient=true` — they're down-ranked ×0.5 in `search.semantic` / `search.fulltext` and can be listed / purged in bulk via `entry.list(transient:)` / `entries.purge_transient` (dry-run safe by default; permanent entries are never touched). No schema migration; the marker lives in `attrs`. (added in 0.4.1)
 - **lib + daemon dual mode**: embed `nomai-core` directly, or run `nomai-daemon` as a stdio service
 - **`block.list` RPC**: list blocks by `entry_id` (added in 1.0, Spec 8 Plan 1 / F-block-1, for namespace completeness)
 - **`DaemonBuilder`**: fluent constructor for lib-mode users — alternative to `Daemon::from_services`'s 8 positional arguments (added in 1.0, Spec 8 Plan 2 / F-lib-2)

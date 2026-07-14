@@ -6,6 +6,7 @@ Complete reference for the JSON-RPC API, error codes, configuration, and cache i
 
 - [RPC reference](#rpc-reference)
   - [entry.\*](#entry-methods)
+  - [entries.\*](#entries-methods)
   - [block.\*](#block-methods)
   - [attachment.\*](#attachment-methods)
   - [index.\* / system.\*](#index--system)
@@ -37,9 +38,15 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 | `entry.get`    | `id`                                                  | `Entry`             | 1001 if not found                                                                 |
 | `entry.update` | `id`, `title?`, `blocks?`, `tags?`, `attrs?`, `source?` | `Entry`           | Re-embeds if blocks change; clears embedding if blocks become empty               |
 | `entry.delete` | `id`                                                  | `{"deleted": true, "id": "<ulid>"}` | Cascades to links + chunks + chunk embeddings. `id` added in 0.2.0 (Spec 8 Plan 1 / F-entry-1) for consistency with `block.delete` |
-| `entry.list`   | `tag?`, `limit?`(50), `offset?`(0), `order?`          | `{items, total, has_more}`    | `order`: `created_desc`(default) / `created_asc` / `updated_desc` / `updated_asc`. `has_more` (added in 0.2.0, Spec 8 Plan 1 / F-entry-4) is true when `total > offset + items.len()` |
+| `entry.list`   | `tag?`, `limit?`(50), `offset?`(0), `order?`, `transient?`          | `{items, total, has_more}`    | `order`: `created_desc`(default) / `created_asc` / `updated_desc` / `updated_asc`. `has_more` (added in 0.2.0, Spec 8 Plan 1 / F-entry-4) is true when `total > offset + items.len()`. `transient` (added in 0.4.1): `true` → only short-term entries, `false` → only long-term, omit → all |
 
 **Block input shape**: `BlockInput` is `{ type: String, text: String, attrs?: Value }`. Valid types: `claim`, `evidence`, `question`, `source`, `note`, `connection`, `image` (the `@connection` type requires `target` and `relation` attrs; `@image` requires `src` attr — see below).
+
+### entries.{#entries-methods}
+
+| Method                    | Params                                | Returns                                                                                             | Notes                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `entries.purge_transient` | `older_than_secs?`, `dry_run?`(=true) | preview: `{dry_run, count, entries:[{id,title,created_at}], truncated}`; real: `{dry_run, deleted, ids, failed:[{id,error}]}` | Purge transient entries (those with `attrs.transient=true`). Safe by default: `dry_run=true` returns a capped preview (max 50 in `entries`, `count` is the true total). `dry_run=false` actually deletes — reuses the per-entry delete cascade and bumps the search cache generation. `older_than_secs` limits to entries older than a threshold (strict `<`). Permanent entries are never touched. Added in 0.4.1. |
 
 ### block.{#block-methods}
 
