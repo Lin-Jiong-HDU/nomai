@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Windows daemon support with shared multi-client mode.** `nomai-daemon`
+  now builds on Windows and keeps the resident-daemon architecture for
+  concurrent Claude Code / Codex clients: Unix keeps Unix domain sockets,
+  while Windows uses a loopback TCP endpoint derived from the configured DB
+  path. `serve`/`shim`/`socket` are now cross-platform, and `libc` is scoped
+  to Unix-only dependencies.
+
 ## [0.4.1] - 2026-07-14
 
 ### Added

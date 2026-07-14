@@ -20,17 +20,35 @@ use crate::rpc::RpcHandler;
 /// recovery is testable. The real impl wraps `UnixListener`; tests inject a
 /// scripted sequence to assert the loop survives `accept` errors (EMFILE /
 /// ENOMEM / ECONNABORTED…) instead of tearing the resident daemon down.
-#[cfg(unix)]
 #[async_trait::async_trait]
 pub trait Accept: Send {
-    async fn accept(&mut self) -> std::io::Result<tokio::net::UnixStream>;
+    async fn accept(&mut self) -> std::io::Result<crate::socket::DaemonStream>;
+}
+
+#[async_trait::async_trait]
+impl Accept for crate::socket::DaemonListener {
+    async fn accept(&mut self) -> std::io::Result<crate::socket::DaemonStream> {
+        crate::socket::DaemonListener::accept(self).await
+    }
 }
 
 #[cfg(unix)]
 #[async_trait::async_trait]
 impl Accept for tokio::net::UnixListener {
-    async fn accept(&mut self) -> std::io::Result<tokio::net::UnixStream> {
-        tokio::net::UnixListener::accept(self).await.map(|(s, _)| s)
+    async fn accept(&mut self) -> std::io::Result<crate::socket::DaemonStream> {
+        tokio::net::UnixListener::accept(self)
+            .await
+            .map(|(s, _)| crate::socket::DaemonStream::Unix(s))
+    }
+}
+
+#[cfg(windows)]
+#[async_trait::async_trait]
+impl Accept for tokio::net::TcpListener {
+    async fn accept(&mut self) -> std::io::Result<crate::socket::DaemonStream> {
+        tokio::net::TcpListener::accept(self)
+            .await
+            .map(|(s, _)| crate::socket::DaemonStream::Tcp(s))
     }
 }
 
@@ -361,12 +379,11 @@ impl Daemon {
         Ok(())
     }
 
-    /// Run the resident daemon: accept multiple Unix-socket clients and
+    /// Run the resident daemon: accept multiple platform-transport clients and
     /// dispatch their NDJSON JSON-RPC lines via the same `dispatch` as
     /// `run_stdio`, writing responses back to **each connection**. Exits when
     /// either (a) `idle_timeout` elapses with zero active connections, or
     /// (b) SIGTERM / SIGINT arrives. Spec §5.
-    #[cfg(unix)]
     pub async fn run_serve<L: Accept>(
         self,
         mut listener: L,
@@ -664,10 +681,27 @@ fn run_startup_sync(entries: &EntryService) {
 
 /// Serve one client connection: read NDJSON requests, dispatch, write the
 /// response back to the stream. Exits on EOF or read error.
-#[cfg(unix)]
-async fn handle_conn(daemon: Arc<Daemon>, stream: tokio::net::UnixStream) {
+async fn handle_conn(daemon: Arc<Daemon>, stream: crate::socket::DaemonStream) {
+    match stream {
+        #[cfg(unix)]
+        crate::socket::DaemonStream::Unix(stream) => {
+            let (read_half, write_half) = stream.into_split();
+            handle_conn_halves(daemon, read_half, write_half).await;
+        }
+        #[cfg(windows)]
+        crate::socket::DaemonStream::Tcp(stream) => {
+            let (read_half, write_half) = stream.into_split();
+            handle_conn_halves(daemon, read_half, write_half).await;
+        }
+    }
+}
+
+async fn handle_conn_halves<R, W>(daemon: Arc<Daemon>, read_half: R, mut write_half: W)
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     use tokio::io::{AsyncBufReadExt, BufReader};
-    let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
     loop {
@@ -705,7 +739,6 @@ async fn handle_conn(daemon: Arc<Daemon>, stream: tokio::net::UnixStream) {
 }
 
 /// Serialize a response as one JSON line and write it to an async writer.
-#[cfg(unix)]
 async fn write_response_to<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     resp: &nomai_protocol::Response,
@@ -719,14 +752,20 @@ async fn write_response_to<W: tokio::io::AsyncWrite + Unpin>(
 
 /// Block until SIGTERM is received. If the handler can't be installed, block
 /// forever so ctrl_c (handled separately) remains the only signal path.
-#[cfg(unix)]
 async fn sigterm_signal() {
-    use tokio::signal::unix::{SignalKind, signal};
-    match signal(SignalKind::terminate()) {
-        Ok(mut s) => {
-            s.recv().await;
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
         }
-        Err(_) => std::future::pending::<()>().await,
+    }
+    #[cfg(windows)]
+    {
+        std::future::pending::<()>().await
     }
 }
 
@@ -799,10 +838,12 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
     fn req_line(id: u64, method: &str) -> String {
         format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{{}}}}"#)
     }
 
+    #[cfg(unix)]
     async fn read_one_response(
         reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
     ) -> serde_json::Value {
@@ -811,6 +852,7 @@ mod tests {
         serde_json::from_str(line.trim()).unwrap()
     }
 
+    #[cfg(unix)]
     /// Scripted accept source for run_serve's transient-error recovery test.
     /// Pops a pre-loaded sequence of accept results; once empty, parks forever
     /// so the serve loop's idle/shutdown arms win the select (no busy-loop).
@@ -819,6 +861,7 @@ mod tests {
             std::sync::Mutex<std::collections::VecDeque<std::io::Result<tokio::net::UnixStream>>>,
     }
 
+    #[cfg(unix)]
     impl ScriptedListener {
         fn push_err(&mut self, e: std::io::Error) {
             self.items.lock().unwrap().push_back(Err(e));
@@ -828,6 +871,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Default for ScriptedListener {
         fn default() -> Self {
             Self {
@@ -836,15 +880,17 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl super::Accept for ScriptedListener {
-        async fn accept(&mut self) -> std::io::Result<tokio::net::UnixStream> {
+        async fn accept(&mut self) -> std::io::Result<crate::socket::DaemonStream> {
             // Bind to a local so the MutexGuard drops at the statement's end —
             // a guard held across the `.await` below is !Send and would make
             // this future unspawnable.
             let next = self.items.lock().unwrap().pop_front();
             match next {
-                Some(r) => r,
+                Some(Ok(stream)) => Ok(crate::socket::DaemonStream::Unix(stream)),
+                Some(Err(err)) => Err(err),
                 None => {
                     // Exhausted: park forever so idle/shutdown arms win the
                     // select instead of busy-looping on repeated errors.
@@ -855,6 +901,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_serve_continues_after_transient_accept_error() {
         // First accept() returns a transient EMFILE (kernel out of fds/memory).
@@ -895,6 +942,7 @@ mod tests {
         serve_task.abort();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_serve_routes_responses_to_correct_clients() {
         let sock =
@@ -938,6 +986,7 @@ mod tests {
         let _ = std::fs::remove_file(&sock);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_serve_exits_after_idle_timeout() {
         let sock =
