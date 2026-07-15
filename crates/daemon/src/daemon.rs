@@ -80,6 +80,16 @@ pub struct Daemon {
     /// Per-file attachment size cap (bytes), from `config.data.attachment_max_bytes`.
     /// Enforced in `decode_attachments` (daemon boundary).
     pub(crate) attachment_max_bytes: usize,
+    /// FS-backed content store. Shared with EntryService; also used by sync.*
+    /// handlers to resolve the `knowledge_root` path (the git work-tree).
+    // Readers land in Plan 5 Task 4/5 (sync.* handlers); keep despite no
+    // current production reader, mirroring `embedding_dim` / `chunk_target_size`.
+    #[allow(dead_code)]
+    pub(crate) content_store: Arc<ContentStore>,
+    /// Serializes sync.run (rewrites work-tree) against write RPCs that mutate
+    /// entry files. Process-wide; single-user single-process model.
+    #[allow(dead_code)]
+    pub(crate) sync_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) handlers: HashMap<&'static str, Arc<dyn RpcHandler>>,
 }
 
@@ -115,7 +125,7 @@ impl Daemon {
         let attachment_max_bytes = config.data.attachment_max_bytes;
         let entries = Arc::new(EntryService::new(
             conn.clone(),
-            content_store,
+            content_store.clone(),
             chunk_target_size,
         )?);
         let links = Arc::new(LinkService::new(conn.clone())?);
@@ -183,6 +193,8 @@ impl Daemon {
             embedding_dim: config.embedding.dim,
             chunk_target_size,
             attachment_max_bytes,
+            content_store,
+            sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             handlers: crate::handlers::registry(),
         })
     }
@@ -217,6 +229,9 @@ impl Daemon {
         // Mirror Daemon::new: run startup FS→index sync so a test that
         // pre-populates the content store sees the entries indexed.
         run_startup_sync(&entries);
+        // Share the EntryService's content_store so tests that assert on
+        // daemon.content_store.root() see the same path EntryService uses.
+        let content_store = entries.content_store().clone();
         Self {
             entries,
             links,
@@ -232,6 +247,8 @@ impl Daemon {
             // Test helper mirrors the production default; tests that need a
             // smaller cap construct via Daemon::from_services instead.
             attachment_max_bytes: 10 * 1024 * 1024,
+            content_store,
+            sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             handlers: crate::handlers::registry(),
         }
     }
@@ -303,7 +320,7 @@ impl Daemon {
     ) -> Result<Self, CoreError> {
         let entries = Arc::new(EntryService::new(
             conn.clone(),
-            content_store,
+            content_store.clone(),
             chunk_target_size,
         )?);
         let links = Arc::new(LinkService::new(conn.clone())?);
@@ -325,6 +342,8 @@ impl Daemon {
             embedding_dim,
             chunk_target_size,
             attachment_max_bytes,
+            content_store,
+            sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             handlers,
         })
     }
@@ -1096,5 +1115,79 @@ mod tests {
                 assert!(err.to_string().contains("conn required"));
             }
         }
+    }
+
+    /// Plan 5 / Task 2: Daemon must expose the shared `content_store` (so
+    /// sync.* handlers can resolve `knowledge_root` — the git work-tree) and
+    /// a process-wide `sync_lock` serializing sync.run against write RPCs.
+    ///
+    /// Tempfile discipline: both the SQLite conn (`EntryService::for_test` →
+    /// `Connection::open_in_memory`) and the `knowledge_root` (`tempfile::
+    /// tempdir()`) live under the OS temp dir; nothing touches
+    /// `~/.local/share/nomai`.
+    #[tokio::test]
+    async fn daemon_exposes_content_store_root_and_sync_lock() {
+        use nomai_providers::{EmbeddingProvider, LlmProvider};
+
+        // In-memory SQLite via EntryService::for_test (handles
+        // init_sqlite_extensions + migrations); we pass our own content_store.
+        let entries = Arc::new(EntryService::for_test().unwrap());
+        let conn = entries.conn_for_test();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(nomai_core::ContentStore::new(tmp.path().to_path_buf()));
+
+        struct NullEmbed;
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for NullEmbed {
+            async fn embed(
+                &self,
+                _texts: &[&str],
+            ) -> Result<Vec<Vec<f32>>, nomai_protocol::ProviderError> {
+                Ok(vec![])
+            }
+            fn dim(&self) -> usize {
+                8
+            }
+            fn name(&self) -> &str {
+                "null"
+            }
+        }
+        struct NullLlm;
+        #[async_trait::async_trait]
+        impl LlmProvider for NullLlm {
+            async fn complete(
+                &self,
+                _req: nomai_providers::CompletionRequest,
+            ) -> Result<nomai_providers::CompletionResponse, nomai_protocol::ProviderError>
+            {
+                Err(nomai_protocol::ProviderError::new(
+                    nomai_protocol::ProviderErrorKind::Unknown,
+                    "null",
+                    None,
+                ))
+            }
+            fn name(&self) -> &str {
+                "null"
+            }
+        }
+
+        let daemon = DaemonBuilder::new()
+            .conn(conn)
+            .content_store(store.clone())
+            .embedder(Arc::new(NullEmbed))
+            .llm(Arc::new(NullLlm))
+            .embedding_dim(8)
+            .chunk_target_size(1024)
+            .cache_model("test-model")
+            .warn_rows(100_000)
+            .build()
+            .unwrap();
+
+        // The daemon's content_store field is the same Arc we supplied, so
+        // .root() round-trips to the tempfile path we passed in.
+        assert_eq!(daemon.content_store.root(), tmp.path());
+        // sync_lock must be lockable without deadlock (sanity).
+        let _g = daemon.sync_lock.lock().await;
+        drop(_g);
     }
 }
