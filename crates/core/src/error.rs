@@ -28,6 +28,12 @@ pub enum CoreError {
 
     #[error("config error: {0}")]
     Config(String),
+
+    #[error("sync conflict: {message}")]
+    SyncConflict {
+        message: String,
+        conflicted_files: Vec<String>,
+    },
 }
 
 #[cfg(test)]

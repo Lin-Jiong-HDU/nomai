@@ -8,6 +8,7 @@
 //!   1004             config error
 //!   1005             filesystem error
 //!   1006             .nomai parse error
+//!   1007             sync error (conflict)
 
 // JSON-RPC 2.0 reserved range.
 pub const PARSE_ERROR: i32 = -32700;
@@ -23,6 +24,7 @@ pub const VALIDATION_ERROR: i32 = 1003;
 pub const CONFIG_ERROR: i32 = 1004;
 pub const FS_ERROR: i32 = 1005;
 pub const NOMAI_FORMAT_ERROR: i32 = 1006;
+pub const SYNC_ERROR: i32 = 1007;
 
 /// Canonical messages for the JSON-RPC reserved range. Business errors
 /// carry their own messages and do not have constants here.
@@ -31,6 +33,7 @@ pub const MESSAGE_INVALID_REQUEST: &str = "Invalid Request";
 pub const MESSAGE_METHOD_NOT_FOUND: &str = "Method not found";
 pub const MESSAGE_INVALID_PARAMS: &str = "Invalid params";
 pub const MESSAGE_INTERNAL_ERROR: &str = "Internal error";
+pub const MESSAGE_SYNC_ERROR: &str = "Sync error";
 
 #[cfg(test)]
 mod tests {

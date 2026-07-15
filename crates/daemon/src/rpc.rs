@@ -8,7 +8,7 @@ use nomai_core::CoreError;
 use nomai_protocol::RpcError;
 use nomai_protocol::error::{
     CONFIG_ERROR, ENTRY_NOT_FOUND, FS_ERROR, INTERNAL_ERROR, NOMAI_FORMAT_ERROR, PROVIDER_ERROR,
-    VALIDATION_ERROR,
+    SYNC_ERROR, VALIDATION_ERROR,
 };
 use serde_json::json;
 
@@ -100,6 +100,14 @@ pub fn core_error_to_rpc_ref(err: &CoreError) -> RpcError {
             message: format!("migration error: {msg}"),
             data: None,
         },
+        CoreError::SyncConflict {
+            message,
+            conflicted_files,
+        } => RpcError {
+            code: SYNC_ERROR,
+            message: message.clone(),
+            data: Some(json!({ "conflicted_files": conflicted_files })),
+        },
     }
 }
 
@@ -171,5 +179,20 @@ mod tests {
         let by_ref = core_error_to_rpc_ref(&err);
         assert_eq!(by_ref.code, 1001);
         assert!(by_ref.data.unwrap().get("id").is_some());
+    }
+
+    #[test]
+    fn sync_conflict_maps_to_1007_with_files() {
+        let err = CoreError::SyncConflict {
+            message: "rebase conflict".into(),
+            conflicted_files: vec!["entries/01K/entry.nomai".into()],
+        };
+        let rpc = core_error_to_rpc(err);
+        assert_eq!(rpc.code, SYNC_ERROR);
+        assert_eq!(rpc.message, "rebase conflict");
+        assert_eq!(
+            rpc.data.unwrap()["conflicted_files"][0],
+            "entries/01K/entry.nomai"
+        );
     }
 }
