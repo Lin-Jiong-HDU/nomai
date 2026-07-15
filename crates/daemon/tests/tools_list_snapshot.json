@@ -835,6 +835,27 @@
       "name": "search.semantic"
     },
     {
+      "description": "Initialize the knowledge_root as a git repository for multi-device sync. Configures the remote, writes .gitignore + .gitattributes (LFS rules), runs git lfs install, and makes an initial commit. Idempotent — rejects if .git already exists.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "branch": {
+            "description": "branch name (default 'main')",
+            "type": "string"
+          },
+          "remote": {
+            "description": "git remote URL (SSH or HTTPS)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "remote"
+        ],
+        "type": "object"
+      },
+      "name": "sync.init"
+    },
+    {
       "description": "Walk every entry row and render a .nomai file for any that lack one. Skips entries that already have a .nomai on disk. Returns {exported, skipped, errors}.",
       "inputSchema": {
         "additionalProperties": false,

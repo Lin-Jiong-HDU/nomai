@@ -123,6 +123,16 @@ pub mod attachment {
     pub const LIST: &str = "attachment.list";
 }
 
+pub mod sync {
+    /// Initialize the knowledge_root as a git repository for multi-device
+    /// sync: `git init` + remote + LFS install + `.gitignore` / `.gitattributes`
+    /// + initial commit. Idempotent-rejects if `.git` already exists.
+    pub const INIT: &str = "sync.init";
+    /// Reserved for Task 5: pull/push the sync remote, rebasing local entry
+    /// mutations on top of incoming commits.
+    pub const RUN: &str = "sync.run";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +214,11 @@ mod tests {
     fn attachment_namespace_methods() {
         assert_eq!(attachment::READ, "attachment.read");
         assert_eq!(attachment::LIST, "attachment.list");
+    }
+
+    #[test]
+    fn sync_namespace_methods() {
+        assert_eq!(sync::INIT, "sync.init");
+        assert_eq!(sync::RUN, "sync.run");
     }
 }

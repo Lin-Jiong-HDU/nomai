@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::handlers::{
     attachment, batch, block, cache, chunk, entry, events, index, link, mcp, provider, search,
-    system,
+    sync, system,
 };
 use crate::rpc::RpcHandler;
 
@@ -116,6 +116,10 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
 
     // batch (multi-op atomic transaction)
     let h = batch::Batch;
+    m.insert(h.method(), Arc::new(h));
+
+    // sync.* (git-backed multi-device sync)
+    let h = sync::Init;
     m.insert(h.method(), Arc::new(h));
 
     m
