@@ -17,6 +17,7 @@ pub mod params;
 pub mod provider;
 pub mod registry;
 pub mod search;
+pub mod sync;
 pub mod system;
 
 // Internal helper (not an RPC module): chunk-embedding orchestration used by
