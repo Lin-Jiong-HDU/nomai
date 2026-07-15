@@ -18,6 +18,7 @@ For project overview and install, see the [README](../README.md) first.
   - [Events](#events)
   - [Chunks](#chunks)
 - [Storage layer separation (lib-mode users)](#storage-layer-separation-lib-mode-users)
+- [Sync (multi-device)](#sync-multi-device)
 - [Migration from 0.1.0 to 0.2.0](#migration-from-010-to-020)
 - [What's next](#whats-next)
 
@@ -189,6 +190,59 @@ summary:
 
 See also Spec 8 (`docs/superpowers/specs/2026-06-25-pre-1-0-api-freeze-pass-design.md`)
 for the full freeze-pass audit.
+
+---
+
+## Sync (multi-device)
+
+nomai's `knowledge_root` is the source of truth, and it can be backed by a
+git repository so the same knowledge base follows you across machines. The
+daemon ships two CLI verbs that drive the full sync lifecycle against any
+private git remote (GitHub, GitLab, a self-hosted bare repo, even a shared
+folder):
+
+```fish
+# First time on a device: turn knowledge_root into a git repo wired to your
+# remote. Writes .gitignore + .gitattributes (LFS rules), runs git lfs install,
+# and makes the initial commit. Idempotent — refuses if .git already exists.
+nomai-daemon --sync-init git@github.com:you/nomai-kb.git --config ~/.config/nomai/config.toml
+
+# Daily: one command does commit → pull --rebase → push → index.sync.
+# Run it whenever you switch machines (before you start writing, and again
+# before you walk away).
+nomai-daemon --sync --config ~/.config/nomai/config.toml
+```
+
+What syncs and what doesn't:
+
+- **`entry.nomai` files are plain text.** Two devices editing *different*
+  blocks of the same entry merge cleanly on `pull --rebase`; git's text
+  merger handles it without intervention.
+- **Attachments (PDFs, images) go through Git LFS** automatically — the
+  `.gitattributes` written by `--sync-init` routes the known binary types
+  through LFS so the repository stays small. Install `git-lfs` first
+  (`--sync-init` refuses to proceed if it can't find it).
+- **`db.sqlite` is never committed** — it is a derived index. Each device
+  rebuilds its own local index from the reconciled filesystem at the end of
+  every `--sync` (via `index.sync`), so the SQLite files on different
+  machines are independent and disposable.
+
+**Conflicts.** If two devices edit the *same line* of the same `entry.nomai`,
+the `pull --rebase` inside `--sync` stops with a rebase conflict. The daemon
+returns a `sync.run` error (code `1007`, `data.conflicted_files` lists the
+paths) and leaves the repo mid-rebase. Resolve it the normal git way:
+
+1. Open the file — you'll see the usual `<<<<<<<` / `=======` / `>>>>>>>`
+   markers. Edit it to the final content you want and save.
+2. `git -C <knowledge_root> add entries/<id>/entry.nomai` to mark it resolved.
+3. Re-run `nomai-daemon --sync`. The daemon detects the in-flight rebase,
+   runs `git rebase --continue`, pushes, and reindexes. No residual state.
+
+**Behind the scenes.** `--sync` is a thin CLI client that connects to your
+resident daemon (spawning one on the fly if none is listening) and dispatches
+a single `sync.init` or `sync.run` RPC. All git work happens in the daemon;
+the CLI only ferries one request/response. See [reference.md](reference.md)
+for the `sync.init` / `sync.run` RPC contracts.
 
 ---
 

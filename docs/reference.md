@@ -17,6 +17,7 @@ Complete reference for the JSON-RPC API, error codes, configuration, and cache i
   - [provider.\*](#provider-methods)
   - [batch.\*](#batch)
   - [cache.\*](#cache)
+  - [sync.\*](#sync-methods)
   - [MCP lifecycle](#mcp)
 - [Error codes](#error-codes)
 - [Configuration](#configuration)
@@ -223,6 +224,41 @@ See [Embedding cache](#embedding-cache) below for the caching model and design r
 
 ---
 
+### sync.{#sync-methods}
+
+Multi-device sync. Turns the FS-backed `knowledge_root` into a git repository
+synced against a private remote; `entry.nomai` files sync as plain text
+(merge-friendly), binary attachments route through Git LFS. The daemon's
+`--sync-init` / `--sync` CLI flags are thin clients that dispatch these two
+RPCs to the resident daemon; all git work lives in the daemon, never in
+`nomai-core`.
+
+| Method      | Params                                  | Returns                                                       | Notes                                                                                                                                                          |
+| ----------- | --------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sync.init` | `remote`(string), `branch`?(="main")    | `{initialized, knowledge_root, remote, branch, lfs_ready}`    | `1003` if `.git` already exists (idempotency), or if `git-lfs` is not on PATH. Writes `.gitignore` + `.gitattributes`, runs `git lfs install`, initial commit. |
+| `sync.run`  | `{}`                                    | `{committed: bool, commit: string\|null, pushed: bool, reindexed: bool}` | `1003` if not a git repo (run `sync.init` first). On rebase conflict: `1007` with `data.conflicted_files` (repo left mid-rebase; resolve + re-run to continue). |
+
+`sync.run` flow (serialized under the daemon's `sync_lock` so it cannot race
+in-process write RPCs): `git add -A` → commit only if dirty →
+`git pull --rebase origin <branch>` → `git push origin <branch>` → invoke
+`index.sync` to rebuild the local SQLite index from the reconciled FS. If a
+prior `sync.run` left the repo mid-rebase (a conflict you have since
+resolved), the next `sync.run` skips commit and runs
+`git rebase --continue` instead of `pull --rebase`.
+
+**Conflict recovery.** When `pull --rebase` hits a same-line conflict,
+`sync.run` returns `1007` *without* pushing or reindexing, and leaves
+`.git/rebase-merge` in place. Edit the conflicted `entry.nomai` to remove
+the `<<<<<<<` / `=======` / `>>>>>>>` markers, `git add` it, then re-run
+`sync.run` — it resumes the rebase, pushes, and reindexes. `db.sqlite` is
+never committed; each device rebuilds its own index at the end of every run.
+
+First push to an empty remote: `pull --rebase` reports "no remote ref" but
+does *not* start a rebase, so `sync.run` falls through to `git push` rather
+than misreporting a conflict.
+
+---
+
 ### MCP lifecycle{#mcp}
 
 nomai is a native MCP (Model Context Protocol) server. Any MCP-compatible client (Claude Desktop, Cursor, etc.) can connect via stdio and call all RPCs as tools.
@@ -260,6 +296,7 @@ Example MCP handshake:
 | `1004`   | Config error     | Missing env var, malformed config                                                     |
 | `1005`   | FS error         | Filesystem I/O failure (data has `kind` field from `io::ErrorKind`)                   |
 | `1006`   | .nomai format    | Parse error in a `.nomai` file (data has `parse_error` field)                         |
+| `1007`   | Sync error       | Rebase conflict during `sync.run` (data has `conflicted_files` array); resolve in editor + `git add`, then re-run |
 
 Error response shape:
 
