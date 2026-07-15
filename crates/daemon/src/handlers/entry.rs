@@ -50,6 +50,9 @@ impl RpcHandler for Create {
     fn method(&self) -> &'static str {
         "entry.create"
     }
+    fn is_mutating(&self) -> bool {
+        true
+    }
     fn description(&self) -> &'static str {
         "Create a new knowledge entry with title and content blocks. Chunks and embeddings are derived automatically. Returns the created entry with its generated ULID."
     }
@@ -147,6 +150,9 @@ impl RpcHandler for Update {
     fn method(&self) -> &'static str {
         "entry.update"
     }
+    fn is_mutating(&self) -> bool {
+        true
+    }
     fn description(&self) -> &'static str {
         "Update an entry's metadata (title, tags, attrs, source) by ULID. Cannot change blocks; use block.* for that. Invalidates search cache. Returns the updated entry."
     }
@@ -201,6 +207,9 @@ pub struct Delete;
 impl RpcHandler for Delete {
     fn method(&self) -> &'static str {
         "entry.delete"
+    }
+    fn is_mutating(&self) -> bool {
+        true
     }
     fn description(&self) -> &'static str {
         "Delete an entry by ULID. CASCADE removes its blocks and chunks; the search cache is invalidated. Returns {deleted: true, id}."
@@ -281,6 +290,13 @@ pub struct PurgeTransient;
 impl RpcHandler for PurgeTransient {
     fn method(&self) -> &'static str {
         "entries.purge_transient"
+    }
+    fn is_mutating(&self) -> bool {
+        // Real (dry_run=false) deletes remove entry directories from the
+        // work-tree; mark mutating so the dispatcher serializes against
+        // sync.run's rebase. dry_run=true previews acquire the lock too —
+        // harmless (no write), and cheaper/safer than branching on params.
+        true
     }
     fn description(&self) -> &'static str {
         "Purge transient (short-term) entries — those created with attrs.transient=true. SAFE BY DEFAULT: returns a preview without deleting (dry_run defaults to true). Call again with dry_run=false to actually delete. Only affects transient entries; permanent entries are never touched. Use older_than_secs to limit to entries older than a threshold (e.g. 604800 for 7 days). Returns {dry_run, count, entries:[{id,title,created_at}...max50], truncated} in preview mode, or {dry_run:false, deleted, ids, failed:[{id,error}]} in real mode."

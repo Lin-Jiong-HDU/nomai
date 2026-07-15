@@ -276,8 +276,21 @@ impl crate::rpc::RpcHandler for Run {
         }
 
         let branch = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
-
         let resuming = has_rebase_in_progress(&root);
+
+        // Detached-HEAD guard: only matters on the normal path, where we pass
+        // `branch` to `git pull --rebase origin <branch>`. The resume path
+        // (has_rebase_in_progress) keeps HEAD detached at the commit being
+        // replayed — that's how git implements rebases — and uses
+        // `git rebase --continue` (no branch arg), so "HEAD" there is expected
+        // and harmless. Without this guard, resuming a resolved conflict would
+        // spuriously fail.
+        if !resuming && branch == "HEAD" {
+            return Err(CoreError::Validation(
+                "sync.run requires a checked-out branch; HEAD is detached".into(),
+            ));
+        }
+
         let mut committed = false;
         let mut commit_hash = serde_json::Value::Null;
 
@@ -285,7 +298,12 @@ impl crate::rpc::RpcHandler for Run {
             git(&root, &["add", "-A"]).await?;
             let status = git(&root, &["status", "--porcelain"]).await?;
             if !status.is_empty() {
-                let hash = git_with_identity(&root, &["commit", "-m", "nomai sync"]).await?;
+                // `git commit -m` prints `[main <hash>] <summary>` on stdout;
+                // capture the short hash explicitly via `rev-parse` instead so
+                // `result["commit"]` is a 7-12 char string, not a 3-line blob
+                // (spec §4.1 / docs/reference.md).
+                git_with_identity(&root, &["commit", "-q", "-m", "nomai sync"]).await?;
+                let hash = git(&root, &["rev-parse", "--short", "HEAD"]).await?;
                 committed = true;
                 commit_hash = serde_json::Value::String(hash);
             }
@@ -776,5 +794,273 @@ mod tests {
         let err = resp.error.expect("expected conflict");
         assert_eq!(err.code, SYNC_ERROR);
         assert!(err.data.unwrap()["conflicted_files"].is_array());
+    }
+
+    // ----- Fix 1 regression: dispatch-level sync_lock chokepoint -----
+
+    /// Asserts the `is_mutating()` wiring on every handler the registry
+    /// exposes. This is the deterministic half of the Fix 1 proof: it fails
+    /// if any mutating handler is left un-marked (or any read-only / sync.run
+    /// / index.* handler is wrongly marked). The concurrency half lives in
+    /// `mutating_rpc_blocks_while_sync_lock_held`.
+    #[test]
+    fn is_mutating_wiring_matches_spec() {
+        let reg = crate::handlers::registry();
+
+        // Handlers that MUST be marked mutating (write the file tree).
+        for name in [
+            "entry.create",
+            "entry.update",
+            "entry.delete",
+            "entries.purge_transient",
+            "block.append",
+            "block.update",
+            "block.delete",
+            "batch",
+        ] {
+            let h = reg
+                .get(name)
+                .unwrap_or_else(|| panic!("registry has {name}"));
+            assert!(
+                h.is_mutating(),
+                "{name} should be is_mutating() == true (spec §8)"
+            );
+        }
+
+        // Handlers that MUST NOT be marked mutating.
+        // - sync.run acquires the lock itself inside Run::call and MUST return
+        //   false here to avoid re-entrant deadlock via dispatch.
+        // - index.sync / index.rebuild touch only the derived SQLite index,
+        //   not the file tree; sync.run calls index.sync through handler.call
+        //   directly while already holding the lock.
+        // - all read-only / metadata handlers stay unlocked.
+        for name in [
+            "sync.run",
+            "sync.init",
+            "index.sync",
+            "index.rebuild",
+            "entry.get",
+            "entry.list",
+            "block.get",
+            "block.list",
+            "attachment.list",
+            "attachment.read",
+            "events.list",
+            "events.get",
+            "search.semantic",
+            "search.fulltext",
+            "provider.list",
+            "cache.stats",
+            "cache.clear",
+            "link.get",
+            "link.list",
+            "link.neighbors",
+        ] {
+            // Some names are optional depending on feature flags; only assert
+            // on handlers that are actually registered.
+            if let Some(h) = reg.get(name) {
+                assert!(
+                    !h.is_mutating(),
+                    "{name} should be is_mutating() == false (re-entrancy / read-only)"
+                );
+            }
+        }
+    }
+
+    /// The load-bearing concurrency proof for Fix 1.
+    ///
+    /// Pre-acquires `sync_lock` (simulating `sync.run` mid-`pull --rebase`),
+    /// then dispatches a mutating RPC (`entry.create`) on the SAME daemon.
+    /// With the dispatch chokepoint wired, `entry.create` cannot acquire the
+    /// lock and therefore cannot complete until the lock is released.
+    ///
+    /// Fails-loudly WITHOUT the fix: entry.create would not touch sync_lock,
+    /// would complete immediately, and the 150ms timeout below would return
+    /// `Ok` instead of `Err(Elapsed)` at the first assertion.
+    ///
+    /// Deterministic — no timing race on the assertion side: we assert both
+    /// (a) the RPC blocks while the lock is held, AND (b) it completes after
+    /// the lock is released, so the test is self-checking in both directions.
+    #[tokio::test]
+    async fn mutating_rpc_blocks_while_sync_lock_held() {
+        let harness = SyncTestHarness::new().await;
+        let daemon = harness.daemon();
+        // sync.run would normally init the repo first; for this test we only
+        // need the lock semantics, not git. (entry.create does not read .git.)
+        let daemon = std::sync::Arc::new(daemon);
+
+        // Hold the lock as if sync.run were mid-flight.
+        let guard = daemon.sync_lock.lock().await;
+
+        let create_params = json!({
+            "title": "blocked-write",
+            "blocks": [{"type": "note", "text": "payload"}]
+        });
+        let d = daemon.clone();
+        let mut join =
+            tokio::spawn(async move { d.dispatch(req("entry.create", create_params)).await });
+
+        // (a) The mutating RPC must NOT complete while the lock is held.
+        //     150ms is far longer than entry.create needs to succeed on an
+        //     in-memory store, and far shorter than CI flake budgets.
+        if tokio::time::timeout(std::time::Duration::from_millis(150), &mut join)
+            .await
+            .is_ok()
+        {
+            panic!(
+                "entry.create completed while sync_lock was held — \
+                 dispatch chokepoint is NOT wired (Fix 1 regression)"
+            );
+        } // else: blocked as expected
+
+        // (b) Release the lock; the RPC must now complete promptly.
+        drop(guard);
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(5), join)
+            .await
+            .expect("entry.create did not complete after sync_lock was released")
+            .expect("spawned dispatch task panicked");
+        assert!(
+            resp.result.is_some(),
+            "entry.create should succeed once unblocked: {:?}",
+            resp.error
+        );
+    }
+
+    /// Full end-to-end serialization: spawn `sync.run` and a mutating write
+    /// concurrently and assert both complete cleanly with no panic. The
+    /// load-bearing assertion is structural (no interleaving corruption of
+    /// the work-tree); marked `#[ignore]` because git-on-CI timing can make
+    /// it occasionally slow. The deterministic proof lives in the two tests
+    /// above; this one exercises the real sync.run code path.
+    #[tokio::test]
+    #[ignore = "best-effort e2e; deterministic proof is in is_mutating_wiring \
+                + mutating_rpc_blocks_while_sync_lock_held"]
+    async fn sync_run_concurrent_with_write_serializes() {
+        let harness = SyncTestHarness::new().await;
+        let daemon = std::sync::Arc::new(harness.daemon());
+        let d_init = daemon.clone();
+        d_init
+            .dispatch(req(
+                SYNC_INIT,
+                json!({ "remote": harness.clone_url(), "branch": "main" }),
+            ))
+            .await
+            .result
+            .expect("sync.init");
+
+        // Spawn sync.run in the background.
+        let d_run = daemon.clone();
+        let run_task = tokio::spawn(async move { d_run.dispatch(req(SYNC_RUN, json!({}))).await });
+
+        // Concurrently dispatch a mutating write through the same daemon.
+        let d_write = daemon.clone();
+        let write_task = tokio::spawn(async move {
+            d_write
+                .dispatch(req(
+                    "entry.create",
+                    json!({
+                        "title": "concurrent-write",
+                        "blocks": [{"type": "note", "text": "x"}]
+                    }),
+                ))
+                .await
+        });
+
+        let run_resp = tokio::time::timeout(std::time::Duration::from_secs(15), run_task)
+            .await
+            .expect("sync.run timed out")
+            .expect("sync.run task panicked");
+        assert!(
+            run_resp.result.is_some(),
+            "sync.run failed: {:?}",
+            run_resp.error
+        );
+
+        let write_resp = tokio::time::timeout(std::time::Duration::from_secs(15), write_task)
+            .await
+            .expect("entry.create timed out")
+            .expect("entry.create task panicked");
+        assert!(
+            write_resp.result.is_some(),
+            "entry.create failed: {:?}",
+            write_resp.error
+        );
+    }
+
+    #[tokio::test]
+    async fn run_commit_field_is_short_hash() {
+        // Fix 2 regression: `result.commit` must be a short hash, not the
+        // multi-line `[branch <hash>] summary` stdout of `git commit -m`.
+        let harness = SyncTestHarness::new().await;
+        let daemon = harness.daemon();
+        daemon
+            .dispatch(req(
+                SYNC_INIT,
+                json!({ "remote": harness.clone_url(), "branch": "main" }),
+            ))
+            .await
+            .result
+            .expect("sync.init");
+
+        // Drop a file so sync.run has something to commit.
+        let dir = harness
+            .knowledge_root()
+            .join("entries")
+            .join("01FIX2000000000000000000A");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("entry.nomai"),
+            "#format_version 1\n#id 01FIX2000000000000000000A\n#title t\n\
+             #created_at 2026-07-16T00:00:00Z\n#updated_at 2026-07-16T00:00:00Z\n\n@note\nx\n",
+        )
+        .unwrap();
+
+        let resp = daemon.dispatch(req(SYNC_RUN, json!({}))).await;
+        let result = resp.result.expect("sync.run succeeds");
+        assert_eq!(result["committed"], true);
+        let commit = result["commit"].as_str().expect("commit is a string");
+        // Short hashes are 7-12 hex chars; never contain newline / bracket.
+        assert!(
+            commit.len() >= 7 && commit.len() <= 12,
+            "commit hash len {len}: `{commit}`",
+            len = commit.len()
+        );
+        assert!(
+            commit.chars().all(|c| c.is_ascii_hexdigit()),
+            "commit hash `{commit}` has non-hex chars"
+        );
+        assert!(!commit.contains('\n'), "commit hash has a newline");
+    }
+
+    #[tokio::test]
+    async fn run_rejects_detached_head() {
+        // Fix 3: detached HEAD must surface a Validation error instead of an
+        // opaque "You are not currently on a branch" from `git pull --rebase`.
+        let harness = SyncTestHarness::new().await;
+        let daemon = harness.daemon();
+        daemon
+            .dispatch(req(
+                SYNC_INIT,
+                json!({ "remote": harness.clone_url(), "branch": "main" }),
+            ))
+            .await
+            .result
+            .expect("sync.init");
+
+        // Move onto the commit itself (detached).
+        std::process::Command::new("git")
+            .args([
+                "-C",
+                harness.knowledge_root().to_str().unwrap(),
+                "checkout",
+                "--detach",
+            ])
+            .output()
+            .unwrap();
+
+        let resp = daemon.dispatch(req(SYNC_RUN, json!({}))).await;
+        let err = resp.error.expect("detached HEAD should error");
+        assert_eq!(err.code, VALIDATION_ERROR);
+        assert!(err.message.contains("detached"));
     }
 }

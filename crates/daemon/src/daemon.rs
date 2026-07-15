@@ -87,8 +87,10 @@ pub struct Daemon {
     #[allow(dead_code)]
     pub(crate) content_store: Arc<ContentStore>,
     /// Serializes sync.run (rewrites work-tree) against write RPCs that mutate
-    /// entry files. Process-wide; single-user single-process model.
-    #[allow(dead_code)]
+    /// entry files. Process-wide; single-user single-process model. Held by
+    /// `dispatch` for any handler whose `is_mutating()` returns true, and
+    /// acquired directly inside `sync.run`'s `Run::call` (which returns
+    /// `is_mutating() == false` so the dispatcher does NOT re-acquire it).
     pub(crate) sync_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) handlers: HashMap<&'static str, Arc<dyn RpcHandler>>,
 }
@@ -482,10 +484,23 @@ impl Daemon {
         let id = req.id.clone();
         let params = req.params.unwrap_or(serde_json::Value::Null);
         let result = match self.handlers.get(req.method.as_str()) {
-            Some(handler) => handler
-                .call(self, params)
-                .await
-                .map_err(crate::rpc::DispatchError::Core),
+            Some(handler) => {
+                // Spec §8 chokepoint: mutating handlers (entry/block writes,
+                // batch) run under `sync_lock` so a concurrent `sync.run`
+                // cannot pull --rebase the work-tree out from under them.
+                // `sync.run` itself returns `is_mutating() == false` here —
+                // it manages its own lock acquisition inside `Run::call` to
+                // avoid re-entrant deadlock on this same mutex.
+                let _lock = if handler.is_mutating() {
+                    Some(self.sync_lock.lock().await)
+                } else {
+                    None
+                };
+                handler
+                    .call(self, params)
+                    .await
+                    .map_err(crate::rpc::DispatchError::Core)
+            }
             None => Err(crate::rpc::DispatchError::MethodNotFound(
                 req.method.clone(),
             )),

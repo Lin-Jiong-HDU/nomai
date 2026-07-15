@@ -65,6 +65,13 @@ impl RpcHandler for Batch {
         "batch"
     }
 
+    fn is_mutating(&self) -> bool {
+        // Every batch op mutates the file tree (entry/link create/update/delete
+        // → entry writes via triggers). Mark mutating so the dispatcher holds
+        // sync_lock for the whole atomic transaction.
+        true
+    }
+
     fn description(&self) -> &'static str {
         "Execute multiple mutation ops (entry.create/update/delete, link.create/delete) in a single atomic transaction. Ops may reference each other via {\"$ref\": \"op_id\"} or {\"$ref\": \"op_id.field\"}. Atomic mode only (any failure rolls back the whole batch). See docs/reference.md for full semantics."
     }

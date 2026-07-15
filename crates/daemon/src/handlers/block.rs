@@ -47,6 +47,9 @@ impl RpcHandler for Append {
     fn method(&self) -> &'static str {
         BLOCK_APPEND
     }
+    fn is_mutating(&self) -> bool {
+        true
+    }
     fn description(&self) -> &'static str {
         "Append a new block (type, text, optional attrs) to an entry. Computes the next ordinal and re-renders the entry's .nomai file. Invalidates search cache. Returns the created block."
     }
@@ -139,6 +142,9 @@ impl RpcHandler for Update {
     fn method(&self) -> &'static str {
         BLOCK_UPDATE
     }
+    fn is_mutating(&self) -> bool {
+        true
+    }
     fn description(&self) -> &'static str {
         "Update a block's type, text, or attrs by ULID. At least one of type/text/attrs must be present. Re-renders the entry's .nomai file. Invalidates search cache. Returns the updated block."
     }
@@ -213,6 +219,9 @@ pub struct Delete;
 impl RpcHandler for Delete {
     fn method(&self) -> &'static str {
         BLOCK_DELETE
+    }
+    fn is_mutating(&self) -> bool {
+        true
     }
     fn description(&self) -> &'static str {
         "Delete a block by ULID. Re-renders the parent entry's .nomai file and invalidates the search cache. Returns {deleted: true, id}."

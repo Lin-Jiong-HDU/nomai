@@ -43,6 +43,24 @@ pub trait RpcHandler: Send + Sync {
         None
     }
 
+    /// Whether this handler mutates the `knowledge_root` file tree
+    /// (entry/block writes, batch). The dispatcher holds `sync_lock` for
+    /// mutating calls so they cannot run concurrently with `sync.run`'s
+    /// rebase — git's checkout would otherwise overwrite in-flight writes.
+    /// Default `false`.
+    ///
+    /// NOTE: `sync.run` manages its own lock acquisition internally (see
+    /// `Run::call`) and returns `false` here to avoid re-entrant deadlock.
+    /// `index.sync`/`index.rebuild` mutate only the derived SQLite index
+    /// (not the file tree) and also return `false`. Crucially, `sync.run`'s
+    /// nested `index.sync` invocation goes through `handler.call(...)` directly
+    /// (NOT `Daemon::dispatch`), so even if these were mis-marked `true` the
+    /// dispatcher would never be re-entered — but keeping them `false` makes
+    /// the invariant local and self-documenting.
+    fn is_mutating(&self) -> bool {
+        false
+    }
+
     /// Invoke the handler with the parsed params JSON value.
     async fn call(&self, daemon: &crate::daemon::Daemon, params: Value)
     -> Result<Value, CoreError>;

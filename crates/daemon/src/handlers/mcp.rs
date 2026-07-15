@@ -140,6 +140,20 @@ impl RpcHandler for ToolsCall {
             return Err(CoreError::Validation(format!("not a tool: {}", p.name)));
         }
 
+        // Spec §8 chokepoint: `mcp.tools/call` routes to a nested handler via
+        // `handler.call(...)` DIRECTLY, bypassing `Daemon::dispatch` (which
+        // would otherwise hold `sync_lock` for mutating calls). To keep the
+        // lock invariant uniform across both JSON-RPC entry points, acquire
+        // `sync_lock` here when the resolved nested handler is mutating.
+        // Without this, an MCP client could race `sync.run`'s rebase via a
+        // `tools/call { name: "entry.create" }` while the dispatcher-bound
+        // `entry.create` path is correctly serialized.
+        let _lock = if handler.is_mutating() {
+            Some(daemon.sync_lock.lock().await)
+        } else {
+            None
+        };
+
         let result = handler.call(daemon, p.arguments).await?;
         let text = serde_json::to_string(&result)
             .map_err(|e| CoreError::Config(format!("serialize tool result: {e}")))?;
