@@ -2,11 +2,11 @@
 
 **A substrate for personal knowledge.** Typed blocks + links + events + chunks, exposed as JSON-RPC primitives over stdio — build your RAG, LLM wiki, or agent memory on top.
 
-> Named after the Nomai from _Outer Wilds_ — an alien race who wove a network of knowledge across their star system. nomai the project aims to be the substrate on which your knowledge tools are built, not the tool itself.
+> Named after the Nomai from _Outer Wilds_ — an alien race who wove a network of knowledge across their star system. nomai aims to be the substrate on which your knowledge tools are built, not the tool itself.
 
 ## What it is
 
-nomai is a single-binary daemon that stores knowledge entries on the file system (one directory per entry, holding a typed-blocks `.nomai` file plus optional source attachments — images/PDFs via the `attachments` RPC parameter and `attachment.read` / `attachment.list`) and exposes five **primitives** — Entry, Block, Links, Events, Chunks — through a JSON-RPC 2.0 interface over NDJSON/stdio. Clients (TUI, web UI, CLI tools, sync agents) connect by piping JSON-RPC requests to the daemon's stdin and reading responses from stdout.
+nomai is a single-binary daemon that stores knowledge entries on the file system (one directory per entry, holding a typed-blocks `.nomai` file plus optional attachments). It exposes five **primitives** — Entry, Block, Links, Events, Chunks — through a JSON-RPC 2.0 interface over NDJSON/stdio. Clients (TUI, web UI, CLI tools, sync agents) connect by piping JSON-RPC requests to the daemon's stdin and reading responses from stdout.
 
 The core is deliberately mechanism, not policy: it stores, indexes, and emits events. It does not impose a specific RAG strategy, sync target, or schema. You compose those on top.
 
@@ -14,30 +14,15 @@ The core is deliberately mechanism, not policy: it stores, indexes, and emits ev
 
 Early alpha. API surface is stabilizing but may change before 1.0. Currently single-user, single-process, single SQLite file.
 
-## Key features
-
-- **5 primitives**: Entry / Block / Links / Events / Chunks — composable building blocks
-- **Blocks primitive**: each entry is composed of typed blocks (`claim` / `evidence` / `question` / `source` / `note` / `connection` / `image`) — see `.nomai` format
-- **File-system as source of truth**: every entry has a `.nomai` file on disk; the SQLite index is derived and can be rebuilt via `index.rebuild`
-- **Batch RPC**: `$ref` inter-op references + atomic transactions — compose multi-step workflows in one request
-- **MCP server**: native Model Context Protocol compatibility — Claude Desktop / Cursor / any MCP client can connect directly
-- **Plugin registry**: `RpcHandler` trait + `register_handler` — add custom RPCs without forking
-- **Embedding cache**: transparent `CachedEmbedder` wrapper persists `(model, blake3(body)) → embedding` in SQLite — repeated bodies skip the network API call entirely (zero invalidate logic; embeddings are deterministic)
-- **Search results cache**: transparent in-memory cache for `search.semantic` / `search.fulltext` results — same query twice hits the cache, skips the FTS5/KNN work. Generation-based invalidation: every `entry.*` / `block.*` mutation bumps the cache generation atomically, so cached results are always consistent with current state.
-- **Transient entries**: mark short-term entries with `attrs.transient=true` — they're down-ranked ×0.5 in `search.semantic` / `search.fulltext` and can be listed / purged in bulk via `entry.list(transient:)` / `entries.purge_transient` (dry-run safe by default; permanent entries are never touched). No schema migration; the marker lives in `attrs`. (added in 0.4.1)
-- **lib + daemon dual mode**: embed `nomai-core` directly, or run `nomai-daemon` as a stdio service
-- **`block.list` RPC**: list blocks by `entry_id` (added in 1.0, Spec 8 Plan 1 / F-block-1, for namespace completeness)
-- **`DaemonBuilder`**: fluent constructor for lib-mode users — alternative to `Daemon::from_services`'s 8 positional arguments (added in 1.0, Spec 8 Plan 2 / F-lib-2)
-
 ## The five primitives
 
-| Primitive  | What it does                                   | Typical use                                 |
-| ---------- | ---------------------------------------------- | ------------------------------------------- |
+| Primitive  | What it does                                    | Typical use                                 |
+| ---------- | ----------------------------------------------- | ------------------------------------------- |
 | **Entry**  | Markdown knowledge note split into typed blocks | The atomic unit of knowledge                |
-| **Block**  | Typed semantic block within an entry           | Structured notes — claim, evidence, source  |
-| **Links**  | Directed edges between entries                 | GraphRAG, backlinks, knowledge graph        |
-| **Events** | Append-only mutation log                       | Async embedding retry, external sync, audit |
-| **Chunks** | Block-derived pieces for embedding             | Long-document RAG, fine-grained retrieval   |
+| **Block**  | Typed semantic block within an entry            | Structured notes — claim, evidence, source  |
+| **Links**  | Directed edges between entries                  | GraphRAG, backlinks, knowledge graph        |
+| **Events** | Append-only mutation log                        | Async embedding retry, external sync, audit |
+| **Chunks** | Block-derived pieces for embedding              | Long-document RAG, fine-grained retrieval   |
 
 ## Quick start
 
@@ -45,111 +30,30 @@ Early alpha. API surface is stabilizing but may change before 1.0. Currently sin
 # Build
 cargo build --release --bin nomai-daemon
 
-# Configure (one-time)
-mkdir -p ~/.config/nomai ~/.local/share/nomai
+# Configure (one-time) — see docs/reference.md for all options
+mkdir -p ~/.config/nomai
 cat > ~/.config/nomai/config.toml <<EOF
 [embedding]
 base_url    = "https://your-embedding-endpoint/v1"
 api_key_env = "NOMAI_EMBEDDING_API_KEY"
 model       = "your-embedding-model"
 dim         = 1024
-
-[llm]
-base_url    = "http://your-llm-endpoint/v1"
-api_key_env = "NOMAI_LLM_API_KEY"
-model       = "your-model"
 EOF
 
-# Set API keys
-# fish:   set -Ux NOMAI_EMBEDDING_API_KEY "..."
-# bash/zsh:
 export NOMAI_EMBEDDING_API_KEY="..."
-export NOMAI_LLM_API_KEY="..."
 
 # First RPC
 echo '{"jsonrpc":"2.0","id":1,"method":"entry.create","params":{"title":"Hello","blocks":[{"type":"note","text":"world"}]}}' \
   | ./target/release/nomai-daemon
 ```
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────┐
-│  Your app (TUI / Web / CLI / sync agent / ...)  │
-└────────────────────┬────────────────────────────┘
-                     │ JSON-RPC 2.0 over NDJSON/stdio
-┌────────────────────▼────────────────────────────┐
-│              nomai-daemon (this repo)            │
-│  ┌──────────────────────────────────────────┐   │
-│  │ RPC Handlers (entry/block/link/.../*)    │   │
-│  ├──────────────────────────────────────────┤   │
-│  │ Service Layer                            │   │
-│  │   EntryService / BlockService /          │   │
-│  │   LinkService / EventService /           │   │
-│  │   ChunkService                           │   │
-│  ├──────────────────────────────────────────┤   │
-│  │ Provider Layer (traits)                  │   │
-│  │   EmbeddingProvider / LlmProvider        │   │
-│  ├──────────────────────────────────────────┤   │
-│  │ Storage: FS (source of truth) +          │   │
-│  │         SQLite (derived index)           │   │
-│  └──────────────────────────────────────────┘   │
-└────────────────────┬────────────────────────────┘
-                     │
-            ┌────────┴─────────┐
-            ▼                  ▼
-   ┌─────────────────┐  ┌──────────────────┐
-   │   File System   │  │  SQLite + FTS5   │
-   │                 │  │  + sqlite-vec    │
-   │  knowledge_root │  │                  │
-   │  └── entries/   │  │  (derived,       │
-   │      └── <id>/  │  │   droppable,     │
-   │          ├── *.nomai  rebuildable)    │
-   │          └── *.pdf │                  │
-   └─────────────────┘  └──────────────────┘
-```
-
-The file system is the source of truth — every entry has a `.nomai` file (typed blocks + metadata) on disk, plus any source attachments in the same directory. Attachments are first-class: `entry.create` / `block.append` / `block.update` accept an `attachments: {filename: base64}` parameter that writes sibling files, and `attachment.read` / `attachment.list` round-trip them back; an `@image` block (`src=<filename>`, caption as body) points at one. SQLite holds the derived index (FTS5 full-text, sqlite-vec chunk embeddings) and can be dropped and rebuilt via `index.rebuild` if it drifts.
-
-**Lib mode**: `nomai-core` is a plain Rust crate. If you don't want the daemon overhead, depend on it directly and call `EntryService` / `BlockService` / `LinkService` / etc. from your own binary. Or use `nomai-daemon`'s `Daemon::from_services()` constructor to build a full daemon (with RPC dispatch + MCP + batch) in-process, and `register_handler()` to add custom RPCs.
-
-## Examples
-
-```
-crates/daemon/examples/
-├── rag.rs                # Naive RAG via lib API (search + LLM)
-├── custom_rpc.rs         # Register a custom "stats" RPC
-├── import_markdown.rs    # Batch import: paragraphs → entry blocks
-├── graph_rag.rs          # GraphRAG: search → link.neighbors → LLM
-├── events_sync.rs        # Incremental sync: events.list → .md files
-├── block_lifecycle.rs    # Block primitive: append + update + delete
-└── index_management.rs   # FS drift detection + index.sync / rebuild
-```
-
-Run any example: `cargo run --example <name>`
-
-## Migrations (Spec 6 — breaking)
-
-> **If you have a database from before 2026-06-23, the daemon will run migrations automatically on next boot. These migrations are destructive and irreversible.**
-
-- **V7**: drops `entries.body` (entries no longer have a single body field — they have typed blocks instead)
-- **V8**: drops `vec_embeddings` (per-entry embeddings retired), `fts_entries` (per-entry FTS retired, replaced by per-block `fts_blocks`), and `chunks.entry_id` (chunks are now block-addressed)
-
-After these migrations run, existing entries without typed blocks will have empty `.nomai` files. To regenerate from current state:
-
-1. Stop the daemon
-2. Back up `db.sqlite` (in case you need to roll back)
-3. Start the daemon — migrations V6→V9 run automatically
-4. Call `system.export_to_fs` to generate `.nomai` files for entries missing them
-5. Call `index.rebuild` to re-derive chunks + FTS + embeddings from the `.nomai` files
-
-If your `config.embedding.dim` differs from 1536 (the daemon default), the daemon reconciles `vec_chunk_embeddings` automatically at boot — existing chunk embeddings are lost but re-populate from `emb_cache` on the next `search.semantic` (zero API calls for unchanged bodies).
-
 ## Documentation
 
 - **[docs/guide.md](docs/guide.md)** — Concepts: transport, the five primitives, storage model.
-- **[docs/reference.md](docs/reference.md)** — Full RPC reference, error codes, configuration, cache internals.
-- **[docs/lib.md](docs/lib.md)** — Embedding nomai as a Rust library (lib mode, DaemonBuilder, custom RPCs).
+- **[docs/reference.md](docs/reference.md)** — Full RPC reference, error codes, configuration.
+- **[docs/lib.md](docs/lib.md)** — Embedding nomai as a Rust library (lib mode, custom RPCs).
+
+Examples live in `crates/daemon/examples/` — RAG, GraphRAG, custom RPCs, incremental sync, and more. Run with `cargo run --example <name>`.
 
 ## Project layout
 
@@ -164,8 +68,8 @@ nomai/
 │   └── pre-commit   # Runs `cargo fmt --check` on staged .rs files
 └── docs/
     ├── guide.md       # Concepts: transport, primitives, storage model
-    ├── reference.md   # Full RPC + error + config + cache reference
-    └── lib.md         # Lib mode + DaemonBuilder + custom RPCs
+    ├── reference.md   # Full RPC + error + config reference
+    └── lib.md         # Lib mode + custom RPCs
 ```
 
 ## Development
@@ -176,10 +80,10 @@ nomai/
 git config core.hooksPath hooks
 ```
 
-The hook runs `cargo fmt --check` whenever `.rs` files are staged, blocking the commit if code is not rustfmt-clean. Bypass once with `git commit --no-verify`.
+The hook runs `cargo fmt --check` whenever `.rs` files are staged.
 
 Before pushing: `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`.
 
 ## License
 
-[Apache-2.0](LICENSE) — see `LICENSE` for the full text.
+[Apache-2.0](LICENSE)

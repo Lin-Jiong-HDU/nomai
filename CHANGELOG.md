@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while Windows uses a loopback TCP endpoint derived from the configured DB
   path. `serve`/`shim`/`socket` are now cross-platform, and `libc` is scoped
   to Unix-only dependencies.
+- **README simplified.** Removed the feature laundry list, ASCII architecture
+  diagram, migration guide, and other content better suited for docs/ or the
+  changelog. The README now focuses on what the project is, the five
+  primitives, and how to get started.
 
 ## [0.4.1] - 2026-07-14
 
@@ -57,7 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "a correct hit looks like a bug" blind spot behind #4 (where
   `search.fulltext` always returning the README entry was a misdiagnosis —
   the entry genuinely contained the tokens; the result just didn't show
-  *why*). `match_count` is the true total even when the id list is capped,
+  _why_). `match_count` is the true total even when the id list is capped,
   because the dedupe step now walks all matching rows instead of breaking
   at the limit (fixes a latent undercount in the old early-break dedupe).
 
@@ -92,6 +96,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.0] - 2026-07-08
 
 ### Added
+
 - **Multi-instance Claude Code support (#2).** The daemon is now a single
   resident process shared across CC instances: CC spawns the binary as
   before (zero `.mcp.json` change), and the shim auto-spawns/attaches to one
