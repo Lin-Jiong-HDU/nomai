@@ -36,6 +36,87 @@ pub enum DaemonStream {
     Tcp(tokio::net::TcpStream),
 }
 
+// Forward `AsyncRead` / `AsyncWrite` to the inner platform stream so callers
+// (e.g. `sync_cli`) can use a `DaemonStream` directly for NDJSON line I/O
+// without destructuring per platform. Both `UnixStream` and `TcpStream` are
+// `Unpin`, so `DaemonStream` is auto-`Unpin`; `Pin::get_mut` is therefore
+// available and the inner `Pin::new(s)` forwarding below is sound.
+#[cfg(unix)]
+impl tokio::io::AsyncRead for DaemonStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let Self::Unix(s) = self.get_mut();
+        std::pin::Pin::new(s).poll_read(cx, buf)
+    }
+}
+
+#[cfg(windows)]
+impl tokio::io::AsyncRead for DaemonStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let Self::Tcp(s) = self.get_mut();
+        std::pin::Pin::new(s).poll_read(cx, buf)
+    }
+}
+
+#[cfg(unix)]
+impl tokio::io::AsyncWrite for DaemonStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        let Self::Unix(s) = self.get_mut();
+        std::pin::Pin::new(s).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let Self::Unix(s) = self.get_mut();
+        std::pin::Pin::new(s).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let Self::Unix(s) = self.get_mut();
+        std::pin::Pin::new(s).poll_shutdown(cx)
+    }
+}
+
+#[cfg(windows)]
+impl tokio::io::AsyncWrite for DaemonStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        let Self::Tcp(s) = self.get_mut();
+        std::pin::Pin::new(s).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let Self::Tcp(s) = self.get_mut();
+        std::pin::Pin::new(s).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let Self::Tcp(s) = self.get_mut();
+        std::pin::Pin::new(s).poll_shutdown(cx)
+    }
+}
+
 /// Derived `(socket, pidfile)` paths for a resolved `db_path`. Both live in
 /// `<db_path.parent()>/run/` so the socket sits next to the database
 /// (persistent, permission-controlled, single source of truth from config).

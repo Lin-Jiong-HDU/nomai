@@ -614,7 +614,7 @@ impl Default for DaemonBuilder {
     }
 }
 
-fn expand_db_path(path: &std::path::Path) -> Result<std::path::PathBuf, CoreError> {
+pub fn expand_db_path(path: &std::path::Path) -> Result<std::path::PathBuf, CoreError> {
     let s = path.to_string_lossy();
     let expanded = if s.starts_with('~') {
         let home = std::env::var("HOME")
