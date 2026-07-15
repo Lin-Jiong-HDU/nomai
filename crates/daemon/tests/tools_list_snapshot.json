@@ -856,6 +856,15 @@
       "name": "sync.init"
     },
     {
+      "description": "Sync the knowledge_root with its git remote: commit local changes, pull --rebase, push, then rebuild the local SQLite index via index.sync. On rebase conflict, returns the conflicted files and leaves the repo mid-rebase; resolve in an editor and re-run to continue.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "sync.run"
+    },
+    {
       "description": "Walk every entry row and render a .nomai file for any that lack one. Skips entries that already have a .nomai on disk. Returns {exported, skipped, errors}.",
       "inputSchema": {
         "additionalProperties": false,

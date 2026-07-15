@@ -1371,8 +1371,8 @@ mod tests {
         let tools = result["tools"].as_array().expect("tools is array");
         // 32 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:5,
         // attachment:2, events:3, search:2, provider:1, cache:2, batch:1,
-        // index:3, system:1) + sync.init (Task 4).
-        assert_eq!(tools.len(), 34);
+        // index:3, system:1) + sync.init (Task 4) + sync.run (Task 5).
+        assert_eq!(tools.len(), 35);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1504,7 +1504,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 35); // 34 built-in + custom.echo
+        assert_eq!(tools.len(), 36); // 35 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----

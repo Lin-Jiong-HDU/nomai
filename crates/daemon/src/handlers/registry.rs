@@ -121,6 +121,8 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     // sync.* (git-backed multi-device sync)
     let h = sync::Init;
     m.insert(h.method(), Arc::new(h));
+    let h = sync::Run;
+    m.insert(h.method(), Arc::new(h));
 
     m
 }

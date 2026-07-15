@@ -11,7 +11,7 @@ use serde_json::Value;
 use tokio::process::Command;
 
 use nomai_core::CoreError;
-use nomai_protocol::method::sync::INIT as SYNC_INIT;
+use nomai_protocol::method::sync::{INIT as SYNC_INIT, RUN as SYNC_RUN};
 
 /// `.gitignore` — exclude atomic_write temp files and other sync-unfriendly
 /// artifacts from the work-tree.
@@ -108,10 +108,13 @@ pub(crate) async fn probe_lfs() -> bool {
 }
 
 /// Whether a `git rebase` is mid-flight (conflict left over from a prior sync).
-/// Checks `<root>/.git/rebase-merge` per `git`'s own resume logic.
+/// Checks both `<root>/.git/rebase-merge` (interactive/merge-based rebases) and
+/// `<root>/.git/rebase-apply` (am-based / non-interactive rebases such as
+/// `git pull --rebase` in some configurations), per `git`'s own resume logic.
 #[allow(dead_code)] // consumed by Task 4/5 sync.* handlers
 pub(crate) fn has_rebase_in_progress(root: &Path) -> bool {
     root.join(".git").join("rebase-merge").exists()
+        || root.join(".git").join("rebase-apply").exists()
 }
 
 /// List unmerged (conflicting) file paths, relative to `<root>`. Returns an
@@ -216,6 +219,117 @@ impl crate::rpc::RpcHandler for Init {
     }
 }
 
+/// `sync.run` — synchronize the knowledge_root with its git remote. The
+/// full operation runs under `daemon.sync_lock` so it is serialized against
+/// in-process write RPCs that mutate entry files. Flow (every failure →
+/// `CoreError`, daemon never panics; the lock guard is released on every
+/// return path by dropping):
+///
+/// 1. Reject if `root/.git` is missing (run `sync.init` first).
+/// 2. Read current branch via `git rev-parse --abbrev-ref HEAD`.
+/// 3. If a rebase is mid-flight (`has_rebase_in_progress`), resume via
+///    `git rebase --continue` and skip the commit step (the conflict being
+///    resumed already has staged edits). Otherwise `git add -A` and, only
+///    when `git status --porcelain` is non-empty, commit via
+///    `git_with_identity` (works without global git config).
+/// 4. Normal path: `git pull --rebase origin <branch>`. Resume path:
+///    `git rebase --continue`. On non-zero exit, a real rebase conflict
+///    leaves `.git/rebase-merge`/`rebase-apply` in place — detect that and
+///    return `CoreError::SyncConflict` WITHOUT pushing or reindexing, so
+///    the user can resolve in an editor and re-run to resume. A non-zero
+///    exit WITHOUT a mid-flight rebase is something else (e.g. first push
+///    to an empty remote: "couldn't find remote ref") — fall through to
+///    push rather than misreport a conflict.
+/// 5. `git push origin <branch>`.
+/// 6. Reuse the `index.sync` handler (looked up in `daemon.handlers`) to
+///    rebuild the local SQLite index from the reconciled FS.
+pub struct Run;
+
+#[async_trait]
+impl crate::rpc::RpcHandler for Run {
+    fn method(&self) -> &'static str {
+        SYNC_RUN
+    }
+    fn description(&self) -> &'static str {
+        "Sync the knowledge_root with its git remote: commit local changes, \
+         pull --rebase, push, then rebuild the local SQLite index via index.sync. \
+         On rebase conflict, returns the conflicted files and leaves the repo \
+         mid-rebase; resolve in an editor and re-run to continue."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(crate::handlers::params::empty_param_schema())
+    }
+    async fn call(
+        &self,
+        daemon: &crate::daemon::Daemon,
+        _params: Value,
+    ) -> Result<Value, CoreError> {
+        // Held for the whole op; released by drop on every return path
+        // (including the `?` early-returns and the conflict early-return).
+        let _lock = daemon.sync_lock.lock().await;
+        let root = daemon.content_store.root().to_path_buf();
+
+        if !root.join(".git").exists() {
+            return Err(CoreError::Validation(
+                "not a git repository; run sync.init <remote> first".into(),
+            ));
+        }
+
+        let branch = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+
+        let resuming = has_rebase_in_progress(&root);
+        let mut committed = false;
+        let mut commit_hash = serde_json::Value::Null;
+
+        if !resuming {
+            git(&root, &["add", "-A"]).await?;
+            let status = git(&root, &["status", "--porcelain"]).await?;
+            if !status.is_empty() {
+                let hash = git_with_identity(&root, &["commit", "-m", "nomai sync"]).await?;
+                committed = true;
+                commit_hash = serde_json::Value::String(hash);
+            }
+        }
+
+        // 正常路径: pull --rebase；恢复路径: rebase --continue
+        let rebase_args: Vec<&str> = if resuming {
+            vec!["rebase", "--continue"]
+        } else {
+            vec!["pull", "--rebase", "origin", branch.as_str()]
+        };
+        let rb = git_allow_fail(&root, &rebase_args).await?;
+        if !rb.success {
+            // Only a genuine rebase conflict leaves the rebase mid-flight. A
+            // failed pull that did NOT start a rebase (empty remote on first
+            // push, network blip) is not a conflict — fall through to push
+            // and let push either succeed (first push) or surface its error.
+            if has_rebase_in_progress(&root) {
+                let files = conflicted_files(&root).await;
+                return Err(CoreError::SyncConflict {
+                    message: "rebase conflict; resolve in editor and re-run nomai sync".into(),
+                    conflicted_files: files,
+                });
+            }
+        }
+
+        git(&root, &["push", "origin", branch.as_str()]).await?;
+
+        // 复用 index.sync handler 重建本地索引（FS 已变）。
+        let index_sync = daemon
+            .handlers
+            .get(nomai_protocol::method::index::SYNC)
+            .ok_or_else(|| CoreError::Config("index.sync handler missing".into()))?;
+        index_sync.call(daemon, Value::Null).await?;
+
+        Ok(serde_json::json!({
+            "committed": committed,
+            "commit": commit_hash,
+            "pushed": true,
+            "reindexed": true,
+        }))
+    }
+}
+
 /// Like `git`, but injects a fallback identity via `-c` so `git commit`
 /// works even when the user has no global git config. One-shot: the
 /// `-c` values apply only to this invocation and are NOT written to the
@@ -254,8 +368,8 @@ mod tests {
     use std::sync::Arc;
 
     use nomai_core::EntryService;
-    use nomai_protocol::error::VALIDATION_ERROR;
-    use nomai_protocol::method::sync::INIT as SYNC_INIT;
+    use nomai_protocol::error::{SYNC_ERROR, VALIDATION_ERROR};
+    use nomai_protocol::method::sync::{INIT as SYNC_INIT, RUN as SYNC_RUN};
     use nomai_protocol::{Id, JSONRPC_VERSION, Request};
     use nomai_providers::{EmbeddingProvider, LlmProvider};
     use serde_json::{Value, json};
@@ -284,7 +398,13 @@ mod tests {
             std::fs::create_dir_all(&knowledge_root).unwrap();
             let bare = tempfile::tempdir().unwrap();
             std::process::Command::new("git")
-                .args(["init", "--bare", bare.path().to_str().unwrap()])
+                .args([
+                    "init",
+                    "--bare",
+                    "--initial-branch",
+                    "main",
+                    bare.path().to_str().unwrap(),
+                ])
                 .output()
                 .unwrap();
             Self {
@@ -432,9 +552,16 @@ mod tests {
 
     #[test]
     fn has_rebase_in_progress_true_when_marker_exists() {
+        // Interactive / merge-based rebases write to rebase-merge/.
         let td = repo_tmp();
         std::fs::create_dir_all(td.path().join(".git").join("rebase-merge")).unwrap();
         assert!(has_rebase_in_progress(td.path()));
+
+        // am-based / non-interactive rebases (e.g. some `git pull --rebase`
+        // configurations) write to rebase-apply/ instead — must also be detected.
+        let td2 = repo_tmp();
+        std::fs::create_dir_all(td2.path().join(".git").join("rebase-apply")).unwrap();
+        assert!(has_rebase_in_progress(td2.path()));
     }
 
     // ----- sync.init e2e (Task 4) -----
@@ -466,10 +593,188 @@ mod tests {
         let harness = SyncTestHarness::new().await;
         let daemon = harness.daemon();
         let params = json!({ "remote": harness.clone_url(), "branch": "main" });
-        daemon.dispatch(req(SYNC_INIT, params.clone())).await;
+        let resp1 = daemon.dispatch(req(SYNC_INIT, params.clone())).await;
+        // Precondition: the first init must succeed, otherwise the "already a
+        // git repository" assertion below can mask a missing-git-lfs failure.
+        assert!(
+            resp1.result.is_some(),
+            "prereq sync.init failed: {:?}",
+            resp1.error
+        );
         let resp2 = daemon.dispatch(req(SYNC_INIT, params)).await;
         let err = resp2.error.unwrap();
         assert_eq!(err.code, VALIDATION_ERROR);
         assert!(err.message.contains("already a git repository"));
+    }
+
+    // ----- sync.run e2e (Task 5) -----
+
+    #[tokio::test]
+    async fn run_commits_and_pushes_local_changes() {
+        let harness = SyncTestHarness::new().await;
+        let daemon = harness.daemon();
+        let resp_init = daemon
+            .dispatch(req(
+                SYNC_INIT,
+                json!({ "remote": harness.clone_url(), "branch": "main" }),
+            ))
+            .await;
+        assert!(
+            resp_init.result.is_some(),
+            "prereq sync.init failed: {:?}",
+            resp_init.error
+        );
+
+        // 造一个 entry 文件（合成数据，不碰真实 KB）
+        let dir = harness
+            .knowledge_root()
+            .join("entries")
+            .join("01TEST00000000000000000001");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("entry.nomai"),
+            "#format_version 1\n#id 01TEST00000000000000000001\n#title t\n#created_at 2026-07-16T00:00:00Z\n#updated_at 2026-07-16T00:00:00Z\n\n@note\nhello\n",
+        )
+        .unwrap();
+
+        let resp = daemon.dispatch(req(SYNC_RUN, json!({}))).await;
+        assert!(
+            resp.result.is_some(),
+            "run should succeed: {:?}",
+            resp.error
+        );
+        let result = resp.result.unwrap();
+        assert_eq!(result["committed"], true);
+        assert_eq!(result["pushed"], true);
+
+        // clone remote 验证 entry 已推送
+        let clone_tmp = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args([
+                "clone",
+                &harness.clone_url(),
+                clone_tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(clone_tmp.path().join("entries").exists());
+    }
+
+    #[tokio::test]
+    async fn run_without_local_changes_skips_commit() {
+        let harness = SyncTestHarness::new().await;
+        let daemon = harness.daemon();
+        let resp_init = daemon
+            .dispatch(req(
+                SYNC_INIT,
+                json!({ "remote": harness.clone_url(), "branch": "main" }),
+            ))
+            .await;
+        assert!(
+            resp_init.result.is_some(),
+            "prereq sync.init failed: {:?}",
+            resp_init.error
+        );
+        let resp = daemon.dispatch(req(SYNC_RUN, json!({}))).await;
+        let result = resp
+            .result
+            .unwrap_or_else(|| panic!("run should succeed: {:?}", resp.error));
+        assert_eq!(result["committed"], false);
+    }
+
+    #[tokio::test]
+    async fn run_returns_conflict_on_diverged_same_file() {
+        // 两个 work-tree 共享一个 bare remote；两端改同一文件 → 第二端冲突。
+        // --initial-branch main 让 bare 的 HEAD 与本测试使用的 main 分支一致，
+        // 否则在 init.defaultBranch 未设的系统上 clone 会落到 master 而 push main 失败。
+        let bare = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args([
+                "init",
+                "--bare",
+                "--initial-branch",
+                "main",
+                bare.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+
+        let harness = SyncTestHarness::new().await;
+        let daemon = harness.daemon();
+        let resp_init = daemon
+            .dispatch(req(
+                SYNC_INIT,
+                json!({ "remote": bare.path().to_str().unwrap(), "branch": "main" }),
+            ))
+            .await;
+        assert!(
+            resp_init.result.is_some(),
+            "prereq sync.init failed: {:?}",
+            resp_init.error
+        );
+
+        // 直接在 bare 里用第二个 work-tree 制造分叉：clone、改同一 entry、push
+        let other = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args([
+                "clone",
+                bare.path().to_str().unwrap(),
+                other.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        let f = other.path().join("entries").join("X").join("entry.nomai");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(
+            &f,
+            "#format_version 1\n#id X\n#title from-other\n\n@note\nother\n",
+        )
+        .unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["-C", other.path().to_str().unwrap(), "add", "-A"])
+            .output()
+            .unwrap();
+        let _ = std::process::Command::new("git")
+            .args([
+                "-C",
+                other.path().to_str().unwrap(),
+                "-c",
+                "user.email=o@o",
+                "-c",
+                "user.name=o",
+                "commit",
+                "-m",
+                "other",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::process::Command::new("git")
+            .args([
+                "-C",
+                other.path().to_str().unwrap(),
+                "push",
+                "origin",
+                "main",
+            ])
+            .output()
+            .unwrap();
+
+        // 本端也改"同一文件"（path 相同才能冲突）然后 run
+        let local_f = harness
+            .knowledge_root()
+            .join("entries")
+            .join("X")
+            .join("entry.nomai");
+        std::fs::create_dir_all(local_f.parent().unwrap()).unwrap();
+        std::fs::write(
+            &local_f,
+            "#format_version 1\n#id X\n#title from-local\n\n@note\nlocal\n",
+        )
+        .unwrap();
+
+        let resp = daemon.dispatch(req(SYNC_RUN, json!({}))).await;
+        let err = resp.error.expect("expected conflict");
+        assert_eq!(err.code, SYNC_ERROR);
+        assert!(err.data.unwrap()["conflicted_files"].is_array());
     }
 }
