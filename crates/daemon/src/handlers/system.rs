@@ -32,6 +32,11 @@ impl RpcHandler for ExportToFs {
     fn input_schema(&self) -> Option<Value> {
         Some(crate::handlers::params::empty_param_schema())
     }
+    fn is_mutating(&self) -> bool {
+        // Renders .nomai files into knowledge_root; must serialize against
+        // sync.run's rebase (same race class as entry/block writes, spec §8).
+        true
+    }
     async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {
         // Clone the Arc before spawning so the closure is 'static. The
         // export pass takes per-entry locks internally during get/write.

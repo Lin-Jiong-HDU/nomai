@@ -817,6 +817,7 @@ mod tests {
             "block.update",
             "block.delete",
             "batch",
+            "system.export_to_fs",
         ] {
             let h = reg
                 .get(name)
