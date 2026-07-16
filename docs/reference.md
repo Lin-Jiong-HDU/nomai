@@ -231,7 +231,7 @@ synced against a private remote; `entry.nomai` files sync as plain text
 (merge-friendly), binary attachments route through Git LFS. The daemon's
 `--sync-init` / `--sync` CLI flags are thin clients that dispatch these two
 RPCs to the resident daemon; all git work lives in the daemon, never in
-`nomai-core`.
+`nomai-core`. Both `sync.init` and `sync.run` are new in 0.4.2.
 
 | Method      | Params                                  | Returns                                                       | Notes                                                                                                                                                          |
 | ----------- | --------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |

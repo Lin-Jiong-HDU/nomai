@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-07-16
+
+### Added
+
+- **Multi-device sync via git.** `nomai-daemon --sync-init <url>` turns the
+  `knowledge_root` into a git repository (binary attachments route through
+  Git LFS), and `nomai-daemon --sync` runs `commit → pull --rebase → push →
+  index.sync` to keep two devices converged. Rebase conflicts surface as a
+  structured `CoreError::SyncConflict` (RPC code 1007, with the conflicted
+  file list); resolve in an editor and re-run to auto-continue via
+  `git rebase --continue`. A process-wide `sync_lock` serializes the rebase
+  against concurrent write RPCs (`entry.*` / `block.*` / `batch` /
+  `system.export_to_fs`) so a write can't race the work-tree rewrite. New
+  RPCs: `sync.init`, `sync.run`. The remote and branch are managed by git
+  itself (`.git/config`) — no nomai config change required. `core` is
+  untouched except one new error variant.
+
 ### Changed
 
 - **Windows daemon support with shared multi-client mode.** `nomai-daemon`
