@@ -353,6 +353,10 @@ impl crate::rpc::RpcHandler for Run {
         // works on machines with no global git config (fresh CI runners).
         let rb = git_allow_fail_with_identity(&root, &rebase_args).await?;
         if !rb.success {
+            eprintln!(
+                "[sync.run DEBUG] rebase non-zero: args={:?} stdout={:?} stderr={:?} marker={}",
+                rebase_args, rb.stdout, rb.stderr, has_rebase_in_progress(&root)
+            );
             // Only a genuine rebase conflict leaves the rebase mid-flight. A
             // failed pull that did NOT start a rebase (empty remote on first
             // push, network blip) is not a conflict — fall through to push
@@ -360,7 +364,10 @@ impl crate::rpc::RpcHandler for Run {
             if has_rebase_in_progress(&root) {
                 let files = conflicted_files(&root).await;
                 return Err(CoreError::SyncConflict {
-                    message: "rebase conflict; resolve in editor and re-run nomai sync".into(),
+                    message: format!(
+                        "rebase conflict; resolve and re-run | stderr: {}",
+                        rb.stderr.trim()
+                    ),
                     conflicted_files: files,
                 });
             }
