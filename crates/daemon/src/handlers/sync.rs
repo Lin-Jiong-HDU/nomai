@@ -201,7 +201,11 @@ impl crate::rpc::RpcHandler for Init {
 
         git(root, &["init", "--initial-branch", branch]).await?;
         git(root, &["remote", "add", "origin", remote]).await?;
-        git(root, &["lfs", "install"]).await?;
+        // --local: configure LFS filters in THIS repo only. Without --local,
+        // `git lfs install` writes the global ~/.gitconfig, which races under
+        // parallel tests (and tangles the user's global git config). Repo-level
+        // is sufficient — .gitattributes' filter=lfs resolves to this config.
+        git(root, &["lfs", "install", "--local"]).await?;
         // Small text files; std::fs::write is fine in this async context
         // (tokio::fs is gated off by the daemon crate's feature set).
         std::fs::write(root.join(".gitignore"), GITIGNORE).map_err(CoreError::from)?;
@@ -994,14 +998,17 @@ mod tests {
         // multi-line `[branch <hash>] summary` stdout of `git commit -m`.
         let harness = SyncTestHarness::new().await;
         let daemon = harness.daemon();
-        daemon
+        let init_resp = daemon
             .dispatch(req(
                 SYNC_INIT,
                 json!({ "remote": harness.clone_url(), "branch": "main" }),
             ))
-            .await
-            .result
-            .expect("sync.init");
+            .await;
+        assert!(
+            init_resp.result.is_some(),
+            "sync.init failed: {:?}",
+            init_resp.error
+        );
 
         // Drop a file so sync.run has something to commit.
         let dir = harness
@@ -1039,14 +1046,17 @@ mod tests {
         // opaque "You are not currently on a branch" from `git pull --rebase`.
         let harness = SyncTestHarness::new().await;
         let daemon = harness.daemon();
-        daemon
+        let init_resp = daemon
             .dispatch(req(
                 SYNC_INIT,
                 json!({ "remote": harness.clone_url(), "branch": "main" }),
             ))
-            .await
-            .result
-            .expect("sync.init");
+            .await;
+        assert!(
+            init_resp.result.is_some(),
+            "sync.init failed: {:?}",
+            init_resp.error
+        );
 
         // Move onto the commit itself (detached).
         std::process::Command::new("git")
