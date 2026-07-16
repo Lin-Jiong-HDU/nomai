@@ -101,7 +101,18 @@ async fn git_allow_fail_with_identity(root: &Path, args: &[&str]) -> Result<GitO
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["-c", "user.email=nomai@local", "-c", "user.name=nomai"])
+        .args([
+            "-c",
+            "user.email=nomai@local",
+            "-c",
+            "user.name=nomai",
+            // rebase --continue invokes the editor to confirm the replayed
+            // commit's message; on a fresh CI runner EDITOR is unset and the
+            // terminal is dumb ("Terminal is dumb, but EDITOR unset"). Make
+            // the editor a no-op so it accepts the message unchanged.
+            "-c",
+            "core.editor=true",
+        ])
         .args(args)
         .stdin(Stdio::null())
         .output()
@@ -353,10 +364,6 @@ impl crate::rpc::RpcHandler for Run {
         // works on machines with no global git config (fresh CI runners).
         let rb = git_allow_fail_with_identity(&root, &rebase_args).await?;
         if !rb.success {
-            eprintln!(
-                "[sync.run DEBUG] rebase non-zero: args={:?} stdout={:?} stderr={:?} marker={}",
-                rebase_args, rb.stdout, rb.stderr, has_rebase_in_progress(&root)
-            );
             // Only a genuine rebase conflict leaves the rebase mid-flight. A
             // failed pull that did NOT start a rebase (empty remote on first
             // push, network blip) is not a conflict — fall through to push
@@ -364,10 +371,7 @@ impl crate::rpc::RpcHandler for Run {
             if has_rebase_in_progress(&root) {
                 let files = conflicted_files(&root).await;
                 return Err(CoreError::SyncConflict {
-                    message: format!(
-                        "rebase conflict; resolve and re-run | stderr: {}",
-                        rb.stderr.trim()
-                    ),
+                    message: "rebase conflict; resolve in editor and re-run nomai sync".into(),
                     conflicted_files: files,
                 });
             }
@@ -399,7 +403,18 @@ async fn git_with_identity(root: &Path, args: &[&str]) -> Result<String, CoreErr
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["-c", "user.email=nomai@local", "-c", "user.name=nomai"])
+        .args([
+            "-c",
+            "user.email=nomai@local",
+            "-c",
+            "user.name=nomai",
+            // rebase --continue invokes the editor to confirm the replayed
+            // commit's message; on a fresh CI runner EDITOR is unset and the
+            // terminal is dumb ("Terminal is dumb, but EDITOR unset"). Make
+            // the editor a no-op so it accepts the message unchanged.
+            "-c",
+            "core.editor=true",
+        ])
         .args(args)
         .stdin(Stdio::null())
         .output()
