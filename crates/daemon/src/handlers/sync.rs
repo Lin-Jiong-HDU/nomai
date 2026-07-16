@@ -91,6 +91,35 @@ async fn spawn(program: &str, root: &Path, args: &[&str]) -> Result<GitOutput, C
     })
 }
 
+/// Like `git_allow_fail`, but injects a fallback identity via `-c` so commands
+/// that create commits during a rebase (`rebase --continue`, `pull --rebase`
+/// replay) succeed on machines with no global git config (e.g. fresh CI
+/// runners). One-shot `-c`: the values are NOT written to the user's git
+/// config. Mirrors `git_with_identity` but returns `GitOutput` (caller needs
+/// to inspect success for conflict detection).
+async fn git_allow_fail_with_identity(root: &Path, args: &[&str]) -> Result<GitOutput, CoreError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["-c", "user.email=nomai@local", "-c", "user.name=nomai"])
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                CoreError::Validation("git not found on PATH".into())
+            } else {
+                CoreError::Io(e)
+            }
+        })?;
+    Ok(GitOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        success: output.status.success(),
+    })
+}
+
 /// Whether `git lfs` is installed and callable. Best-effort: any spawn or
 /// status failure collapses to `false` (sync degrades to plain git).
 #[allow(dead_code)] // consumed by Task 4/5 sync.* handlers
@@ -319,7 +348,10 @@ impl crate::rpc::RpcHandler for Run {
         } else {
             vec!["pull", "--rebase", "origin", branch.as_str()]
         };
-        let rb = git_allow_fail(&root, &rebase_args).await?;
+        // rebase --continue / pull --rebase can create commits (replaying
+        // local commits onto upstream); inject a fallback identity so this
+        // works on machines with no global git config (fresh CI runners).
+        let rb = git_allow_fail_with_identity(&root, &rebase_args).await?;
         if !rb.success {
             // Only a genuine rebase conflict leaves the rebase mid-flight. A
             // failed pull that did NOT start a rebase (empty remote on first
