@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`nomai-providers` compiles again.** `crates/providers/Cargo.toml`'s
+  `chrono` dependency lacked the `serde` feature, so `DateTime<Utc>` in
+  `cached.rs` failed to deserialize (E0277) — the providers crate could
+  not compile, blocking every `cargo build` and preventing the release
+  daemon from being rebuilt. Enable `features=["serde"]`.
+
 ## [0.4.2] - 2026-07-16
 
 ### Added
