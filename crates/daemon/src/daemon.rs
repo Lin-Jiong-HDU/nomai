@@ -911,6 +911,7 @@ pub(crate) fn resolved_db_path(
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)] // tests run on the current_thread runtime; a std MutexGuard held across `.await` is sound (never moved across threads)
 mod tests {
     use super::*;
 

@@ -131,6 +131,7 @@ mod descriptor_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)] // current_thread runtime; std MutexGuard across `.await` is sound
 mod restart_tests {
     use super::*;
     use crate::daemon::{Daemon, DaemonSlot};
