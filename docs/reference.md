@@ -80,6 +80,7 @@ Each mutation rewrites the parent entry's `.nomai` file automatically (no separa
 | `index.sync`        | `{}`   | `{added, updated, removed, unchanged}`            | Reconcile FS → index (incremental, mtime-diff) |
 | `index.rebuild`     | `{}`   | `{reindexed, errors}`                             | Wipe derived tables + reindex every FS entry  |
 | `system.export_to_fs` | `{}` | `{exported, skipped, errors}`                   | Generate missing `.nomai` files from DB state |
+| `system.restart`      | `{}` | `{ok: true}`                                     | Connection-continuous in-process rebuild of sqlite / embedder-LLM providers / reqwest `Client` / search cache. In-flight RPCs finish against the old state; subsequent RPCs hit the rebuilt one. Config error if the daemon isn't slot-backed or the rebuild fails. Emits no events. |
 
 `index.verify` is read-only. `index.sync` is incremental (diffs FS vs DB mtime). `index.rebuild` is destructive but doesn't touch `events` (daemon history) or `emb_cache` (deterministic, reusable).
 

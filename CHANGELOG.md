@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`system.restart` RPC.** Rebuilds the resident daemon's internal state
+  (sqlite connection, embedding/LLM providers, reqwest `Client`, search cache)
+  in-process — recovering from long-uptime state decay (e.g. embedding calls
+  failing with `error sending request for url`) without dropping the listener
+  or any client connection. Claude Code / users can call it via the
+  `system_restart` MCP tool; in-flight RPCs finish against the old state,
+  subsequent RPCs hit the rebuilt one. Returns `{ "ok": true }`. Emits no
+  events.
+
 ### Fixed
 
 - **`nomai-providers` compiles again.** `crates/providers/Cargo.toml`'s
