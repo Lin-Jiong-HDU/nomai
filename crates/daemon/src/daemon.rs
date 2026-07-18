@@ -353,10 +353,7 @@ impl Daemon {
     /// `Weak<DaemonSlot>`); `Arc::downgrade(&slot)` for a `slot: DaemonSlot`
     /// yields exactly this type. See the `restart_slot` field doc for why.
     #[allow(dead_code)] // caller lands in Task 3 (run_serve/run_stdio wiring)
-    pub(crate) fn set_restart_slot(
-        &self,
-        weak: std::sync::Weak<std::sync::RwLock<Arc<Daemon>>>,
-    ) {
+    pub(crate) fn set_restart_slot(&self, weak: std::sync::Weak<std::sync::RwLock<Arc<Daemon>>>) {
         let _ = self.restart_slot.set(weak);
     }
 
@@ -1512,7 +1509,7 @@ model = "test-llm"
     #[tokio::test]
     async fn serve_reads_slot_so_swap_is_visible_to_existing_conn() {
         use std::sync::RwLock;
-        use tokio::io::{duplex, AsyncWriteExt};
+        use tokio::io::{AsyncWriteExt, duplex};
 
         // Two duplexes: one for client→server (request stream), one for
         // server→client (response stream). This mirrors how a real Unix stream

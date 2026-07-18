@@ -89,9 +89,13 @@ impl RpcHandler for Restart {
         // (lib-mode from_services/builder daemons are None — they have no
         // Config to rebuild from). Reject those: restart only applies to a
         // config-backed daemon.
-        let cfg_arc = daemon.config.as_ref().ok_or_else(|| {
-            CoreError::Config("system.restart requires a config-backed daemon".into())
-        })?.clone();
+        let cfg_arc = daemon
+            .config
+            .as_ref()
+            .ok_or_else(|| {
+                CoreError::Config("system.restart requires a config-backed daemon".into())
+            })?
+            .clone();
         // emb_cache (sqlite table) survives the reopen, so unchanged bodies
         // don't re-hit the provider.
         let new_daemon = Daemon::from_arc(cfg_arc).await?;
@@ -210,7 +214,10 @@ mod restart_tests {
         // calling restart: Restart::call takes a write lock on the same slot,
         // so holding a read guard across the `.await` would self-deadlock.
         let daemon_snap = slot.read().unwrap().clone();
-        let out = restart.call(&daemon_snap, serde_json::json!({})).await.unwrap();
+        let out = restart
+            .call(&daemon_snap, serde_json::json!({}))
+            .await
+            .unwrap();
         assert_eq!(out, serde_json::json!({ "ok": true }));
         let after: *const Daemon = Arc::as_ptr(&slot.read().unwrap().clone());
         assert_ne!(before, after, "restart must install a new Daemon");
@@ -298,7 +305,9 @@ mod restart_tests {
         let err = super::Restart.call(&d, serde_json::json!({})).await;
         assert!(err.is_err(), "restart without a slot must error");
         assert!(
-            format!("{:?}", err.unwrap_err()).to_lowercase().contains("slot"),
+            format!("{:?}", err.unwrap_err())
+                .to_lowercase()
+                .contains("slot"),
             "error should explain the slot is missing"
         );
     }
