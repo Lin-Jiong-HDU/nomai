@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Startup-sync now re-embeds chunks.** The boot-time FS → index
+  reconciliation (`Daemon::startup_sync`) previously rebuilt chunks + FTS
+  but never embedded them, so after a `git clone` + restart
+  `search.semantic` returned empty until a manual `index.rebuild`. It now
+  re-embeds every entry in `sync_result.reindexed_ids` (mirroring the
+  `index.sync` / `index.rebuild` RPC handlers), best-effort. `emb_cache`
+  keeps this near-zero API cost for unchanged bodies; a steady-state boot
+  (FS unchanged since last start) embeds nothing.
+
 ## [0.4.3] - 2026-07-18
 
 ### Added

@@ -226,6 +226,12 @@ What syncs and what doesn't:
   rebuilds its own local index from the reconciled filesystem at the end of
   every `--sync` (via `index.sync`), so the SQLite files on different
   machines are independent and disposable.
+- **Startup re-embeds automatically.** On boot the daemon reconciles FS →
+  index and re-embeds any changed chunks (`startup_sync`), so after a
+  `git clone` + restart `search.semantic` returns hits immediately — no
+  manual `index.rebuild` needed. `emb_cache` keeps this near-zero API cost
+  for unchanged bodies; a steady-state boot (FS unchanged since last start)
+  embeds nothing.
 
 **Conflicts.** If two devices edit the *same line* of the same `entry.nomai`,
 the `pull --rebase` inside `--sync` stops with a rebase conflict. The daemon
