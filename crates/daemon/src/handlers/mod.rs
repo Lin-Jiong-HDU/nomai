@@ -2900,7 +2900,7 @@ mod tests {
             assert_eq!(n, 0);
         }
 
-        // Construct the daemon. Daemon::for_test runs run_startup_sync at
+        // Construct the daemon. Daemon::for_test runs sync_index_from_fs_at_startup at
         // the end of construction, which must pick up the external file.
         let embedder: Arc<dyn nomai_providers::EmbeddingProvider> =
             Arc::new(nomai_providers::OpenAiCompatibleEmbed::new(
