@@ -429,7 +429,14 @@ impl Daemon {
 
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin);
-        let daemon = Arc::new(self);
+        let daemon: DaemonSlot = Arc::new(std::sync::RwLock::new(Arc::new(self)));
+        // Link the back-reference so a future `system.restart` handler can find
+        // this slot. Idempotent via OnceLock.
+        daemon
+            .read()
+            .unwrap()
+            .clone()
+            .set_restart_slot(Arc::downgrade(&daemon));
         let mut line = String::new();
 
         loop {
@@ -465,6 +472,11 @@ impl Daemon {
             };
 
             let is_notification = req.id.is_none();
+            // Read the current Daemon from the slot per RPC so a future
+            // `system.restart` swap is visible on the next stdin line. The
+            // write-guard contention with a restart is bounded by the Arc clone
+            // (this statement); dispatch runs outside the guard.
+            let daemon = daemon.read().unwrap().clone();
             let resp = daemon.dispatch(req).await;
             if !is_notification {
                 let _ = crate::io::write_response_line(&resp);
@@ -486,7 +498,14 @@ impl Daemon {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::sync::{Notify, broadcast};
 
-        let daemon = Arc::new(self);
+        let daemon: DaemonSlot = Arc::new(std::sync::RwLock::new(Arc::new(self)));
+        // Link the back-reference so a future `system.restart` handler can
+        // upgrade from any in-flight Daemon to this slot and swap in a rebuild.
+        // Idempotent via OnceLock; a benign no-op if the slot was already set.
+        {
+            let d = daemon.read().unwrap().clone();
+            d.set_restart_slot(Arc::downgrade(&daemon));
+        }
         let active = Arc::new(AtomicUsize::new(0));
         let idle_notify = Arc::new(Notify::new());
         let (shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(1);
@@ -529,11 +548,11 @@ impl Daemon {
                         }
                     };
                     active.fetch_add(1, Ordering::SeqCst);
-                    let daemon_c = Arc::clone(&daemon);
+                    let slot_c = Arc::clone(&daemon);
                     let active_c = Arc::clone(&active);
                     let notify_c = Arc::clone(&idle_notify);
                     tokio::spawn(async move {
-                        handle_conn(daemon_c, stream).await;
+                        handle_conn(slot_c, stream).await;
                         if active_c.fetch_sub(1, Ordering::SeqCst) == 1 {
                             notify_c.notify_one();
                         }
@@ -788,22 +807,26 @@ fn run_startup_sync(entries: &EntryService) {
 
 /// Serve one client connection: read NDJSON requests, dispatch, write the
 /// response back to the stream. Exits on EOF or read error.
-async fn handle_conn(daemon: Arc<Daemon>, stream: crate::socket::DaemonStream) {
+///
+/// The connection holds the slot (not a pinned `Arc<Daemon>`) so a
+/// `system.restart` swap is visible to this long-lived connection on the very
+/// next request line — see `handle_conn_halves` for the per-RPC read.
+async fn handle_conn(slot: DaemonSlot, stream: crate::socket::DaemonStream) {
     match stream {
         #[cfg(unix)]
         crate::socket::DaemonStream::Unix(stream) => {
             let (read_half, write_half) = stream.into_split();
-            handle_conn_halves(daemon, read_half, write_half).await;
+            handle_conn_halves(slot, read_half, write_half).await;
         }
         #[cfg(windows)]
         crate::socket::DaemonStream::Tcp(stream) => {
             let (read_half, write_half) = stream.into_split();
-            handle_conn_halves(daemon, read_half, write_half).await;
+            handle_conn_halves(slot, read_half, write_half).await;
         }
     }
 }
 
-async fn handle_conn_halves<R, W>(daemon: Arc<Daemon>, read_half: R, mut write_half: W)
+async fn handle_conn_halves<R, W>(slot: DaemonSlot, read_half: R, mut write_half: W)
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
@@ -838,6 +861,12 @@ where
             }
         };
         let is_notification = req.id.is_none();
+        // Read the CURRENT daemon from the slot per RPC — a restart swap is
+        // visible to this long-lived connection on the very next line. The
+        // read-guard is dropped at the end of this statement (`.clone()`), so
+        // a concurrent `system.restart` write is only blocked for the duration
+        // of the Arc clone, not the dispatch.
+        let daemon = slot.read().unwrap().clone();
         let resp = daemon.dispatch(req).await;
         if !is_notification {
             let _ = write_response_to(&mut write_half, &resp).await;
@@ -1467,5 +1496,77 @@ model = "test-llm"
                 None => std::env::remove_var("NOMAI_TEST_SLOT_LLM"),
             }
         }
+    }
+
+    /// Task 3 (system.restart prerequisite): a long-lived connection served by
+    /// `handle_conn_halves` must observe a slot swap on the *next* RPC, without
+    /// the connection being torn down or re-accepted. This is the core
+    /// invariant `system.restart` relies on: existing connections keep working
+    /// and dispatch against whichever Daemon currently holds the slot.
+    ///
+    /// Per the task brief's NOTE: we exercise `handle_conn_halves` directly with
+    /// two `tokio::io::duplex` halves rather than plumbing a `DaemonStream::Unix`
+    /// from a duplex (which is awkward). `handle_conn_halves` is generic over
+    /// `R: AsyncRead, W: AsyncWrite`, so this is a faithful unit of the serve
+    /// path's per-connection behaviour.
+    #[tokio::test]
+    async fn serve_reads_slot_so_swap_is_visible_to_existing_conn() {
+        use std::sync::RwLock;
+        use tokio::io::{duplex, AsyncWriteExt};
+
+        // Two duplexes: one for client→server (request stream), one for
+        // server→client (response stream). This mirrors how a real Unix stream
+        // splits into read/write halves without needing DaemonStream.
+        let (mut client_req_w, server_req_r) = duplex(8 * 1024);
+        let (server_resp_w, mut server_resp_r) = duplex(8 * 1024);
+
+        // Build a Daemon and wrap it in the slot. `null_daemon()` is enough —
+        // `provider.list` is read-only and needs no Config / provider call.
+        let d = null_daemon().await;
+        let slot: DaemonSlot = Arc::new(RwLock::new(Arc::new(d)));
+
+        let slot_c = Arc::clone(&slot);
+        let conn = tokio::spawn(async move {
+            handle_conn_halves(slot_c, server_req_r, server_resp_w).await;
+        });
+
+        // First RPC: provider.list (read-only, no provider call).
+        client_req_w
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"provider.list\"}\n")
+            .await
+            .unwrap();
+
+        // Swap in a fresh Daemon under the same slot — this simulates
+        // system.restart rebuilding the Daemon while the connection stays up.
+        // Build the new Daemon *before* taking the write guard so we don't
+        // hold a std lock across `.await` (clippy: await-holding-lock).
+        let new_d = null_daemon().await;
+        {
+            let mut g = slot.write().unwrap();
+            new_d.set_restart_slot(Arc::downgrade(&slot));
+            *g = Arc::new(new_d);
+        }
+
+        // Second RPC after the swap — must still be served by the same
+        // long-lived connection, now dispatching against the new Daemon.
+        client_req_w
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"provider.list\"}\n")
+            .await
+            .unwrap();
+
+        // Read two responses off the server→client duplex.
+        let mut buf = String::new();
+        let mut br = BufReader::new(&mut server_resp_r);
+        br.read_line(&mut buf).await.unwrap(); // id=1
+        br.read_line(&mut buf).await.unwrap(); // id=2
+
+        // Close the request side so handle_conn_halves sees EOF and exits.
+        drop(client_req_w);
+        conn.await.unwrap();
+
+        assert!(
+            buf.contains("\"id\":1") && buf.contains("\"id\":2"),
+            "both RPCs (pre- and post-swap) must be served over the same connection: {buf}"
+        );
     }
 }
