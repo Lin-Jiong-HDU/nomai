@@ -103,6 +103,11 @@ pub mod system {
     /// rows created via direct DB manipulation. Returns
     /// `{ exported, skipped, errors }`.
     pub const EXPORT_TO_FS: &str = "system.export_to_fs";
+    /// Task 4: rebuild the resident daemon's internal state (sqlite/embedder/
+    /// llm/cache) in-process without dropping client connections. Use when
+    /// embedding calls (search.semantic / ingest) start failing due to long-
+    /// uptime state decay. Returns `{ ok: true }`. No params, no events.
+    pub const RESTART: &str = "system.restart";
 }
 
 pub mod cache {
@@ -202,6 +207,7 @@ mod tests {
     #[test]
     fn system_namespace_methods() {
         assert_eq!(system::EXPORT_TO_FS, "system.export_to_fs");
+        assert_eq!(system::RESTART, "system.restart");
     }
 
     #[test]

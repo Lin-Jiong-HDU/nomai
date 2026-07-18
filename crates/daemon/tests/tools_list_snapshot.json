@@ -872,6 +872,15 @@
         "type": "object"
       },
       "name": "system.export_to_fs"
+    },
+    {
+      "description": "Rebuild the resident daemon's internal state (sqlite/embedder/llm/cache) in-process without dropping client connections. Use when embedding calls (search.semantic / ingest) start failing due to long-uptime state decay. Returns {ok: true}. No params.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "system.restart"
     }
   ]
 }

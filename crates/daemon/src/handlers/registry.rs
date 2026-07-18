@@ -78,8 +78,10 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     let h = index::Verify;
     m.insert(h.method(), Arc::new(h));
 
-    // system.* (Plan 6: Spec §12 migration utilities.)
+    // system.* (Plan 6: Spec §12 migration utilities. Task 4: restart.)
     let h = system::ExportToFs;
+    m.insert(h.method(), Arc::new(h));
+    let h = system::Restart;
     m.insert(h.method(), Arc::new(h));
 
     // events.*
