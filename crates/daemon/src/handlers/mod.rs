@@ -21,8 +21,9 @@ pub mod sync;
 pub mod system;
 
 // Internal helper (not an RPC module): chunk-embedding orchestration used by
-// entry/block/batch handlers. See `embed::embed_entry_chunks`.
-mod embed;
+// entry/block/batch handlers and the daemon's startup-sync. See
+// `embed::embed_entry_chunks`.
+pub(crate) mod embed;
 
 pub use registry::registry;
 

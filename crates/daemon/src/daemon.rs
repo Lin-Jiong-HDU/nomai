@@ -211,12 +211,6 @@ impl Daemon {
             &config.llm.model,
         ));
 
-        // Spec §9.1: sync FS → index at startup. Best-effort; failures log
-        // warning to stderr and do not abort the boot (single-user tool; an
-        // empty/STALE index still lets the daemon serve RPCs, and a later
-        // `index.sync` or `index.rebuild` call can recover).
-        run_startup_sync(&entries);
-
         // Capture the model strings before moving `config` into the struct
         // field; `config` is `Arc<Config>` and we retain a clone in the field
         // for `system.restart`, so read the strings out first.
@@ -224,7 +218,7 @@ impl Daemon {
         let llm_model = config.llm.model.clone();
         let embedding_dim = config.embedding.dim;
 
-        Ok(Self {
+        let daemon = Self {
             config: Some(config),
             entries,
             links,
@@ -242,7 +236,17 @@ impl Daemon {
             sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             handlers: crate::handlers::registry(),
             restart_slot: std::sync::OnceLock::new(),
-        })
+        };
+
+        // Spec §9.1: sync FS → index at startup AND re-embed chunks of changed
+        // entries so `search.semantic` returns hits without a manual
+        // `index.rebuild` after a `git clone` + restart. Best-effort; failures
+        // log a warning to stderr and do not abort the boot (single-user tool;
+        // a stale index still lets the daemon serve RPCs, and a later
+        // `index.sync` or `index.rebuild` call can recover).
+        daemon.startup_sync().await;
+
+        Ok(daemon)
     }
 
     #[cfg(test)]
@@ -272,9 +276,13 @@ impl Daemon {
             embedding_model.as_str(),
             100_000,
         ));
-        // Mirror Daemon::new: run startup FS→index sync so a test that
-        // pre-populates the content store sees the entries indexed.
-        run_startup_sync(&entries);
+        // Mirror Daemon::new's startup FS→index sync so a test that
+        // pre-populates the content store sees the entries indexed. The
+        // production path also re-embeds changed chunks (`startup_sync`);
+        // test entries are typically created via the service (which embeds),
+        // so the sync-only pass here is sufficient for the unit tests that
+        // rely on `for_test`.
+        sync_index_from_fs_at_startup(&entries);
         // Share the EntryService's content_store so tests that assert on
         // daemon.content_store.root() see the same path EntryService uses.
         let content_store = entries.content_store().clone();
@@ -418,6 +426,34 @@ impl Daemon {
             handlers,
             restart_slot: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Spec §9.1: sync FS → index at startup AND re-embed chunks of changed
+    /// entries so `search.semantic` returns hits immediately after boot —
+    /// including the `git clone` + restart case where the FS has entries the
+    /// index/embeddings have never seen. Runs two phases:
+    ///
+    /// 1. `sync_index_from_fs_at_startup` — reconcile chunks + FTS from the
+    ///    filesystem (rebuilds derived rows for FS-only entries), emit
+    ///    `index.synced` event.
+    /// 2. For each `reindexed_ids` entry, `embed_entry_chunks` repopulates
+    ///    `vec_chunk_embeddings`. CachedEmbedder (emb_cache) keeps this near
+    ///    zero API cost for unchanged bodies; only genuinely new chunk texts
+    ///    hit the provider.
+    ///
+    /// Best-effort: failures in either phase log a warning to stderr and
+    /// continue (do NOT `?`-propagate). Startup-sync must never abort boot —
+    /// a stale index still lets the daemon serve RPCs, and a later
+    /// `index.sync` / `index.rebuild` call can recover. (The user-triggered
+    /// `index.sync` / `index.rebuild` RPCs propagate embed errors via `?`,
+    /// but those are explicit; startup is not.)
+    pub(crate) async fn startup_sync(&self) {
+        let sync_result = sync_index_from_fs_at_startup(self.entries());
+        for id in &sync_result.reindexed_ids {
+            if let Err(e) = crate::handlers::embed::embed_entry_chunks(self, *id).await {
+                eprintln!("warn: startup re-embed entry {id} failed: {e}");
+            }
+        }
     }
 
     /// Run the NDJSON-over-stdio JSON-RPC loop. Stub in Task 4; full impl in Task 5.
@@ -755,19 +791,22 @@ fn expand_knowledge_root(path: &std::path::Path) -> Result<std::path::PathBuf, C
     Ok(expanded)
 }
 
-/// Spec §9.1: best-effort FS→index reconciliation at daemon startup. Logs
-/// counts to stderr when the sync made changes, and emits an `index.synced`
-/// event into the events log so `events.list` consumers can observe boot
-/// reconciliations. Failures are swallowed: a stale/empty index still lets
-/// the daemon serve RPCs, and a later `index.sync` / `index.rebuild` call
-/// can recover. Shared between `Daemon::new` (production) and `for_test`
-/// (tests) so both paths exercise the same boot contract.
+/// Spec §9.1: best-effort FS→index reconciliation step at daemon startup.
+/// Runs `entries.sync_from_fs()`, logs counts to stderr when it changed
+/// something, and emits an `index.synced` event into the events log so
+/// `events.list` consumers can observe boot reconciliations. Returns the
+/// `SyncResult` (defaulted on failure) so the caller can drive the follow-up
+/// re-embed pass over `reindexed_ids`.
+///
+/// Failures are swallowed: a stale/empty index still lets the daemon serve
+/// RPCs, and a later `index.sync` / `index.rebuild` call can recover. Shared
+/// between `Daemon::startup_sync` (production) and `for_test` (tests).
 ///
 /// Plan 6 Task 5: the `index.synced` event is emitted only when the boot
 /// scan actually changed something (`added + updated + removed > 0`). A
 /// quiet boot — empty FS, or an FS already matching the index — produces
 /// no event so the audit log does not grow on every restart.
-fn run_startup_sync(entries: &EntryService) {
+fn sync_index_from_fs_at_startup(entries: &EntryService) -> nomai_core::SyncResult {
     let sync_result = entries.sync_from_fs().unwrap_or_else(|e| {
         eprintln!("warn: startup index.sync failed: {e}");
         nomai_core::SyncResult::default()
@@ -800,6 +839,7 @@ fn run_startup_sync(entries: &EntryService) {
             );
         }
     }
+    sync_result
 }
 
 /// Serve one client connection: read NDJSON requests, dispatch, write the
@@ -1398,6 +1438,153 @@ model = "test-llm"
             match llm_old {
                 Some(v) => std::env::set_var("NOMAI_TEST_FROM_ARC_LLM", v),
                 None => std::env::remove_var("NOMAI_TEST_FROM_ARC_LLM"),
+            }
+        }
+    }
+
+    /// Regression (issue #1 sibling — startup path): a `git clone` + restart
+    /// leaves entries on the FS that the index/embeddings have never seen.
+    /// `run_startup_sync` previously reconciled chunks + FTS but never
+    /// embedded them, so `search.semantic` returned empty until the user
+    /// manually ran `index.rebuild`. Daemon construction must now
+    /// re-embed every entry picked up by the boot sync.
+    ///
+    /// We pre-populate a `.nomai` file in the (not-yet-opened) knowledge_root,
+    /// construct a Daemon via `Daemon::new` against a wiremock `/embeddings`,
+    /// and assert the embedding provider was hit at construction time — i.e.
+    /// the orphan entry's chunk got embedded without a manual RPC.
+    #[tokio::test]
+    async fn startup_sync_embeds_entries_picked_up_from_fs() {
+        use std::sync::{Mutex, MutexGuard};
+
+        use ulid::Ulid;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        static STARTUP_SYNC_LOCK: Mutex<()> = Mutex::new(());
+        fn lock() -> MutexGuard<'static, ()> {
+            STARTUP_SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        }
+        let _guard = lock();
+
+        // Throwaway env vars so the test never sees a real API key.
+        let emb_old = std::env::var("NOMAI_TEST_STARTUP_SYNC_EMB").ok();
+        let llm_old = std::env::var("NOMAI_TEST_STARTUP_SYNC_LLM").ok();
+        // SAFETY: tests in this module are single-threaded with respect to env
+        // mutation; STARTUP_SYNC_LOCK serializes against any other env-touching
+        // test if one were added later.
+        unsafe {
+            std::env::set_var("NOMAI_TEST_STARTUP_SYNC_EMB", "sk-test");
+            std::env::set_var("NOMAI_TEST_STARTUP_SYNC_LLM", "sk-test");
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("data.sqlite");
+        let store_root = tmp.path().join("store");
+
+        // Pre-populate an orphan .nomai file directly in the content store,
+        // bypassing the service entirely. This mirrors the post-`git clone`
+        // state: entries on the FS, nothing in the index.
+        let orphan_id = Ulid::new();
+        let entry_dir = store_root.join("entries").join(orphan_id.to_string());
+        std::fs::create_dir_all(&entry_dir).unwrap();
+        let nomai = format!(
+            "\
+#format_version 1
+#id {orphan_id}
+#title Orphan From Clone
+#created_at 2026-07-18T10:00:00Z
+#updated_at 2026-07-18T10:00:00Z
+
+@note
+Knowledge that only exists on the filesystem at boot.
+",
+            orphan_id = orphan_id.to_string()
+        );
+        std::fs::write(entry_dir.join("entry.nomai"), nomai).unwrap();
+
+        // wiremock the embedding provider so construction-time embed has a
+        // real endpoint to hit. `.expect(1..)` fails the test on drop if the
+        // embed call never happened (i.e. startup-sync forgot to embed).
+        nomai_core::storage::init_sqlite_extensions();
+        let server = MockServer::start().await;
+        let dim = 8usize;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "embedding": vec![0.5_f32; dim], "index": 0, "object": "embedding" }],
+                "model": "m", "object": "list",
+                "usage": { "prompt_tokens": 1, "total_tokens": 1, "completion_tokens": 0 }
+            })))
+            .expect(1..)
+            .mount(&server)
+            .await;
+
+        let toml_text = format!(
+            r#"
+[data]
+db_path = {db_path:?}
+knowledge_root = {store_root:?}
+
+[embedding]
+base_url = {base_url:?}
+api_key_env = "NOMAI_TEST_STARTUP_SYNC_EMB"
+model = "test-embed"
+dim = {dim}
+
+[llm]
+base_url = "https://example.com/v1"
+api_key_env = "NOMAI_TEST_STARTUP_SYNC_LLM"
+model = "test-llm"
+"#,
+            base_url = server.uri(),
+            dim = dim,
+        );
+        let cfg_tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(cfg_tmp.path(), toml_text).unwrap();
+        let config = crate::config::Config::load_from(cfg_tmp.path()).unwrap();
+
+        // Daemon::new → from_arc → startup_sync: must sync the orphan in AND
+        // embed its chunk. If startup-sync skips the embed pass, the wiremock
+        // `.expect(1..)` above fires on mock drop and fails the test.
+        let daemon = Daemon::new(config).await.unwrap();
+
+        // Belt-and-suspenders: the boot sync must have indexed the orphan and
+        // its chunk must have an embedding row, so search.semantic would hit.
+        let conn = daemon.entries().conn_for_test();
+        let guard = conn.lock().unwrap();
+        let chunk_count: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM chunks c
+                 JOIN blocks b ON c.block_id = b.id
+                 WHERE b.entry_id = ?1",
+                params![orphan_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(chunk_count > 0, "orphan entry was indexed at startup");
+        let embedded_count: i64 = guard
+            .query_row("SELECT COUNT(*) FROM vec_chunk_embeddings", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            embedded_count > 0,
+            "startup-sync must populate vec_chunk_embeddings"
+        );
+        drop(guard);
+        drop(daemon);
+
+        // Restore env vars.
+        // SAFETY: tests in this module are single-threaded.
+        unsafe {
+            match emb_old {
+                Some(v) => std::env::set_var("NOMAI_TEST_STARTUP_SYNC_EMB", v),
+                None => std::env::remove_var("NOMAI_TEST_STARTUP_SYNC_EMB"),
+            }
+            match llm_old {
+                Some(v) => std::env::set_var("NOMAI_TEST_STARTUP_SYNC_LLM", v),
+                None => std::env::remove_var("NOMAI_TEST_STARTUP_SYNC_LLM"),
             }
         }
     }
