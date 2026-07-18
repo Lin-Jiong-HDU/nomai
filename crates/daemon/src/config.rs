@@ -6,7 +6,7 @@ use directories::ProjectDirs;
 use serde::Deserialize;
 use thiserror::Error;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub data: DataConfig,
@@ -20,7 +20,7 @@ pub struct Config {
     pub chunking: ChunkingConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DataConfig {
     #[serde(default = "default_db_path")]
     pub db_path: PathBuf,
@@ -47,7 +47,7 @@ impl Default for DataConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct EmbeddingConfig {
     pub base_url: String,
     pub api_key_env: String,
@@ -55,14 +55,14 @@ pub struct EmbeddingConfig {
     pub dim: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LlmConfig {
     pub base_url: String,
     pub api_key_env: String,
     pub model: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
     /// Soft capacity threshold. When `emb_cache` row count for the configured
     /// model exceeds this, `cache.stats` returns `warning: true`. The cache
@@ -84,7 +84,7 @@ fn default_warn_rows() -> u64 {
     100_000
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ChunkingConfig {
     /// Target chunk size in **characters** (not tokens). Block text is split
@@ -107,7 +107,7 @@ fn default_chunk_target_size() -> usize {
     1024
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ServeConfig {
     /// Seconds the resident daemon stays alive after the last client
     /// disconnects before exiting (debounce). Default 30.

@@ -53,6 +53,15 @@ impl Accept for tokio::net::TcpListener {
 }
 
 pub struct Daemon {
+    /// The config this daemon was built from; retained so `system.restart`
+    /// can rebuild an equivalent Daemon in-process. `Some` only when the
+    /// daemon was constructed via `Daemon::new` / `from_arc` (i.e. from a
+    /// real `Config`); `None` for lib-mode (`from_services` / builder),
+    /// which don't receive a `Config` and cannot fabricate one.
+    // Reader lands in the system.restart handler (Task 4); keep despite no
+    // current production reader, mirroring `embedding_dim` / `content_store`.
+    #[allow(dead_code)]
+    pub(crate) config: Option<Arc<Config>>,
     pub(crate) entries: Arc<EntryService>,
     pub(crate) links: Arc<LinkService>,
     pub(crate) events: Arc<EventService>,
@@ -97,6 +106,12 @@ pub struct Daemon {
 
 impl Daemon {
     pub async fn new(config: Config) -> Result<Self, CoreError> {
+        Self::from_arc(Arc::new(config)).await
+    }
+
+    /// Build a Daemon from a shared config. Used by `Daemon::new` and by
+    /// `system.restart` (which rebuilds from the live daemon's config).
+    pub async fn from_arc(config: Arc<Config>) -> Result<Self, CoreError> {
         // Open SQLite (creating parent dir if needed).
         let db_path = expand_db_path(&config.data.db_path)?;
         let conn = Connection::open(&db_path)?;
@@ -182,7 +197,15 @@ impl Daemon {
         // `index.sync` or `index.rebuild` call can recover).
         run_startup_sync(&entries);
 
+        // Capture the model strings before moving `config` into the struct
+        // field; `config` is `Arc<Config>` and we retain a clone in the field
+        // for `system.restart`, so read the strings out first.
+        let embedding_model = config.embedding.model.clone();
+        let llm_model = config.llm.model.clone();
+        let embedding_dim = config.embedding.dim;
+
         Ok(Self {
+            config: Some(config),
             entries,
             links,
             events,
@@ -190,9 +213,9 @@ impl Daemon {
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
             llm,
-            embedding_model: config.embedding.model,
-            llm_model: config.llm.model,
-            embedding_dim: config.embedding.dim,
+            embedding_model,
+            llm_model,
+            embedding_dim,
             chunk_target_size,
             attachment_max_bytes,
             content_store,
@@ -235,6 +258,7 @@ impl Daemon {
         // daemon.content_store.root() see the same path EntryService uses.
         let content_store = entries.content_store().clone();
         Self {
+            config: None,
             entries,
             links,
             events,
@@ -332,6 +356,7 @@ impl Daemon {
         let cache = Arc::new(CachedEmbedder::new(embedder, conn, cache_model, warn_rows));
         let handlers = crate::handlers::registry();
         Ok(Self {
+            config: None,
             entries,
             links,
             events,
@@ -1204,5 +1229,101 @@ mod tests {
         // sync_lock must be lockable without deadlock (sanity).
         let _g = daemon.sync_lock.lock().await;
         drop(_g);
+    }
+
+    /// Task 1 (system.restart prerequisite): a Daemon built from a real
+    /// `Config` via `from_arc` must retain `Some(Arc<Config>)` so the restart
+    /// handler (later task) can rebuild an equivalent Daemon in-process.
+    /// Conversely, lib-mode daemons (`from_services` / `DaemonBuilder`) have
+    /// no `Config` to retain and must be `None`.
+    ///
+    /// Env-var + tempfile discipline: we set throwaway env vars and point the
+    /// db_path + knowledge_root at a tempdir so the test never touches
+    /// `~/.local/share/nomai`.
+    #[tokio::test]
+    async fn from_arc_retains_config_for_restart() {
+        use std::sync::{Mutex, MutexGuard};
+
+        static FROM_ARC_LOCK: Mutex<()> = Mutex::new(());
+        fn lock() -> MutexGuard<'static, ()> {
+            FROM_ARC_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        }
+        let _guard = lock();
+
+        let emb_old = std::env::var("NOMAI_TEST_FROM_ARC_EMB").ok();
+        let llm_old = std::env::var("NOMAI_TEST_FROM_ARC_LLM").ok();
+        // SAFETY: tests are single-threaded within this module (env mutation
+        // guarded by FROM_ARC_LOCK, which serializes against any other env-
+        // touching test if one were added later in this module).
+        unsafe {
+            std::env::set_var("NOMAI_TEST_FROM_ARC_EMB", "sk-test");
+            std::env::set_var("NOMAI_TEST_FROM_ARC_LLM", "sk-test");
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("data.sqlite");
+        let store_root = tmp.path().join("store");
+
+        // Daemon::from_arc opens its own Connection; like the production
+        // binary (main.rs) and examples, we must register the sqlite-vec
+        // auto-extension *before* that open so the V9 vec0 migration succeeds.
+        nomai_core::storage::init_sqlite_extensions();
+
+        let toml_text = format!(
+            r#"
+[data]
+db_path = {db_path:?}
+knowledge_root = {store_root:?}
+
+[embedding]
+base_url = "https://example.com/v1"
+api_key_env = "NOMAI_TEST_FROM_ARC_EMB"
+model = "test-embed"
+dim = 8
+
+[llm]
+base_url = "https://example.com/v1"
+api_key_env = "NOMAI_TEST_FROM_ARC_LLM"
+model = "test-llm"
+"#
+        );
+        let cfg_tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(cfg_tmp.path(), toml_text).unwrap();
+        let config = crate::config::Config::load_from(cfg_tmp.path()).unwrap();
+
+        // from_arc consumes the Arc; the daemon must retain Some(clone).
+        let config_arc = Arc::new(config);
+        let daemon = Daemon::from_arc(Arc::clone(&config_arc)).await.unwrap();
+
+        assert!(
+            daemon.config.is_some(),
+            "from_arc must retain Some(Arc<Config>)"
+        );
+        // Same allocation as the Arc we passed in (cheap restart-rebuild path).
+        let retained = daemon.config.as_ref().unwrap();
+        assert!(Arc::ptr_eq(retained, &config_arc));
+        // The retained config round-trips the values we loaded.
+        assert_eq!(retained.embedding.model, "test-embed");
+        assert_eq!(retained.llm.model, "test-llm");
+
+        // lib-mode path: builder-assembled daemons have no Config → None.
+        let lib_daemon = null_daemon().await;
+        assert!(
+            lib_daemon.config.is_none(),
+            "lib-mode Daemon (from_services/builder) must be None — no Config to retain"
+        );
+
+        // Restore env vars.
+        // SAFETY: tests are single-threaded within this module.
+        unsafe {
+            match emb_old {
+                Some(v) => std::env::set_var("NOMAI_TEST_FROM_ARC_EMB", v),
+                None => std::env::remove_var("NOMAI_TEST_FROM_ARC_EMB"),
+            }
+            match llm_old {
+                Some(v) => std::env::set_var("NOMAI_TEST_FROM_ARC_LLM", v),
+                None => std::env::remove_var("NOMAI_TEST_FROM_ARC_LLM"),
+            }
+        }
     }
 }
