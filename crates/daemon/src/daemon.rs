@@ -52,6 +52,11 @@ impl Accept for tokio::net::TcpListener {
     }
 }
 
+/// The replaceable handle to the live Daemon. `run_serve` / `run_stdio`
+/// store the current Daemon here; `system.restart` swaps in a rebuilt one.
+/// Reads are cheap (one `RwLock` read + `Arc` clone) and happen once per RPC.
+pub type DaemonSlot = Arc<std::sync::RwLock<Arc<Daemon>>>;
+
 pub struct Daemon {
     /// The config this daemon was built from; retained so `system.restart`
     /// can rebuild an equivalent Daemon in-process. `Some` only when the
@@ -102,6 +107,21 @@ pub struct Daemon {
     /// `is_mutating() == false` so the dispatcher does NOT re-acquire it).
     pub(crate) sync_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) handlers: HashMap<&'static str, Arc<dyn RpcHandler>>,
+    /// Back-reference to the slot holding this Daemon, set by `run_serve` /
+    /// `run_stdio` after wrapping. `None` until then (e.g. in lib mode
+    /// without serve). `Weak` breaks the Daemon↔slot cycle so dropping the
+    /// slot also releases the Daemon. Reader lands in the system.restart
+    /// handler (Task 4); keep despite no current production reader.
+    ///
+    /// Type note: the field is `Weak<RwLock<Arc<Daemon>>>`, not
+    /// `Weak<DaemonSlot>` (= `Weak<Arc<RwLock<Arc<Daemon>>>>`). The latter
+    /// would require a double-Arc (`Arc<DaemonSlot>`) to downgrade, which
+    /// nothing constructs. The peeled form is what `Arc::downgrade(&slot)`
+    /// yields for a `slot: DaemonSlot`, and `.upgrade()` returns
+    /// `Arc<RwLock<Arc<Daemon>>>` = `DaemonSlot` — so the public accessor
+    /// still hands back a `DaemonSlot` exactly as the brief specifies.
+    #[allow(dead_code)]
+    pub(crate) restart_slot: std::sync::OnceLock<std::sync::Weak<std::sync::RwLock<Arc<Daemon>>>>,
 }
 
 impl Daemon {
@@ -221,6 +241,7 @@ impl Daemon {
             content_store,
             sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             handlers: crate::handlers::registry(),
+            restart_slot: std::sync::OnceLock::new(),
         })
     }
 
@@ -276,6 +297,7 @@ impl Daemon {
             content_store,
             sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             handlers: crate::handlers::registry(),
+            restart_slot: std::sync::OnceLock::new(),
         }
     }
 
@@ -319,6 +341,31 @@ impl Daemon {
     #[allow(dead_code)]
     pub fn llm(&self) -> &Arc<dyn LlmProvider> {
         &self.llm
+    }
+
+    /// Link this Daemon to the slot that holds it. Called once by
+    /// `run_serve` / `run_stdio` right after wrapping. Idempotent (OnceLock):
+    /// a second call on the same Daemon is a no-op, which is the right thing
+    /// if a serve loop ever re-wraps the same instance. Returns nothing —
+    /// a failed `set` (already set) is benign, not an error condition.
+    ///
+    /// The argument is `Weak<RwLock<Arc<Daemon>>>` (the peeled form of
+    /// `Weak<DaemonSlot>`); `Arc::downgrade(&slot)` for a `slot: DaemonSlot`
+    /// yields exactly this type. See the `restart_slot` field doc for why.
+    #[allow(dead_code)] // caller lands in Task 3 (run_serve/run_stdio wiring)
+    pub(crate) fn set_restart_slot(
+        &self,
+        weak: std::sync::Weak<std::sync::RwLock<Arc<Daemon>>>,
+    ) {
+        let _ = self.restart_slot.set(weak);
+    }
+
+    /// The slot holding this Daemon, if any. `system.restart` upgrades this
+    /// to swap in a rebuilt Daemon. Returns `None` before `set_restart_slot`
+    /// has been called, or if the slot has already been dropped.
+    #[allow(dead_code)] // caller lands in Task 4 (system.restart handler)
+    pub(crate) fn restart_slot(&self) -> Option<DaemonSlot> {
+        self.restart_slot.get().and_then(|w| w.upgrade())
     }
 
     /// Construct a Daemon from pre-built services + providers, without
@@ -372,6 +419,7 @@ impl Daemon {
             content_store,
             sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             handlers,
+            restart_slot: std::sync::OnceLock::new(),
         })
     }
 
@@ -1323,6 +1371,100 @@ model = "test-llm"
             match llm_old {
                 Some(v) => std::env::set_var("NOMAI_TEST_FROM_ARC_LLM", v),
                 None => std::env::remove_var("NOMAI_TEST_FROM_ARC_LLM"),
+            }
+        }
+    }
+
+    /// Task 2 (system.restart prerequisite): the Daemon carries a `Weak` back-
+    /// reference to the slot that holds it. Before the slot links the Daemon,
+    /// `restart_slot()` is `None`; after `set_restart_slot`, upgrading the
+    /// stored `Weak` must yield the same slot Arc the handler would use to
+    /// swap in a rebuilt Daemon.
+    ///
+    /// Env-var + tempfile discipline: mirrors `from_arc_retains_config_for_
+    /// restart` — throwaway env vars, tempdir for db_path + knowledge_root,
+    /// and `init_sqlite_extensions` before `Daemon::from_arc` opens SQLite.
+    #[tokio::test]
+    async fn restart_slot_unset_then_set_roundtrips() {
+        use std::sync::{Mutex, MutexGuard, RwLock};
+
+        static SLOT_LOCK: Mutex<()> = Mutex::new(());
+        fn lock() -> MutexGuard<'static, ()> {
+            SLOT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        }
+        let _guard = lock();
+
+        let emb_old = std::env::var("NOMAI_TEST_SLOT_EMB").ok();
+        let llm_old = std::env::var("NOMAI_TEST_SLOT_LLM").ok();
+        // SAFETY: tests are single-threaded within this module (env mutation
+        // guarded by SLOT_LOCK, which serializes against any other env-
+        // touching test if one were added later in this module).
+        unsafe {
+            std::env::set_var("NOMAI_TEST_SLOT_EMB", "sk-test");
+            std::env::set_var("NOMAI_TEST_SLOT_LLM", "sk-test");
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("data.sqlite");
+        let store_root = tmp.path().join("store");
+
+        // Daemon::from_arc opens its own Connection; register the sqlite-vec
+        // auto-extension *before* that open so the V9 vec0 migration succeeds.
+        nomai_core::storage::init_sqlite_extensions();
+
+        let toml_text = format!(
+            r#"
+[data]
+db_path = {db_path:?}
+knowledge_root = {store_root:?}
+
+[embedding]
+base_url = "https://example.com/v1"
+api_key_env = "NOMAI_TEST_SLOT_EMB"
+model = "test-embed"
+dim = 8
+
+[llm]
+base_url = "https://example.com/v1"
+api_key_env = "NOMAI_TEST_SLOT_LLM"
+model = "test-llm"
+"#
+        );
+        let cfg_tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(cfg_tmp.path(), toml_text).unwrap();
+        let config = crate::config::Config::load_from(cfg_tmp.path()).unwrap();
+
+        let d = Daemon::from_arc(Arc::new(config)).await.unwrap();
+        // Before set: no slot.
+        assert!(d.restart_slot().is_none());
+
+        // Wrap in a slot and link the back-ref. `Weak`/`RwLock` need their own
+        // bindings here so the slot outlives the scope below; the assertion
+        // below reads the slot, so it stays live through the end of the test.
+        let slot: DaemonSlot = Arc::new(RwLock::new(Arc::new(d)));
+        {
+            let d = slot.read().unwrap().clone();
+            // Arc::downgrade on a DaemonSlot yields Weak<DaemonSlot> directly;
+            // no cast needed (the `as` form would be a non-primitive cast).
+            d.set_restart_slot(Arc::downgrade(&slot));
+            assert!(d.restart_slot().is_some());
+        }
+
+        // The slot the handler would obtain: the Daemon's back-ref must
+        // upgrade to the *same* allocation as the slot we wrapped it in.
+        let got = slot.read().unwrap().restart_slot().unwrap();
+        assert!(Arc::ptr_eq(&got, &slot));
+
+        // Restore env vars.
+        // SAFETY: tests are single-threaded within this module.
+        unsafe {
+            match emb_old {
+                Some(v) => std::env::set_var("NOMAI_TEST_SLOT_EMB", v),
+                None => std::env::remove_var("NOMAI_TEST_SLOT_EMB"),
+            }
+            match llm_old {
+                Some(v) => std::env::set_var("NOMAI_TEST_SLOT_LLM", v),
+                None => std::env::remove_var("NOMAI_TEST_SLOT_LLM"),
             }
         }
     }
