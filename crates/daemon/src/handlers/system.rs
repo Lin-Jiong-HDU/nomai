@@ -152,7 +152,12 @@ mod restart_tests {
         Config {
             data: DataConfig {
                 db_path: tmp.path().join("t.sqlite"),
-                knowledge_root: None,
+                // Hermetic: `from_arc` falls back to the real
+                // ~/Library/Application Support/dev.nomai.nomai/store and runs
+                // run_startup_sync against it when this is None. Pin the store
+                // inside the tempdir so rebuilds (Restart::call → Daemon::from_arc)
+                // stay off disk the test doesn't own. (Task 5 fix.)
+                knowledge_root: Some(tmp.path().join("store")),
                 attachment_max_bytes: 10 * 1024 * 1024,
             },
             embedding: EmbeddingConfig {
@@ -200,5 +205,143 @@ mod restart_tests {
         let after: *const Daemon = Arc::as_ptr(&slot.read().unwrap().clone());
         assert_ne!(before, after, "restart must install a new Daemon");
         let _ = cfg_arc;
+    }
+
+    /// Behavior (Task 5): the rebuilt Daemon reaches the embedding provider
+    /// through a fresh reqwest Client. A wiremock server records requests;
+    /// after `system.restart` the count must grow, proving the post-restart
+    /// Daemon's embedder + Client are wired end-to-end (not a dead handle).
+    #[tokio::test]
+    async fn restart_rebuilds_embedding_client() {
+        use nomai_providers::EmbeddingProvider;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        nomai_core::storage::init_sqlite_extensions();
+
+        let server = MockServer::start().await;
+        let dim = 8usize;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "embedding": vec![0.0_f32; dim], "index": 0, "object": "embedding" }],
+                "model": "m", "object": "list",
+                "usage": { "prompt_tokens": 1, "total_tokens": 1, "completion_tokens": 0 }
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = restart_test_config(&tmp);
+        cfg.embedding.base_url = server.uri();
+
+        let d = Daemon::new(cfg).await.unwrap();
+        let slot: DaemonSlot = Arc::new(RwLock::new(Arc::new(d)));
+        slot.read()
+            .unwrap()
+            .clone()
+            .set_restart_slot(Arc::downgrade(&slot));
+
+        // Pre-restart embedding call via the OLD reqwest Client. Clone the
+        // Arc<Daemon> out and drop the read guard BEFORE the .await — holding
+        // a read guard across .await is the anti-pattern Task 4 self-deadlocked
+        // on, and even in this sequential test we keep the discipline.
+        let pre = slot.read().unwrap().clone();
+        pre.cache.embed(&["pre"]).await.unwrap();
+        let n_before = server.received_requests().await.unwrap().len();
+
+        // Restart rebuilds a fresh Daemon = fresh Client + connection pool.
+        // Restart::call takes a write lock on the same slot, so the snapshot
+        // here must be cloned out before the .await (same guard-across-await
+        // rule).
+        let snap = slot.read().unwrap().clone();
+        super::Restart
+            .call(&snap, serde_json::json!({}))
+            .await
+            .unwrap();
+
+        // Post-restart: the NEW Client still reaches the provider.
+        let post = slot.read().unwrap().clone();
+        post.cache.embed(&["post"]).await.unwrap();
+        let n_after = server.received_requests().await.unwrap().len();
+        assert!(n_after > n_before, "rebuilt Client reached the provider");
+    }
+
+    /// Behavior (Task 5): a Daemon never wrapped in a slot (e.g. pure lib
+    /// mode, or a unit test that builds a Daemon directly) cannot be swapped
+    /// — `system.restart` must return a clean error naming the slot, not
+    /// panic. (The "rebuild itself fails" path needs no test: `Daemon::from_arc`
+    /// is `?`-propagated BEFORE `*slot.write()`, so an error leaves the slot
+    /// untouched by construction.)
+    #[tokio::test]
+    async fn restart_without_slot_returns_error() {
+        nomai_core::storage::init_sqlite_extensions();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let d = Daemon::new(restart_test_config(&tmp)).await.unwrap();
+        assert!(d.restart_slot().is_none(), "never wrapped in a slot");
+
+        let err = super::Restart.call(&d, serde_json::json!({})).await;
+        assert!(err.is_err(), "restart without a slot must error");
+        assert!(
+            format!("{:?}", err.unwrap_err()).to_lowercase().contains("slot"),
+            "error should explain the slot is missing"
+        );
+    }
+
+    /// Behavior (Task 5): an in-flight RPC that already cloned the old
+    /// `Arc<Daemon>` is NOT cancelled by `system.restart` — the swap only
+    /// replaces what future RPCs see; the slow call finishes against the
+    /// old daemon. A delayed wiremock response keeps the embed() in flight
+    /// across the restart.
+    #[tokio::test]
+    async fn in_flight_rpc_survives_restart() {
+        use std::time::Duration;
+
+        use nomai_providers::EmbeddingProvider;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        nomai_core::storage::init_sqlite_extensions();
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [{ "embedding": vec![0.0_f32; 8], "index": 0, "object": "embedding" }],
+                    "model": "m", "object": "list",
+                    "usage": { "prompt_tokens": 1, "total_tokens": 1, "completion_tokens": 0 }
+                }))
+                .set_delay(Duration::from_millis(200)),
+            )
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = restart_test_config(&tmp);
+        cfg.embedding.base_url = server.uri();
+        let d = Daemon::new(cfg).await.unwrap();
+        let slot: DaemonSlot = Arc::new(RwLock::new(Arc::new(d)));
+        slot.read()
+            .unwrap()
+            .clone()
+            .set_restart_slot(Arc::downgrade(&slot));
+
+        // Hold the current daemon the way an in-flight RPC does (clones Arc).
+        let live = slot.read().unwrap().clone();
+        let slow = tokio::spawn(async move { live.cache.embed(&["slow"]).await });
+
+        // Swap the slot while the slow RPC is mid-flight on `live` (old Arc).
+        // Clone-before-await so the read guard is dropped before Restart::call
+        // takes the write lock.
+        let snap = slot.read().unwrap().clone();
+        super::Restart
+            .call(&snap, serde_json::json!({}))
+            .await
+            .unwrap();
+
+        // The in-flight call completes against the old daemon — not cancelled.
+        assert!(slow.await.unwrap().is_ok());
     }
 }
