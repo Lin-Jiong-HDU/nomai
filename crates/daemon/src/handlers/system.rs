@@ -130,11 +130,19 @@ mod descriptor_tests {
 mod restart_tests {
     use super::*;
     use crate::daemon::{Daemon, DaemonSlot};
-    use std::sync::{Arc, RwLock};
+    use std::sync::{Arc, Mutex, RwLock};
 
     use crate::config::{
         CacheConfig, ChunkingConfig, Config, DataConfig, EmbeddingConfig, LlmConfig, ServeConfig,
     };
+
+    /// Serializes the 4 restart tests (and thus the env mutation in
+    /// `restart_test_config`) against each other. `cargo test` runs tests in
+    /// parallel threads within one process; under Rust 2024 `set_var` is
+    /// `unsafe` because a concurrent `var` reader on another thread is UB, and
+    /// `Daemon::from_arc` reads env vars. Mirrors the `FROM_ARC_LOCK` pattern
+    /// in `daemon.rs`'s test module.
+    static RESTART_LOCK: Mutex<()> = Mutex::new(());
 
     /// Minimal config for restart tests. `base_url` is unreachable on purpose:
     /// `Daemon::from_arc` on an empty DB constructs the providers but does NOT
@@ -142,10 +150,10 @@ mod restart_tests {
     /// (Task 5 overrides `embedding.base_url` to a wiremock URI.) Sets
     /// NOMAI_TEST_KEY so `api_key_env` resolves.
     fn restart_test_config(tmp: &tempfile::TempDir) -> Config {
-        // SAFETY: tests are single-threaded within this module; this env var
-        // name is unique to the restart test path (NOMAI_TEST_KEY), and the
-        // caller serializes against other env-touching tests in the daemon
-        // suite via the global FROM_ARC_LOCK-style pattern if needed.
+        // SAFETY: each test in this module acquires `RESTART_LOCK` before
+        // calling here, so only one restart test mutates NOMAI_TEST_KEY at a
+        // time. The var name is unique to the restart test path, so no other
+        // env-touching test in the suite reads or writes it concurrently.
         unsafe {
             std::env::set_var("NOMAI_TEST_KEY", "sk-test");
         }
@@ -179,6 +187,8 @@ mod restart_tests {
 
     #[tokio::test]
     async fn restart_swaps_slot_and_returns_ok() {
+        let _g = RESTART_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         // Daemon::from_arc opens its own Connection; like the production
         // binary and the from_arc_retains_config_for_restart test, we must
         // register the sqlite-vec auto-extension before that open so the
@@ -216,6 +226,8 @@ mod restart_tests {
         use nomai_providers::EmbeddingProvider;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _g = RESTART_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         nomai_core::storage::init_sqlite_extensions();
 
@@ -275,6 +287,8 @@ mod restart_tests {
     /// untouched by construction.)
     #[tokio::test]
     async fn restart_without_slot_returns_error() {
+        let _g = RESTART_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         nomai_core::storage::init_sqlite_extensions();
 
         let tmp = tempfile::tempdir().unwrap();
@@ -301,6 +315,8 @@ mod restart_tests {
         use nomai_providers::EmbeddingProvider;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _g = RESTART_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         nomai_core::storage::init_sqlite_extensions();
 
