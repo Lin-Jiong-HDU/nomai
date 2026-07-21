@@ -18,6 +18,28 @@ pub struct Config {
     pub serve: ServeConfig,
     #[serde(default)]
     pub chunking: ChunkingConfig,
+    #[serde(default)]
+    pub development: DevelopmentConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DevelopmentConfig {
+    pub enabled: bool,
+    pub benchmark_cases_dir: PathBuf,
+    pub benchmark_suites_dir: PathBuf,
+    pub benchmark_baselines_dir: PathBuf,
+}
+
+impl Default for DevelopmentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            benchmark_cases_dir: PathBuf::from("benchmark/cases"),
+            benchmark_suites_dir: PathBuf::from("benchmark/suites"),
+            benchmark_baselines_dir: PathBuf::from("benchmark/baselines"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +157,8 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
     #[error("environment variable {0} (referenced by api_key_env) is not set")]
     MissingEnv(String),
+    #[error("invalid config: {0}")]
+    Invalid(String),
 }
 
 fn default_db_path() -> PathBuf {
@@ -183,6 +207,33 @@ impl Config {
         if std::env::var(&self.llm.api_key_env).is_err() {
             return Err(ConfigError::MissingEnv(self.llm.api_key_env.clone()));
         }
+        if self.development.enabled {
+            self.validate_development_dirs()?;
+        }
+        Ok(())
+    }
+
+    fn validate_development_dirs(&self) -> Result<(), ConfigError> {
+        let dirs = [
+            ("benchmark_cases_dir", &self.development.benchmark_cases_dir),
+            (
+                "benchmark_suites_dir",
+                &self.development.benchmark_suites_dir,
+            ),
+            (
+                "benchmark_baselines_dir",
+                &self.development.benchmark_baselines_dir,
+            ),
+        ];
+
+        for (name, path) in dirs {
+            if !path.is_dir() {
+                return Err(ConfigError::Invalid(format!(
+                    "development.{name} must exist and be a directory: {}",
+                    path.display()
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -214,18 +265,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parses_minimal_config() {
-        let _guard = lock();
+    fn parse_test_config_without_development() -> Config {
         let old_emb = unset("TEST_OPENAI_KEY");
         let old_llm = unset("TEST_OPENAI_KEY");
         // SAFETY: tests are single-threaded within this module.
         unsafe { std::env::set_var("TEST_OPENAI_KEY", "sk-test") };
 
         let toml_text = r#"
-[data]
-db_path = "/tmp/test.sqlite"
-
 [embedding]
 base_url = "https://api.openai.com/v1"
 api_key_env = "TEST_OPENAI_KEY"
@@ -240,14 +286,33 @@ model = "gpt-4o-mini"
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), toml_text).unwrap();
         let config = Config::load_from(tmp.path()).unwrap();
+
+        restore("TEST_OPENAI_KEY", old_emb);
+        restore("TEST_OPENAI_KEY", old_llm);
+        config
+    }
+
+    fn config_with_development(enabled: bool, cases_dir: PathBuf) -> Config {
+        let mut config = parse_test_config_without_development();
+        config.development = DevelopmentConfig {
+            enabled,
+            benchmark_cases_dir: cases_dir,
+            benchmark_suites_dir: PathBuf::from("benchmark/suites"),
+            benchmark_baselines_dir: PathBuf::from("benchmark/baselines"),
+        };
+        config
+    }
+
+    #[test]
+    fn parses_minimal_config() {
+        let _guard = lock();
+        let mut config = parse_test_config_without_development();
+        config.data.db_path = PathBuf::from("/tmp/test.sqlite");
         assert_eq!(config.embedding.dim, 1536);
         assert_eq!(config.llm.model, "gpt-4o-mini");
         assert_eq!(config.data.db_path, PathBuf::from("/tmp/test.sqlite"));
         // [chunking] section absent → default 1024 (backward compat).
         assert_eq!(config.chunking.target_size, 1024);
-
-        restore("TEST_OPENAI_KEY", old_emb);
-        restore("TEST_OPENAI_KEY", old_llm);
     }
 
     #[test]
@@ -379,6 +444,33 @@ model = "x"
         let config = Config::load_from(tmp.path()).unwrap();
         assert_eq!(config.data.attachment_max_bytes, 2048);
         restore("TEST_OPENAI_KEY", old);
+    }
+
+    #[test]
+    fn development_defaults_to_disabled_and_relative_dirs() {
+        let _guard = lock();
+        let config = parse_test_config_without_development();
+        assert!(!config.development.enabled);
+        assert_eq!(
+            config.development.benchmark_cases_dir,
+            PathBuf::from("benchmark/cases")
+        );
+        assert_eq!(
+            config.development.benchmark_suites_dir,
+            PathBuf::from("benchmark/suites")
+        );
+        assert_eq!(
+            config.development.benchmark_baselines_dir,
+            PathBuf::from("benchmark/baselines")
+        );
+    }
+
+    #[test]
+    fn enabled_development_requires_existing_benchmark_dirs() {
+        let _guard = lock();
+        let config = config_with_development(true, PathBuf::from("/missing/cases"));
+
+        assert!(matches!(config.validate(), Err(ConfigError::Invalid(_))));
     }
 
     #[test]

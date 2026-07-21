@@ -26,6 +26,8 @@ pub mod system;
 pub(crate) mod embed;
 
 pub use registry::registry;
+#[allow(unused_imports)]
+pub use registry::registry_with_benchmark;
 
 #[cfg(test)]
 mod tests {

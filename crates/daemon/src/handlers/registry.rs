@@ -17,6 +17,11 @@ use crate::rpc::RpcHandler;
 /// Returns the full set of built-in JSON-RPC handlers. Plugins may add
 /// more via `Daemon::register_handler`.
 pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
+    registry_with_benchmark(false)
+}
+
+/// Build the method → handler registry with the development benchmark gate.
+pub fn registry_with_benchmark(enabled: bool) -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     let mut m: HashMap<&'static str, Arc<dyn RpcHandler>> = HashMap::new();
 
     // entry.*
@@ -126,5 +131,27 @@ pub fn registry() -> HashMap<&'static str, Arc<dyn RpcHandler>> {
     let h = sync::Run;
     m.insert(h.method(), Arc::new(h));
 
+    if enabled {
+        // Benchmark handlers are introduced in a later task. The gate is
+        // already wired here so that the development config can opt in once
+        // those handlers exist.
+    }
+
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_does_not_expose_benchmark_when_disabled() {
+        let methods = registry_with_benchmark(false);
+        assert!(!methods.contains_key("benchmark.start"));
+        assert!(!methods.contains_key("benchmark.next_case"));
+        assert!(!methods.contains_key("benchmark.record_answer"));
+        assert!(!methods.contains_key("benchmark.finish"));
+        assert!(!methods.contains_key("benchmark.abort"));
+        assert!(!methods.contains_key("benchmark.status"));
+    }
 }

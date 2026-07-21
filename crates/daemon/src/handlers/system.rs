@@ -138,7 +138,8 @@ mod restart_tests {
     use std::sync::{Arc, Mutex, RwLock};
 
     use crate::config::{
-        CacheConfig, ChunkingConfig, Config, DataConfig, EmbeddingConfig, LlmConfig, ServeConfig,
+        CacheConfig, ChunkingConfig, Config, DataConfig, DevelopmentConfig, EmbeddingConfig,
+        LlmConfig, ServeConfig,
     };
 
     /// Serializes the 4 restart tests (and thus the env mutation in
@@ -187,6 +188,7 @@ mod restart_tests {
             cache: CacheConfig::default(),
             serve: ServeConfig::default(),
             chunking: ChunkingConfig::default(),
+            development: DevelopmentConfig::default(),
         }
     }
 

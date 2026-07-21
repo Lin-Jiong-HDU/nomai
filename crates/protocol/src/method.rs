@@ -110,6 +110,15 @@ pub mod system {
     pub const RESTART: &str = "system.restart";
 }
 
+pub mod benchmark {
+    pub const START: &str = "benchmark.start";
+    pub const NEXT_CASE: &str = "benchmark.next_case";
+    pub const RECORD_ANSWER: &str = "benchmark.record_answer";
+    pub const FINISH: &str = "benchmark.finish";
+    pub const ABORT: &str = "benchmark.abort";
+    pub const STATUS: &str = "benchmark.status";
+}
+
 pub mod cache {
     /// Spec 5: emb_cache introspection (model, rows, hits/misses, warning).
     pub const STATS: &str = "cache.stats";
@@ -208,6 +217,16 @@ mod tests {
     fn system_namespace_methods() {
         assert_eq!(system::EXPORT_TO_FS, "system.export_to_fs");
         assert_eq!(system::RESTART, "system.restart");
+    }
+
+    #[test]
+    fn benchmark_namespace_methods() {
+        assert_eq!(benchmark::START, "benchmark.start");
+        assert_eq!(benchmark::NEXT_CASE, "benchmark.next_case");
+        assert_eq!(benchmark::RECORD_ANSWER, "benchmark.record_answer");
+        assert_eq!(benchmark::FINISH, "benchmark.finish");
+        assert_eq!(benchmark::ABORT, "benchmark.abort");
+        assert_eq!(benchmark::STATUS, "benchmark.status");
     }
 
     #[test]
