@@ -1,13 +1,356 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use nomai_core::CoreError;
+use nomai_core::{BlockInput, CoreError, CreateEntry, EntryService};
+use nomai_providers::LlmProvider;
+use serde::Serialize;
+use serde_json::Value;
+use ulid::Ulid;
 
 pub(crate) mod baseline;
 pub(crate) mod cases;
 pub(crate) mod metrics;
+
+use cases::{BenchmarkCatalog, CaseSpec};
+use metrics::{CaseReport, CaseTrace, ResolvedFixtureIds, RunMetadata, RunReport, ToolTrace};
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct StartResult {
+    pub run_id: String,
+    pub suite_id: String,
+    pub case_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct NextCaseResult {
+    pub run_id: String,
+    pub case_id: String,
+    pub question: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AbortResult {
+    pub run_id: String,
+    pub deleted_ids: Vec<Ulid>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct StatusResult {
+    pub active: bool,
+    pub run_id: Option<String>,
+    pub suite_id: Option<String>,
+    pub next_case_index: Option<usize>,
+}
+
+struct ActiveRun {
+    run_id: String,
+    suite_id: String,
+    case_ids: Vec<String>,
+    next_case_index: usize,
+    resolved: HashMap<String, ResolvedFixtureIds>,
+    traces: HashMap<String, CaseTrace>,
+}
+
+pub(crate) struct BenchmarkRuntime {
+    catalog: BenchmarkCatalog,
+    entries: Arc<EntryService>,
+    state: Mutex<Option<ActiveRun>>,
+}
+
+impl BenchmarkRuntime {
+    pub(crate) fn new(
+        config: crate::config::DevelopmentConfig,
+        entries: Arc<EntryService>,
+    ) -> Result<Self, CoreError> {
+        Ok(Self {
+            catalog: BenchmarkCatalog::load(&config)?,
+            entries,
+            state: Mutex::new(None),
+        })
+    }
+
+    pub(crate) fn recover_stale_entries(&self) -> Result<Vec<Ulid>, CoreError> {
+        self.entries.purge_benchmark_entries()
+    }
+
+    pub(crate) fn start(&self, suite_id: &str) -> Result<StartResult, CoreError> {
+        let suite = self.catalog.suite(suite_id)?.clone();
+        let mut state = self.state.lock().unwrap();
+        if state.is_some() {
+            return Err(CoreError::Validation(
+                "a benchmark run is already active".into(),
+            ));
+        }
+
+        let run_id = Ulid::new().to_string();
+        let mut resolved = HashMap::new();
+        let mut created_ids = Vec::new();
+        let create_result = (|| -> Result<(), CoreError> {
+            for case_id in &suite.cases {
+                let case = self.catalog.case(case_id)?;
+                let ids = self.create_fixtures(case, &run_id)?;
+                created_ids.extend(ids.entries.values().copied());
+                resolved.insert(case_id.clone(), ids);
+            }
+            Ok(())
+        })();
+        if let Err(error) = create_result {
+            for id in created_ids {
+                let _ = self.entries.delete(id);
+            }
+            return Err(error);
+        }
+
+        let case_ids = suite.cases;
+        *state = Some(ActiveRun {
+            run_id: run_id.clone(),
+            suite_id: suite.id.clone(),
+            case_ids: case_ids.clone(),
+            next_case_index: 0,
+            resolved,
+            traces: HashMap::new(),
+        });
+        Ok(StartResult {
+            run_id,
+            suite_id: suite.id,
+            case_ids,
+        })
+    }
+
+    pub(crate) fn next_case(&self, run_id: &str) -> Result<NextCaseResult, CoreError> {
+        let mut state = self.state.lock().unwrap();
+        let active = active_run_mut(&mut state, run_id)?;
+        let case_id = active
+            .case_ids
+            .get(active.next_case_index)
+            .cloned()
+            .ok_or_else(|| CoreError::Validation("benchmark suite is exhausted".into()))?;
+        active.next_case_index += 1;
+        let question = self.catalog.case(&case_id)?.question.clone();
+        active.traces.entry(case_id.clone()).or_default();
+        Ok(NextCaseResult {
+            run_id: run_id.into(),
+            case_id,
+            question,
+        })
+    }
+
+    pub(crate) fn record_rpc(
+        &self,
+        method: &str,
+        _params: &Value,
+        result: &Result<Value, CoreError>,
+        latency: Duration,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        let Some(active) = state.as_mut() else {
+            return;
+        };
+        let Some(case_id) = active
+            .case_ids
+            .get(active.next_case_index.saturating_sub(1))
+            .cloned()
+        else {
+            return;
+        };
+        active
+            .traces
+            .entry(case_id)
+            .or_default()
+            .tool_traces
+            .push(ToolTrace {
+                method: method.into(),
+                ok: result.is_ok(),
+                latency_ms: latency.as_millis() as u64,
+                error: result.as_ref().err().map(ToString::to_string),
+                ..Default::default()
+            });
+    }
+
+    pub(crate) fn record_answer(
+        &self,
+        run_id: &str,
+        case_id: &str,
+        answer: String,
+        _llm: &dyn LlmProvider,
+    ) -> Result<CaseReport, CoreError> {
+        let mut state = self.state.lock().unwrap();
+        let active = active_run_mut(&mut state, run_id)?;
+        if !active.case_ids.iter().any(|id| id == case_id) {
+            return Err(CoreError::Validation(format!(
+                "case is not part of benchmark run: {case_id}"
+            )));
+        }
+        let trace = active.traces.entry(case_id.into()).or_default();
+        trace.answer = Some(answer);
+        let case = self.catalog.case(case_id)?;
+        let resolved = active
+            .resolved
+            .get(case_id)
+            .ok_or_else(|| CoreError::Config("missing fixture mapping".into()))?;
+        Ok(CaseReport {
+            case_id: case_id.into(),
+            metrics: metrics::score_case(case, trace, resolved),
+        })
+    }
+
+    pub(crate) fn finish(
+        &self,
+        run_id: &str,
+        _llm: &dyn LlmProvider,
+    ) -> Result<RunReport, CoreError> {
+        let mut state = self.state.lock().unwrap();
+        let active = state
+            .take()
+            .ok_or_else(|| CoreError::Validation("no benchmark run is active".into()))?;
+        if active.run_id != run_id {
+            *state = Some(active);
+            return Err(CoreError::Validation("invalid benchmark run id".into()));
+        }
+
+        let mut reports = Vec::with_capacity(active.case_ids.len());
+        for case_id in &active.case_ids {
+            let case = self.catalog.case(case_id)?;
+            let trace = active.traces.get(case_id).cloned().unwrap_or_default();
+            let resolved = active
+                .resolved
+                .get(case_id)
+                .ok_or_else(|| CoreError::Config("missing fixture mapping".into()))?;
+            reports.push(CaseReport {
+                case_id: case_id.clone(),
+                metrics: metrics::score_case(case, &trace, resolved),
+            });
+        }
+        if let Err(error) = self.entries.purge_benchmark_entries() {
+            *state = Some(active);
+            return Err(error);
+        }
+        Ok(RunReport {
+            metadata: RunMetadata {
+                schema_version: 1,
+                suite_id: active.suite_id,
+                case_ids: active.case_ids,
+                provider_name: String::new(),
+                provider_base_url: String::new(),
+                embedding_model: String::new(),
+                llm_model: String::new(),
+            },
+            summary: metrics::summarize(&reports),
+            cases: reports,
+            baseline_comparison: None,
+        })
+    }
+
+    pub(crate) fn abort(&self, run_id: &str) -> Result<AbortResult, CoreError> {
+        let mut state = self.state.lock().unwrap();
+        let active = state
+            .take()
+            .ok_or_else(|| CoreError::Validation("no benchmark run is active".into()))?;
+        if active.run_id != run_id {
+            *state = Some(active);
+            return Err(CoreError::Validation("invalid benchmark run id".into()));
+        }
+        let deleted_ids = match self.entries.purge_benchmark_entries() {
+            Ok(ids) => ids,
+            Err(error) => {
+                *state = Some(active);
+                return Err(error);
+            }
+        };
+        Ok(AbortResult {
+            run_id: run_id.into(),
+            deleted_ids,
+        })
+    }
+
+    pub(crate) fn status(&self) -> StatusResult {
+        let state = self.state.lock().unwrap();
+        match state.as_ref() {
+            Some(active) => StatusResult {
+                active: true,
+                run_id: Some(active.run_id.clone()),
+                suite_id: Some(active.suite_id.clone()),
+                next_case_index: Some(active.next_case_index),
+            },
+            None => StatusResult {
+                active: false,
+                run_id: None,
+                suite_id: None,
+                next_case_index: None,
+            },
+        }
+    }
+
+    fn create_fixtures(
+        &self,
+        case: &CaseSpec,
+        run_id: &str,
+    ) -> Result<ResolvedFixtureIds, CoreError> {
+        let mut resolved = ResolvedFixtureIds::default();
+        let mut created_ids = Vec::new();
+        for fixture in &case.fixtures {
+            let mut attrs = if fixture.attrs.is_null() {
+                Value::Object(Default::default())
+            } else {
+                fixture.attrs.clone()
+            };
+            let object = attrs.as_object_mut().ok_or_else(|| {
+                CoreError::Config(format!("fixture {} attrs must be an object", fixture.id))
+            })?;
+            object.insert("transient".into(), Value::Bool(true));
+            object.insert("benchmark_run_id".into(), Value::String(run_id.into()));
+            object.insert("benchmark_case_id".into(), Value::String(case.id.clone()));
+            let entry = match self.entries.create(CreateEntry {
+                title: fixture.title.clone(),
+                blocks: fixture
+                    .blocks
+                    .iter()
+                    .map(|block| BlockInput {
+                        r#type: block.block_type.clone(),
+                        text: block.text.clone(),
+                        attrs: (!block.attrs.is_null()).then(|| block.attrs.clone()),
+                    })
+                    .collect(),
+                tags: Some(fixture.tags.clone()),
+                attrs: Some(attrs),
+                source: Some("benchmark".into()),
+                attachments: None,
+            }) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    for id in created_ids {
+                        let _ = self.entries.delete(id);
+                    }
+                    return Err(error);
+                }
+            };
+            created_ids.push(entry.id);
+            resolved.entries.insert(fixture.id, entry.id);
+            for (source_block, stored_block) in fixture.blocks.iter().zip(entry.blocks.iter()) {
+                resolved.blocks.insert(source_block.id, stored_block.id);
+            }
+        }
+        Ok(resolved)
+    }
+}
+
+fn active_run_mut<'a>(
+    state: &'a mut Option<ActiveRun>,
+    run_id: &str,
+) -> Result<&'a mut ActiveRun, CoreError> {
+    let active = state
+        .as_mut()
+        .ok_or_else(|| CoreError::Validation("no benchmark run is active".into()))?;
+    if active.run_id != run_id {
+        return Err(CoreError::Validation("invalid benchmark run id".into()));
+    }
+    Ok(active)
+}
 
 fn config_error(path: &Path, message: impl Display) -> CoreError {
     CoreError::Config(format!("{}: {message}", path.display()))
@@ -30,4 +373,127 @@ fn sorted_files(dir: &Path, extension: &str) -> Result<Vec<PathBuf>, CoreError> 
     paths.retain(|path| path.is_file() && path.extension().is_some_and(|ext| ext == extension));
     paths.sort();
     Ok(paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use nomai_providers::{
+        CompletionRequest, CompletionResponse, ProviderError, ProviderErrorKind,
+    };
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    struct NullLlm;
+
+    #[async_trait]
+    impl LlmProvider for NullLlm {
+        async fn complete(
+            &self,
+            _req: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            Err(ProviderError::new(ProviderErrorKind::Unknown, "null", None))
+        }
+
+        fn name(&self) -> &str {
+            "null"
+        }
+    }
+
+    fn test_runtime() -> (
+        TempDir,
+        Arc<EntryService>,
+        BenchmarkRuntime,
+        crate::config::DevelopmentConfig,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let cases = root.path().join("cases");
+        let suites = root.path().join("suites");
+        let baselines = root.path().join("baselines");
+        std::fs::create_dir_all(&cases).unwrap();
+        std::fs::create_dir_all(&suites).unwrap();
+        std::fs::create_dir_all(&baselines).unwrap();
+        std::fs::write(
+            cases.join("case.toml"),
+            r#"
+id = "case-1"
+question = "Which fixture should the model retrieve?"
+
+[[fixtures]]
+id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+title = "Benchmark fixture"
+
+  [[fixtures.blocks]]
+  id = "01J0K3H6Y1F9Q7V8X1A2B3C4D6"
+  type = "note"
+  text = "Fixture evidence"
+
+[retrieval]
+required_tools = ["search.fulltext"]
+relevant_entry_ids = ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]
+relevant_block_ids = ["01J0K3H6Y1F9Q7V8X1A2B3C4D6"]
+k = 5
+
+[answer]
+reference = "fixture"
+judge = false
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            suites.join("suite.toml"),
+            "id = \"suite-1\"\ncases = [\"case-1\"]\n",
+        )
+        .unwrap();
+        let config = crate::config::DevelopmentConfig {
+            enabled: true,
+            benchmark_cases_dir: cases,
+            benchmark_suites_dir: suites,
+            benchmark_baselines_dir: baselines,
+        };
+        let entries = Arc::new(EntryService::for_test().unwrap());
+        let runtime = BenchmarkRuntime::new(config.clone(), entries.clone()).unwrap();
+        (root, entries, runtime, config)
+    }
+
+    #[test]
+    fn runtime_loads_fixture_next_case_and_cleans_on_abort() {
+        let (_root, entries, runtime, _config) = test_runtime();
+        let start = runtime.start("suite-1").unwrap();
+        assert_eq!(start.case_ids, vec!["case-1"]);
+        assert_eq!(entries.list(Default::default()).unwrap().total, 0);
+        let next = runtime.next_case(&start.run_id).unwrap();
+        assert_eq!(next.question, "Which fixture should the model retrieve?");
+        assert!(runtime.next_case(&start.run_id).is_err());
+        assert!(runtime.start("suite-1").is_err());
+
+        runtime.record_rpc(
+            "search.fulltext",
+            &json!({"query": "fixture"}),
+            &Ok(json!({"items": []})),
+            Duration::from_millis(3),
+        );
+        let report = runtime
+            .record_answer(&start.run_id, "case-1", "fixture".into(), &NullLlm)
+            .unwrap();
+        assert!(report.metrics.required_tools_success);
+        let aborted = runtime.abort(&start.run_id).unwrap();
+        assert_eq!(aborted.deleted_ids.len(), 1);
+        assert_eq!(entries.list(Default::default()).unwrap().total, 0);
+        assert!(!runtime.status().active);
+    }
+
+    #[test]
+    fn fresh_runtime_recovers_stale_benchmark_entries() {
+        let (_root, entries, runtime, config) = test_runtime();
+        let start = runtime.start("suite-1").unwrap();
+        assert_eq!(entries.list(Default::default()).unwrap().total, 0);
+
+        let recovered = BenchmarkRuntime::new(config, entries.clone()).unwrap();
+        let deleted = recovered.recover_stale_entries().unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(entries.list(Default::default()).unwrap().total, 0);
+        assert!(start.run_id.len() > 0);
+    }
 }

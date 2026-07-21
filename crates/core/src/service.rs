@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ulid::Ulid;
@@ -137,6 +137,11 @@ fn parse_block_type(s: &str) -> Result<crate::nomai_format::BlockType, CoreError
 /// `FROM entries e ...`.
 pub const TRANSIENT_PREDICATE_TRUE: &str = "(json_extract(e.attrs, '$.transient') = 'true' \
      OR json_extract(e.attrs, '$.transient') = 1)";
+
+/// SQL predicate for benchmark fixtures. The `e` alias is intentional:
+/// callers use this predicate in queries whose entries table is aliased as
+/// `e`.
+pub const BENCHMARK_ENTRY_PREDICATE: &str = "(json_extract(e.attrs, '$.benchmark_run_id') IS NOT NULL AND json_extract(e.attrs, '$.benchmark_case_id') IS NOT NULL)";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -553,12 +558,12 @@ impl EntryService {
     pub fn get(&self, id: Ulid) -> Result<Entry, CoreError> {
         let mut entry = {
             let conn = self.conn.lock().unwrap();
-            match conn.query_row(
+            let sql = format!(
                 "SELECT id, title, tags, attrs, source, created_at, updated_at
-                 FROM entries WHERE id = ?1",
-                params![id.to_string()],
-                |row| row_to_entry(row, 0),
-            ) {
+                 FROM entries e WHERE e.id = ?1 AND NOT {predicate}",
+                predicate = BENCHMARK_ENTRY_PREDICATE,
+            );
+            match conn.query_row(&sql, params![id.to_string()], |row| row_to_entry(row, 0)) {
                 Ok(e) => e,
                 Err(rusqlite::Error::QueryReturnedNoRows) => return Err(CoreError::NotFound(id)),
                 Err(e) => return Err(CoreError::Storage(e)),
@@ -1225,18 +1230,20 @@ impl EntryService {
         // FROM clause); `transient` uses a json_extract predicate (WHERE).
         // Both optional and independent — any combination works.
         let mut from_extra = String::new();
-        let mut wheres: Vec<&str> = Vec::new();
+        let mut wheres: Vec<String> = Vec::new();
         let mut filter_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        wheres.push(format!("NOT {BENCHMARK_ENTRY_PREDICATE}"));
 
         if let Some(tag) = &query.tag {
             from_extra = ", json_each(e.tags) AS t".to_string();
-            wheres.push("t.value = ?");
+            wheres.push("t.value = ?".into());
             filter_params.push(Box::new(tag.clone()));
         }
         match query.transient {
-            Some(true) => wheres.push(TRANSIENT_PREDICATE_TRUE),
+            Some(true) => wheres.push(TRANSIENT_PREDICATE_TRUE.into()),
             Some(false) => wheres.push(
-                "(json_extract(e.attrs, '$.transient') IS NULL OR (json_extract(e.attrs, '$.transient') != 'true' AND json_extract(e.attrs, '$.transient') != 1))",
+                "(json_extract(e.attrs, '$.transient') IS NULL OR (json_extract(e.attrs, '$.transient') != 'true' AND json_extract(e.attrs, '$.transient') != 1))".into(),
             ),
             None => {}
         }
@@ -1322,6 +1329,49 @@ impl EntryService {
             set.insert(r?);
         }
         Ok(set)
+    }
+
+    /// Return whether an entry is a benchmark fixture. This reads the marker
+    /// directly because normal `get` calls intentionally hide such entries.
+    pub fn is_benchmark_entry(&self, id: Ulid) -> Result<bool, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT 1 FROM entries e WHERE e.id = ?1 AND {predicate}",
+            predicate = BENCHMARK_ENTRY_PREDICATE,
+        );
+        let exists: Option<i64> = conn
+            .query_row(&sql, params![id.to_string()], |row| row.get(0))
+            .optional()?;
+        Ok(exists.is_some())
+    }
+
+    /// Delete all benchmark fixture entries in deterministic creation order.
+    /// Each row goes through `delete` so filesystem cleanup and deletion events
+    /// retain their existing semantics.
+    pub fn purge_benchmark_entries(&self) -> Result<Vec<Ulid>, CoreError> {
+        let ids = {
+            let conn = self.conn.lock().unwrap();
+            let sql = format!(
+                "SELECT e.id FROM entries e WHERE {predicate} ORDER BY e.created_at ASC, e.id ASC",
+                predicate = BENCHMARK_ENTRY_PREDICATE,
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let values = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            values
+                .into_iter()
+                .map(|value| {
+                    Ulid::from_string(&value)
+                        .map_err(|err| CoreError::Config(format!("invalid entry id: {err}")))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        for id in &ids {
+            self.delete(*id)?;
+        }
+        Ok(ids)
     }
 
     /// Purge transient entries. See Spec §6.2 / §7.
@@ -1437,19 +1487,27 @@ impl EntryService {
     ) -> Result<Vec<FtsRow>, CoreError> {
         let sql = match block_type {
             Some(_) => {
-                "SELECT entry_id, block_id, type, text, bm25(fts_blocks) AS rank
-                        FROM fts_blocks
-                        WHERE fts_blocks MATCH ?1 AND fts_blocks.type = ?2
-                        ORDER BY rank"
+                format!(
+                    "SELECT f.entry_id, f.block_id, f.type, f.text, bm25(fts_blocks) AS rank
+                            FROM fts_blocks f
+                            JOIN entries e ON e.id = f.entry_id
+                            WHERE NOT {predicate} AND fts_blocks MATCH ?1 AND f.type = ?2
+                            ORDER BY rank",
+                    predicate = BENCHMARK_ENTRY_PREDICATE,
+                )
             }
             None => {
-                "SELECT entry_id, block_id, type, text, bm25(fts_blocks) AS rank
-                     FROM fts_blocks
-                     WHERE fts_blocks MATCH ?1
-                     ORDER BY rank"
+                format!(
+                    "SELECT f.entry_id, f.block_id, f.type, f.text, bm25(fts_blocks) AS rank
+                         FROM fts_blocks f
+                         JOIN entries e ON e.id = f.entry_id
+                         WHERE NOT {predicate} AND fts_blocks MATCH ?1
+                         ORDER BY rank",
+                    predicate = BENCHMARK_ENTRY_PREDICATE,
+                )
             }
         };
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = conn.prepare(&sql)?;
         let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<FtsRow> {
             Ok(FtsRow {
                 entry_id: r.get(0)?,
@@ -1488,17 +1546,25 @@ impl EntryService {
         let pattern = format!("%{escaped}%");
         let sql = match block_type {
             Some(_) => {
-                "SELECT entry_id, id, type, text FROM blocks
-                        WHERE LOWER(text) LIKE LOWER(?1) ESCAPE '\\' AND type = ?2
-                        ORDER BY rowid DESC"
+                format!(
+                    "SELECT b.entry_id, b.id, b.type, b.text FROM blocks b
+                            JOIN entries e ON e.id = b.entry_id
+                            WHERE NOT {predicate} AND LOWER(b.text) LIKE LOWER(?1) ESCAPE '\\' AND b.type = ?2
+                            ORDER BY b.rowid DESC",
+                    predicate = BENCHMARK_ENTRY_PREDICATE,
+                )
             }
             None => {
-                "SELECT entry_id, id, type, text FROM blocks
-                     WHERE LOWER(text) LIKE LOWER(?1) ESCAPE '\\'
-                     ORDER BY rowid DESC"
+                format!(
+                    "SELECT b.entry_id, b.id, b.type, b.text FROM blocks b
+                         JOIN entries e ON e.id = b.entry_id
+                         WHERE NOT {predicate} AND LOWER(b.text) LIKE LOWER(?1) ESCAPE '\\'
+                         ORDER BY b.rowid DESC",
+                    predicate = BENCHMARK_ENTRY_PREDICATE,
+                )
             }
         };
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = conn.prepare(&sql)?;
         let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<FtsRow> {
             Ok(FtsRow {
                 entry_id: r.get(0)?,
@@ -1572,12 +1638,14 @@ impl EntryService {
         }
         let mut results: Vec<FulltextSearchResult> = Vec::with_capacity(hits.len());
         for hit in hits {
-            let entry = match conn.query_row(
+            let sql = format!(
                 "SELECT id, title, tags, attrs, source, created_at, updated_at
-                 FROM entries WHERE id = ?1",
-                params![hit.entry_id.to_string()],
-                |row| row_to_entry(row, 0),
-            ) {
+                 FROM entries e WHERE e.id = ?1 AND NOT {predicate}",
+                predicate = BENCHMARK_ENTRY_PREDICATE,
+            );
+            let entry = match conn.query_row(&sql, params![hit.entry_id.to_string()], |row| {
+                row_to_entry(row, 0)
+            }) {
                 Ok(e) => e,
                 Err(rusqlite::Error::QueryReturnedNoRows) => continue,
                 Err(e) => return Err(CoreError::Storage(e)),
@@ -2111,6 +2179,99 @@ mod tests {
         seed_transient(&svc, "short-b", true);
         let result = svc.list(EntryListQuery::default()).unwrap();
         assert_eq!(result.total, 2);
+    }
+
+    #[test]
+    fn benchmark_entries_are_hidden_and_cleanup_preserves_delete_events() {
+        let svc = EntryService::for_test().unwrap();
+        let ordinary = svc
+            .create(CreateEntry {
+                title: "ordinary visible".into(),
+                blocks: vec![note_block("ordinary visible marker")],
+                tags: None,
+                attrs: None,
+                source: None,
+                attachments: None,
+            })
+            .unwrap();
+        let temporary = svc
+            .create(CreateEntry {
+                title: "benchmark hidden".into(),
+                blocks: vec![note_block("benchmark hidden marker")],
+                tags: None,
+                attrs: Some(json!({
+                    "transient": true,
+                    "benchmark_run_id": "run-1",
+                    "benchmark_case_id": "case-1"
+                })),
+                source: None,
+                attachments: None,
+            })
+            .unwrap();
+        let ordinary_block = ordinary.blocks[0].id;
+        let temporary_block = temporary.blocks[0].id;
+        let chunks = crate::ChunkService::new(svc.conn_for_test()).unwrap();
+        let ordinary_chunk = chunks.list(ordinary_block).unwrap().items[0].id;
+        let temporary_chunk: Ulid = svc
+            .conn_for_test()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM chunks WHERE block_id = ?1",
+                rusqlite::params![temporary_block.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+            .parse()
+            .unwrap();
+        chunks
+            .write_embedding(ordinary_chunk, &vec![1.0; 1536])
+            .unwrap();
+        chunks
+            .write_embedding(temporary_chunk, &vec![1.0; 1536])
+            .unwrap();
+
+        assert!(svc.get(ordinary.id).is_ok());
+        assert!(matches!(svc.get(temporary.id), Err(CoreError::NotFound(_))));
+        assert_eq!(svc.list(EntryListQuery::default()).unwrap().total, 1);
+        assert!(svc.block_service().get(ordinary_block).is_ok());
+        assert!(matches!(
+            svc.block_service().get(temporary_block),
+            Err(CoreError::NotFound(_))
+        ));
+        assert_eq!(svc.block_service().list(temporary.id).unwrap().total, 0);
+        assert!(chunks.get(ordinary_chunk).is_ok());
+        assert!(matches!(
+            chunks.get(temporary_chunk),
+            Err(CoreError::NotFound(_))
+        ));
+        assert_eq!(chunks.list(temporary_block).unwrap().total, 0);
+
+        let fulltext = svc.fulltext_search("marker", 10, None).unwrap();
+        assert_eq!(fulltext.len(), 1);
+        assert_eq!(fulltext[0].entry.id, ordinary.id);
+        let semantic = chunks.semantic_search(&vec![1.0; 1536], 10, None).unwrap();
+        assert_eq!(semantic.len(), 1);
+        assert_eq!(semantic[0].entry_id, ordinary.id);
+
+        assert!(svc.is_benchmark_entry(temporary.id).unwrap());
+        assert!(!svc.is_benchmark_entry(ordinary.id).unwrap());
+        let deleted = svc.purge_benchmark_entries().unwrap();
+        assert_eq!(deleted, vec![temporary.id]);
+        assert!(svc.get(ordinary.id).is_ok());
+        assert!(svc.is_benchmark_entry(temporary.id).unwrap() == false);
+
+        let event_count: i64 = svc
+            .conn_for_test()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE type = 'entry.deleted' AND target_id = ?1",
+                rusqlite::params![temporary.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_count, 1);
     }
 
     #[test]

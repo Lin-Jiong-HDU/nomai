@@ -80,6 +80,7 @@ pub struct Daemon {
     /// In-memory search-results cache (Spec 7). Bumped on every mutation
     /// that affects search results; see `search_cache::SearchCache`.
     pub(crate) search_cache: Arc<crate::search_cache::SearchCache>,
+    pub(crate) benchmark: Option<Arc<crate::benchmark::BenchmarkRuntime>>,
     pub(crate) llm: Arc<dyn LlmProvider>,
     pub(crate) embedding_model: String,
     pub(crate) llm_model: String,
@@ -218,14 +219,23 @@ impl Daemon {
         let llm_model = config.llm.model.clone();
         let embedding_dim = config.embedding.dim;
 
+        let benchmark = if config.development.enabled {
+            Some(Arc::new(crate::benchmark::BenchmarkRuntime::new(
+                config.development.clone(),
+                entries.clone(),
+            )?))
+        } else {
+            None
+        };
         let daemon = Self {
-            config: Some(config),
+            config: Some(config.clone()),
             entries,
             links,
             events,
             chunks,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
+            benchmark,
             llm,
             embedding_model,
             llm_model,
@@ -234,9 +244,17 @@ impl Daemon {
             attachment_max_bytes,
             content_store,
             sync_lock: Arc::new(tokio::sync::Mutex::new(())),
-            handlers: crate::handlers::registry(),
+            handlers: crate::handlers::registry_with_benchmark(config.development.enabled),
             restart_slot: std::sync::OnceLock::new(),
         };
+
+        if let Some(runtime) = &daemon.benchmark {
+            let recovered = runtime.recover_stale_entries()?;
+            if !recovered.is_empty() {
+                daemon.search_cache.clear();
+                daemon.search_cache.bump_generation();
+            }
+        }
 
         // Spec §9.1: sync FS → index at startup AND re-embed chunks of changed
         // entries so `search.semantic` returns hits without a manual
@@ -294,6 +312,7 @@ impl Daemon {
             chunks,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
+            benchmark: None,
             llm,
             embedding_model,
             llm_model,
@@ -415,6 +434,7 @@ impl Daemon {
             chunks,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
+            benchmark: None,
             llm,
             embedding_model: String::new(),
             llm_model: String::new(),

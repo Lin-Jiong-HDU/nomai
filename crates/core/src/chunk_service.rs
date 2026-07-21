@@ -49,12 +49,14 @@ impl ChunkService {
     /// Fetch a single chunk by id.
     pub fn get(&self, id: Ulid) -> Result<Chunk, CoreError> {
         let conn = self.conn.lock().unwrap();
-        match conn.query_row(
-            "SELECT id, block_id, ordinal, text, attrs, created_at, updated_at
-             FROM chunks WHERE id = ?1",
-            params![id.to_string()],
-            |row| row_to_chunk(row, 0),
-        ) {
+        let sql = format!(
+            "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at
+             FROM chunks c JOIN blocks b ON b.id = c.block_id
+             JOIN entries e ON e.id = b.entry_id
+             WHERE c.id = ?1 AND NOT {predicate}",
+            predicate = crate::service::BENCHMARK_ENTRY_PREDICATE,
+        );
+        match conn.query_row(&sql, params![id.to_string()], |row| row_to_chunk(row, 0)) {
             Ok(c) => Ok(c),
             Err(rusqlite::Error::QueryReturnedNoRows) => Err(CoreError::NotFound(id)),
             Err(e) => Err(CoreError::Storage(e)),
@@ -64,10 +66,14 @@ impl ChunkService {
     /// List chunks for a block, ordered by ordinal.
     pub fn list(&self, block_id: Ulid) -> Result<ChunkListResult, CoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, block_id, ordinal, text, attrs, created_at, updated_at
-             FROM chunks WHERE block_id = ?1 ORDER BY ordinal ASC",
-        )?;
+        let sql = format!(
+            "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at
+             FROM chunks c JOIN blocks b ON b.id = c.block_id
+             JOIN entries e ON e.id = b.entry_id
+             WHERE c.block_id = ?1 AND NOT {predicate} ORDER BY c.ordinal ASC",
+            predicate = crate::service::BENCHMARK_ENTRY_PREDICATE,
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let items: Result<Vec<Chunk>, _> = stmt
             .query_map(params![block_id.to_string()], |row| row_to_chunk(row, 0))?
             .collect();
@@ -201,25 +207,33 @@ impl ChunkService {
         let conn = self.conn.lock().unwrap();
         let sql = match block_type {
             Some(_) => {
-                "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
-                        b.entry_id, vec.distance
-                 FROM vec_chunk_embeddings vec
-                 JOIN chunks c ON c.id = vec.chunk_id
-                 JOIN blocks b ON b.id = c.block_id
-                 WHERE vec.embedding MATCH ?1 AND k = ?2 AND b.type = ?3
-                 ORDER BY vec.distance"
+                format!(
+                    "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
+                            b.entry_id, vec.distance
+                     FROM vec_chunk_embeddings vec
+                     JOIN chunks c ON c.id = vec.chunk_id
+                     JOIN blocks b ON b.id = c.block_id
+                     JOIN entries e ON e.id = b.entry_id
+                     WHERE NOT {predicate} AND vec.embedding MATCH ?1 AND k = ?2 AND b.type = ?3
+                     ORDER BY vec.distance",
+                    predicate = crate::service::BENCHMARK_ENTRY_PREDICATE,
+                )
             }
             None => {
-                "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
-                        b.entry_id, vec.distance
-                 FROM vec_chunk_embeddings vec
-                 JOIN chunks c ON c.id = vec.chunk_id
-                 JOIN blocks b ON b.id = c.block_id
-                 WHERE vec.embedding MATCH ?1 AND k = ?2
-                 ORDER BY vec.distance"
+                format!(
+                    "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
+                            b.entry_id, vec.distance
+                     FROM vec_chunk_embeddings vec
+                     JOIN chunks c ON c.id = vec.chunk_id
+                     JOIN blocks b ON b.id = c.block_id
+                     JOIN entries e ON e.id = b.entry_id
+                     WHERE NOT {predicate} AND vec.embedding MATCH ?1 AND k = ?2
+                     ORDER BY vec.distance",
+                    predicate = crate::service::BENCHMARK_ENTRY_PREDICATE,
+                )
             }
         };
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = conn.prepare(&sql)?;
         let rows = match block_type {
             Some(t) => stmt
                 .query_map(params![&query_bytes, limit as i64, t], |row| {

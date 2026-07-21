@@ -398,11 +398,14 @@ impl BlockService {
     /// via EntryService::get if needed).
     pub fn list(&self, entry_id: Ulid) -> Result<BlockListResult, CoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, entry_id, ordinal, type, text, attrs, created_at, updated_at
-             FROM blocks WHERE entry_id = ?1
-             ORDER BY ordinal ASC",
-        )?;
+        let sql = format!(
+            "SELECT b.id, b.entry_id, b.ordinal, b.type, b.text, b.attrs, b.created_at, b.updated_at
+             FROM blocks b JOIN entries e ON e.id = b.entry_id
+             WHERE b.entry_id = ?1 AND NOT {predicate}
+             ORDER BY b.ordinal ASC",
+            predicate = crate::service::BENCHMARK_ENTRY_PREDICATE,
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let items: Result<Vec<Block>, _> = stmt
             .query_map(params![entry_id.to_string()], |row| row_to_block(row, 0))?
             .collect();
@@ -414,12 +417,13 @@ impl BlockService {
     /// Fetch a single block by id. NotFound if missing.
     pub fn get(&self, id: Ulid) -> Result<Block, CoreError> {
         let conn = self.conn.lock().unwrap();
-        match conn.query_row(
-            "SELECT id, entry_id, ordinal, type, text, attrs, created_at, updated_at
-             FROM blocks WHERE id = ?1",
-            params![id.to_string()],
-            |row| row_to_block(row, 0),
-        ) {
+        let sql = format!(
+            "SELECT b.id, b.entry_id, b.ordinal, b.type, b.text, b.attrs, b.created_at, b.updated_at
+             FROM blocks b JOIN entries e ON e.id = b.entry_id
+             WHERE b.id = ?1 AND NOT {predicate}",
+            predicate = crate::service::BENCHMARK_ENTRY_PREDICATE,
+        );
+        match conn.query_row(&sql, params![id.to_string()], |row| row_to_block(row, 0)) {
             Ok(block) => Ok(block),
             Err(rusqlite::Error::QueryReturnedNoRows) => Err(CoreError::NotFound(id)),
             Err(e) => Err(CoreError::Storage(e)),
