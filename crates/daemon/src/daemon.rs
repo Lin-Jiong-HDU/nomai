@@ -641,10 +641,17 @@ impl Daemon {
                 } else {
                     None
                 };
-                handler
-                    .call(self, params)
-                    .await
-                    .map_err(crate::rpc::DispatchError::Core)
+                let started = std::time::Instant::now();
+                let call_result = handler.call(self, params.clone()).await;
+                if let Some(runtime) = &self.benchmark {
+                    runtime.record_rpc(
+                        req.method.as_str(),
+                        &params,
+                        &call_result,
+                        started.elapsed(),
+                    );
+                }
+                call_result.map_err(crate::rpc::DispatchError::Core)
             }
             None => Err(crate::rpc::DispatchError::MethodNotFound(
                 req.method.clone(),

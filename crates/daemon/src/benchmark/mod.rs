@@ -147,6 +147,12 @@ impl BenchmarkRuntime {
         result: &Result<Value, CoreError>,
         latency: Duration,
     ) {
+        if !matches!(
+            method,
+            "search.semantic" | "search.fulltext" | "entry.get" | "block.get"
+        ) {
+            return;
+        }
         let mut state = self.state.lock().unwrap();
         let Some(active) = state.as_mut() else {
             return;
@@ -167,6 +173,10 @@ impl BenchmarkRuntime {
                 method: method.into(),
                 ok: result.is_ok(),
                 latency_ms: latency.as_millis() as u64,
+                results: result
+                    .as_ref()
+                    .map(|value| extract_tool_results(method, value))
+                    .unwrap_or_default(),
                 error: result.as_ref().err().map(ToString::to_string),
                 ..Default::default()
             });
@@ -339,6 +349,49 @@ impl BenchmarkRuntime {
     }
 }
 
+fn extract_tool_results(method: &str, value: &Value) -> Vec<metrics::RetrievedResult> {
+    match method {
+        "search.fulltext" => value["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|item| metrics::RetrievedResult {
+                entry_id: item["entry"]["id"].as_str().map(String::from),
+                block_id: item["best_match"]["block_id"].as_str().map(String::from),
+                score: item["score"].as_f64(),
+            })
+            .collect(),
+        "search.semantic" => value["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|item| metrics::RetrievedResult {
+                entry_id: item["entry_id"].as_str().map(String::from),
+                block_id: item["chunk"]["block_id"].as_str().map(String::from),
+                score: item["score"].as_f64(),
+            })
+            .collect(),
+        "entry.get" => value["id"]
+            .as_str()
+            .map(|entry_id| metrics::RetrievedResult {
+                entry_id: Some(entry_id.into()),
+                ..Default::default()
+            })
+            .into_iter()
+            .collect(),
+        "block.get" => value["id"]
+            .as_str()
+            .map(|block_id| metrics::RetrievedResult {
+                entry_id: value["entry_id"].as_str().map(String::from),
+                block_id: Some(block_id.into()),
+                ..Default::default()
+            })
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn active_run_mut<'a>(
     state: &'a mut Option<ActiveRun>,
     run_id: &str,
@@ -495,5 +548,35 @@ judge = false
         assert_eq!(deleted.len(), 1);
         assert_eq!(entries.list(Default::default()).unwrap().total, 0);
         assert!(start.run_id.len() > 0);
+    }
+
+    #[test]
+    fn extracts_ordered_search_and_evidence_ids_from_tool_results() {
+        let fulltext = extract_tool_results(
+            "search.fulltext",
+            &json!({
+                "items": [{
+                    "entry": {"id": "entry-1"},
+                    "score": 0.9,
+                    "best_match": {"block_id": "block-1"}
+                }]
+            }),
+        );
+        assert_eq!(fulltext[0].entry_id.as_deref(), Some("entry-1"));
+        assert_eq!(fulltext[0].block_id.as_deref(), Some("block-1"));
+
+        let semantic = extract_tool_results(
+            "search.semantic",
+            &json!({
+                "items": [{
+                    "entry_id": "entry-2",
+                    "chunk": {"block_id": "block-2"},
+                    "score": 0.8
+                }]
+            }),
+        );
+        assert_eq!(semantic[0].entry_id.as_deref(), Some("entry-2"));
+        assert_eq!(semantic[0].block_id.as_deref(), Some("block-2"));
+        assert!(extract_tool_results("provider.list", &json!({})).is_empty());
     }
 }
