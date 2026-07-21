@@ -15,26 +15,30 @@ pub(crate) struct BaselineFile {
     pub schema_version: u32,
     pub suite_id: String,
     pub case_ids: Vec<String>,
-    pub embedding_provider: String,
+    pub provider: BaselineProvider,
     pub embedding_model: String,
-    pub llm_provider: String,
     pub llm_model: String,
-    pub metrics: Vec<BaselineCaseMetrics>,
+    pub metrics: BaselineMetrics,
     pub thresholds: BaselineThresholds,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct BaselineCaseMetrics {
-    pub case_id: String,
+pub(crate) struct BaselineProvider {
+    pub name: String,
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct BaselineMetrics {
     pub hit_at_k: f64,
     pub recall_at_k: f64,
     pub mrr: f64,
     pub ndcg: f64,
-    pub required_tools_success: bool,
-    pub evidence_entry_hit: bool,
-    pub search_call_count: u32,
-    pub latency_ms_total: u64,
-    pub latency_ms_average: u64,
+    pub required_tools_success: f64,
+    pub evidence_entry_hit: f64,
+    pub search_call_count: f64,
+    pub latency_ms_total: f64,
+    pub latency_ms_average: f64,
     #[serde(default)]
     pub judge_score: Option<f64>,
 }
@@ -107,19 +111,6 @@ fn validate_baseline(
         ));
     }
 
-    for metric in &baseline.metrics {
-        if !baseline
-            .case_ids
-            .iter()
-            .any(|case_id| case_id == &metric.case_id)
-        {
-            return Err(config_error(
-                path,
-                format!("metric references unknown case: {}", metric.case_id),
-            ));
-        }
-    }
-
     Ok(())
 }
 
@@ -128,6 +119,7 @@ mod tests {
     use super::load_baselines;
     use crate::benchmark::cases::BenchmarkCatalog;
     use crate::config::DevelopmentConfig;
+    use std::path::PathBuf;
     use tempfile::TempDir;
     use ulid::Ulid;
 
@@ -163,7 +155,7 @@ k = 5
 
 [answer]
 reference = "Inspect the compiler output and fetch the relevant evidence entry."
-judge = "Mentions compiler output plus opening the relevant entry."
+judge = false
 "#,
             fixture_entry_id = FIXTURE_ENTRY_ID,
             fixture_block_id = FIXTURE_BLOCK_ID,
@@ -182,25 +174,24 @@ cases = ["search-rust-errors-001"]
   "schema_version": 1,
   "suite_id": "search-regression",
   "case_ids": ["search-rust-errors-001"],
-  "embedding_provider": "openai-compatible",
+  "provider": {
+    "name": "openai-compatible",
+    "base_url": "https://api.openai.com/v1"
+  },
   "embedding_model": "text-embedding-3-small",
-  "llm_provider": "openai-compatible",
   "llm_model": "gpt-4o-mini",
-  "metrics": [
-    {
-      "case_id": "search-rust-errors-001",
-      "hit_at_k": 1.0,
-      "recall_at_k": 1.0,
-      "mrr": 1.0,
-      "ndcg": 1.0,
-      "required_tools_success": true,
-      "evidence_entry_hit": true,
-      "search_call_count": 1,
-      "latency_ms_total": 250,
-      "latency_ms_average": 250,
-      "judge_score": 0.9
-    }
-  ],
+  "metrics": {
+    "hit_at_k": 1.0,
+    "recall_at_k": 1.0,
+    "mrr": 1.0,
+    "ndcg": 1.0,
+    "required_tools_success": 1.0,
+    "evidence_entry_hit": 1.0,
+    "search_call_count": 1.0,
+    "latency_ms_total": 250.0,
+    "latency_ms_average": 250.0,
+    "judge_score": 0.9
+  },
   "thresholds": {
     "hit_at_k": { "minimum": 1.0 },
     "recall_at_k": { "minimum": 1.0 },
@@ -255,9 +246,10 @@ cases = ["search-rust-errors-001"]
         assert_eq!(baseline.schema_version, 1);
         assert_eq!(baseline.suite_id, "search-regression");
         assert_eq!(baseline.case_ids, vec!["search-rust-errors-001"]);
+        assert_eq!(baseline.provider.name, "openai-compatible");
         assert_eq!(baseline.embedding_model, "text-embedding-3-small");
         assert_eq!(baseline.llm_model, "gpt-4o-mini");
-        assert_eq!(baseline.metrics[0].case_id, "search-rust-errors-001");
+        assert_eq!(baseline.metrics.hit_at_k, 1.0);
         assert_eq!(baseline.thresholds.hit_at_k.minimum, Some(1.0));
         assert_eq!(baseline.thresholds.search_call_count.maximum, Some(2.0));
     }
@@ -273,5 +265,28 @@ cases = ["search-rust-errors-001"]
 
         let err = load_baselines(&dirs, &catalog).unwrap_err();
         assert!(err.to_string().contains("unknown case"));
+    }
+
+    #[test]
+    fn configured_nomai_kb_assets_load() {
+        let Some(root) = std::env::var_os("NOMAI_KB_BENCHMARK_DIR") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let dirs = DevelopmentConfig {
+            enabled: true,
+            benchmark_cases_dir: root.join("cases"),
+            benchmark_suites_dir: root.join("suites"),
+            benchmark_baselines_dir: root.join("baselines"),
+        };
+
+        let catalog = BenchmarkCatalog::load(&dirs).unwrap();
+        let baseline = load_baselines(&dirs, &catalog).unwrap();
+        assert_eq!(catalog.suite("search-regression").unwrap().cases.len(), 2);
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(
+            baseline[0].case_ids,
+            catalog.suite("search-regression").unwrap().cases
+        );
     }
 }

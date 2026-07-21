@@ -85,7 +85,7 @@ pub(crate) struct RetrievalSpec {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct AnswerSpec {
     pub reference: String,
-    pub judge: String,
+    pub judge: bool,
 }
 
 fn load_cases(dir: &Path) -> Result<BTreeMap<String, CaseSpec>, CoreError> {
@@ -219,7 +219,7 @@ k = 5
 
 [answer]
 reference = "Inspect the compiler output and fetch the relevant evidence entry."
-judge = "Mentions compiler output plus opening the relevant entry."
+judge = false
 "#,
             fixture_entry_id = FIXTURE_ENTRY_ID,
             fixture_block_id = FIXTURE_BLOCK_ID,
