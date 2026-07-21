@@ -1,5 +1,6 @@
 //! nomai-daemon library: knowledge-core daemon internals.
 
+pub(crate) mod benchmark;
 pub mod config;
 pub mod daemon;
 pub mod handlers;
