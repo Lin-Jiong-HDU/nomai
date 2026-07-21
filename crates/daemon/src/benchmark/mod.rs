@@ -7,6 +7,7 @@ use nomai_core::CoreError;
 
 pub(crate) mod baseline;
 pub(crate) mod cases;
+pub(crate) mod metrics;
 
 fn config_error(path: &Path, message: impl Display) -> CoreError {
     CoreError::Config(format!("{}: {message}", path.display()))

@@ -1,12 +1,13 @@
 #![allow(dead_code)]
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use nomai_core::CoreError;
 use serde::Deserialize;
 
 use crate::benchmark::cases::BenchmarkCatalog;
+use crate::benchmark::metrics::{BaselineComparison, RunReport};
 use crate::benchmark::{config_error, read_to_string, sorted_files};
 use crate::config::DevelopmentConfig;
 
@@ -59,9 +60,189 @@ pub(crate) struct BaselineThresholds {
     pub ndcg: MetricThreshold,
     #[serde(default)]
     pub judge_score: MetricThreshold,
+    #[serde(default)]
+    pub required_tools_success: MetricThreshold,
+    #[serde(default)]
+    pub evidence_entry_hit: MetricThreshold,
     pub search_call_count: MetricThreshold,
     pub latency_ms_total: MetricThreshold,
     pub latency_ms_average: MetricThreshold,
+}
+
+pub(crate) fn compare_baseline(current: &RunReport, baseline: &BaselineFile) -> BaselineComparison {
+    let mut compatible = true;
+    let mut violations = Vec::new();
+    let metadata = &current.metadata;
+
+    if baseline.schema_version != metadata.schema_version {
+        incompatible(
+            &mut compatible,
+            &mut violations,
+            format!(
+                "schema version mismatch: current {}, baseline {}",
+                metadata.schema_version, baseline.schema_version
+            ),
+        );
+    }
+    if baseline.suite_id != metadata.suite_id {
+        incompatible(
+            &mut compatible,
+            &mut violations,
+            format!(
+                "suite mismatch: current {}, baseline {}",
+                metadata.suite_id, baseline.suite_id
+            ),
+        );
+    }
+    if baseline.case_ids != metadata.case_ids {
+        incompatible(
+            &mut compatible,
+            &mut violations,
+            "case order or membership mismatch".into(),
+        );
+    }
+    if baseline.provider.name != metadata.provider_name {
+        incompatible(
+            &mut compatible,
+            &mut violations,
+            format!(
+                "provider mismatch: current {}, baseline {}",
+                metadata.provider_name, baseline.provider.name
+            ),
+        );
+    }
+    if baseline.provider.base_url != metadata.provider_base_url {
+        incompatible(
+            &mut compatible,
+            &mut violations,
+            "provider base URL mismatch".into(),
+        );
+    }
+    if baseline.embedding_model != metadata.embedding_model {
+        incompatible(
+            &mut compatible,
+            &mut violations,
+            format!(
+                "embedding model mismatch: current {}, baseline {}",
+                metadata.embedding_model, baseline.embedding_model
+            ),
+        );
+    }
+    if baseline.llm_model != metadata.llm_model {
+        incompatible(
+            &mut compatible,
+            &mut violations,
+            format!(
+                "llm model mismatch: current {}, baseline {}",
+                metadata.llm_model, baseline.llm_model
+            ),
+        );
+    }
+
+    let current_values = summary_values(&current.summary);
+    let baseline_values = baseline_values(&baseline.metrics);
+    let mut deltas = BTreeMap::new();
+    for (name, current_value) in &current_values {
+        if let Some(baseline_value) = baseline_values.get(name) {
+            deltas.insert(name.clone(), current_value - baseline_value);
+        }
+    }
+
+    for (name, value) in current_values {
+        if let Some(threshold) = threshold_for(&baseline.thresholds, &name) {
+            check_threshold(&name, value, threshold, &mut violations);
+        }
+    }
+
+    BaselineComparison {
+        compatible,
+        deltas,
+        violations,
+    }
+}
+
+fn incompatible(compatible: &mut bool, violations: &mut Vec<String>, message: String) {
+    *compatible = false;
+    violations.push(message);
+}
+
+fn summary_values(summary: &crate::benchmark::metrics::SummaryMetrics) -> BTreeMap<String, f64> {
+    let mut values = BTreeMap::from([
+        ("hit_at_k".into(), summary.hit_at_k),
+        ("recall_at_k".into(), summary.recall_at_k),
+        ("mrr".into(), summary.mrr),
+        ("ndcg".into(), summary.ndcg),
+        (
+            "required_tools_success".into(),
+            summary.required_tools_success,
+        ),
+        ("evidence_entry_hit".into(), summary.evidence_entry_hit),
+        ("search_call_count".into(), summary.search_call_count),
+        ("latency_ms_total".into(), summary.latency_ms_total),
+        ("latency_ms_average".into(), summary.latency_ms_average),
+    ]);
+    if let Some(judge_score) = summary.judge_score {
+        values.insert("judge_score".into(), judge_score);
+    }
+    values
+}
+
+fn baseline_values(metrics: &BaselineMetrics) -> BTreeMap<String, f64> {
+    let mut values = BTreeMap::from([
+        ("hit_at_k".into(), metrics.hit_at_k),
+        ("recall_at_k".into(), metrics.recall_at_k),
+        ("mrr".into(), metrics.mrr),
+        ("ndcg".into(), metrics.ndcg),
+        (
+            "required_tools_success".into(),
+            metrics.required_tools_success,
+        ),
+        ("evidence_entry_hit".into(), metrics.evidence_entry_hit),
+        ("search_call_count".into(), metrics.search_call_count),
+        ("latency_ms_total".into(), metrics.latency_ms_total),
+        ("latency_ms_average".into(), metrics.latency_ms_average),
+    ]);
+    if let Some(judge_score) = metrics.judge_score {
+        values.insert("judge_score".into(), judge_score);
+    }
+    values
+}
+
+fn threshold_for<'a>(
+    thresholds: &'a BaselineThresholds,
+    name: &str,
+) -> Option<&'a MetricThreshold> {
+    Some(match name {
+        "hit_at_k" => &thresholds.hit_at_k,
+        "recall_at_k" => &thresholds.recall_at_k,
+        "mrr" => &thresholds.mrr,
+        "ndcg" => &thresholds.ndcg,
+        "judge_score" => &thresholds.judge_score,
+        "required_tools_success" => &thresholds.required_tools_success,
+        "evidence_entry_hit" => &thresholds.evidence_entry_hit,
+        "search_call_count" => &thresholds.search_call_count,
+        "latency_ms_total" => &thresholds.latency_ms_total,
+        "latency_ms_average" => &thresholds.latency_ms_average,
+        _ => return None,
+    })
+}
+
+fn check_threshold(
+    name: &str,
+    value: f64,
+    threshold: &MetricThreshold,
+    violations: &mut Vec<String>,
+) {
+    if let Some(minimum) = threshold.minimum
+        && value < minimum
+    {
+        violations.push(format!("{name}={value} is below minimum {minimum}"));
+    }
+    if let Some(maximum) = threshold.maximum
+        && value > maximum
+    {
+        violations.push(format!("{name}={value} is above maximum {maximum}"));
+    }
 }
 
 pub(crate) fn load_baselines(
@@ -118,6 +299,7 @@ fn validate_baseline(
 mod tests {
     use super::load_baselines;
     use crate::benchmark::cases::BenchmarkCatalog;
+    use crate::benchmark::metrics::RunReport;
     use crate::config::DevelopmentConfig;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -265,6 +447,42 @@ cases = ["search-rust-errors-001"]
 
         let err = load_baselines(&dirs, &catalog).unwrap_err();
         assert!(err.to_string().contains("unknown case"));
+    }
+
+    #[test]
+    fn incompatible_baseline_is_not_a_pass_and_reports_deltas() {
+        let baseline: super::BaselineFile = serde_json::from_str(valid_baseline_json()).unwrap();
+        let current = RunReport {
+            metadata: crate::benchmark::metrics::RunMetadata {
+                schema_version: 1,
+                suite_id: "search-regression".into(),
+                case_ids: vec!["search-rust-errors-001".into()],
+                provider_name: "different-provider".into(),
+                provider_base_url: "https://api.openai.com/v1".into(),
+                embedding_model: "text-embedding-3-small".into(),
+                llm_model: "gpt-4o-mini".into(),
+            },
+            cases: vec![],
+            summary: crate::benchmark::metrics::SummaryMetrics {
+                hit_at_k: 0.5,
+                recall_at_k: 0.5,
+                mrr: 0.5,
+                ndcg: 0.5,
+                required_tools_success: 1.0,
+                evidence_entry_hit: 1.0,
+                search_call_count: 3.0,
+                latency_ms_total: 600.0,
+                latency_ms_average: 600.0,
+                judge_score: None,
+            },
+            baseline_comparison: None,
+        };
+
+        let comparison = super::compare_baseline(&current, &baseline);
+        assert!(!comparison.compatible);
+        assert!(comparison.violations.iter().any(|v| v.contains("provider")));
+        assert_eq!(comparison.deltas["hit_at_k"], -0.5);
+        assert!(comparison.violations.iter().any(|v| v.contains("hit_at_k")));
     }
 
     #[test]
