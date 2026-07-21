@@ -61,7 +61,7 @@ impl RpcHandler for Sync {
         // bodies. Mirrors entry.create: an embed failure surfaces as a
         // provider error without rolling back the already-committed reindex.
         for id in &result.reindexed_ids {
-            embed_entry_chunks(daemon, *id).await?;
+            embed_entry_chunks(daemon, *id, false).await?;
         }
 
         serde_json::to_value(&result).map_err(|e| CoreError::Config(format!("serialize: {e}")))
@@ -104,7 +104,7 @@ impl RpcHandler for Rebuild {
             blocking(move || entries.list_ids()).await??
         };
         for id in entry_ids {
-            if let Err(e) = embed_entry_chunks(daemon, id).await {
+            if let Err(e) = embed_entry_chunks(daemon, id, false).await {
                 result.errors.push(format!("re-embed entry {id}: {e}"));
             }
         }

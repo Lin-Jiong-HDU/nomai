@@ -33,6 +33,7 @@ pub(crate) struct BaselineProvider {
 pub(crate) struct BaselineMetrics {
     pub hit_at_k: f64,
     pub recall_at_k: f64,
+    pub precision_at_k: f64,
     pub mrr: f64,
     pub ndcg: f64,
     pub required_tools_success: f64,
@@ -56,6 +57,7 @@ pub(crate) struct MetricThreshold {
 pub(crate) struct BaselineThresholds {
     pub hit_at_k: MetricThreshold,
     pub recall_at_k: MetricThreshold,
+    pub precision_at_k: MetricThreshold,
     pub mrr: MetricThreshold,
     pub ndcg: MetricThreshold,
     #[serde(default)]
@@ -170,6 +172,7 @@ fn summary_values(summary: &crate::benchmark::metrics::SummaryMetrics) -> BTreeM
     let mut values = BTreeMap::from([
         ("hit_at_k".into(), summary.hit_at_k),
         ("recall_at_k".into(), summary.recall_at_k),
+        ("precision_at_k".into(), summary.precision_at_k),
         ("mrr".into(), summary.mrr),
         ("ndcg".into(), summary.ndcg),
         (
@@ -191,6 +194,7 @@ fn baseline_values(metrics: &BaselineMetrics) -> BTreeMap<String, f64> {
     let mut values = BTreeMap::from([
         ("hit_at_k".into(), metrics.hit_at_k),
         ("recall_at_k".into(), metrics.recall_at_k),
+        ("precision_at_k".into(), metrics.precision_at_k),
         ("mrr".into(), metrics.mrr),
         ("ndcg".into(), metrics.ndcg),
         (
@@ -215,6 +219,7 @@ fn threshold_for<'a>(
     Some(match name {
         "hit_at_k" => &thresholds.hit_at_k,
         "recall_at_k" => &thresholds.recall_at_k,
+        "precision_at_k" => &thresholds.precision_at_k,
         "mrr" => &thresholds.mrr,
         "ndcg" => &thresholds.ndcg,
         "judge_score" => &thresholds.judge_score,
@@ -353,7 +358,7 @@ cases = ["search-rust-errors-001"]
 
     fn valid_baseline_json() -> &'static str {
         r#"{
-  "schema_version": 1,
+  "schema_version": 2,
   "suite_id": "search-regression",
   "case_ids": ["search-rust-errors-001"],
   "provider": {
@@ -365,6 +370,7 @@ cases = ["search-rust-errors-001"]
   "metrics": {
     "hit_at_k": 1.0,
     "recall_at_k": 1.0,
+    "precision_at_k": 1.0,
     "mrr": 1.0,
     "ndcg": 1.0,
     "required_tools_success": 1.0,
@@ -377,6 +383,7 @@ cases = ["search-rust-errors-001"]
   "thresholds": {
     "hit_at_k": { "minimum": 1.0 },
     "recall_at_k": { "minimum": 1.0 },
+    "precision_at_k": { "minimum": 1.0 },
     "mrr": { "minimum": 1.0 },
     "ndcg": { "minimum": 1.0 },
     "search_call_count": { "maximum": 2.0 },
@@ -425,13 +432,14 @@ cases = ["search-rust-errors-001"]
         assert_eq!(baselines.len(), 1);
 
         let baseline = &baselines[0];
-        assert_eq!(baseline.schema_version, 1);
+        assert_eq!(baseline.schema_version, 2);
         assert_eq!(baseline.suite_id, "search-regression");
         assert_eq!(baseline.case_ids, vec!["search-rust-errors-001"]);
         assert_eq!(baseline.provider.name, "openai-compatible");
         assert_eq!(baseline.embedding_model, "text-embedding-3-small");
         assert_eq!(baseline.llm_model, "gpt-4o-mini");
         assert_eq!(baseline.metrics.hit_at_k, 1.0);
+        assert_eq!(baseline.metrics.precision_at_k, 1.0);
         assert_eq!(baseline.thresholds.hit_at_k.minimum, Some(1.0));
         assert_eq!(baseline.thresholds.search_call_count.maximum, Some(2.0));
     }
@@ -454,7 +462,7 @@ cases = ["search-rust-errors-001"]
         let baseline: super::BaselineFile = serde_json::from_str(valid_baseline_json()).unwrap();
         let current = RunReport {
             metadata: crate::benchmark::metrics::RunMetadata {
-                schema_version: 1,
+                schema_version: 2,
                 suite_id: "search-regression".into(),
                 case_ids: vec!["search-rust-errors-001".into()],
                 provider_name: "different-provider".into(),
@@ -466,6 +474,7 @@ cases = ["search-rust-errors-001"]
             summary: crate::benchmark::metrics::SummaryMetrics {
                 hit_at_k: 0.5,
                 recall_at_k: 0.5,
+                precision_at_k: 0.5,
                 mrr: 0.5,
                 ndcg: 0.5,
                 required_tools_success: 1.0,

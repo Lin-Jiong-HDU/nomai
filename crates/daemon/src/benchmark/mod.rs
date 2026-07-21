@@ -111,6 +111,24 @@ impl BenchmarkRuntime {
         self.state.lock().unwrap().is_some()
     }
 
+    pub(crate) fn active_fixture_entry_ids(&self, run_id: &str) -> Result<Vec<Ulid>, CoreError> {
+        let state = self.state.lock().unwrap();
+        let active = state
+            .as_ref()
+            .ok_or_else(|| CoreError::Validation("no benchmark run is active".into()))?;
+        if active.run_id != run_id {
+            return Err(CoreError::Validation("invalid benchmark run id".into()));
+        }
+
+        let mut ids: Vec<Ulid> = active
+            .resolved
+            .values()
+            .flat_map(|resolved| resolved.entries.values().copied())
+            .collect();
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
     pub(crate) fn start(&self, suite_id: &str) -> Result<StartResult, CoreError> {
         let suite = self.catalog.suite(suite_id)?.clone();
         let mut state = self.state.lock().unwrap();
@@ -287,7 +305,7 @@ impl BenchmarkRuntime {
         let provider = self.provider.lock().unwrap();
         let mut report = RunReport {
             metadata: RunMetadata {
-                schema_version: 1,
+                schema_version: 2,
                 suite_id: active.suite_id,
                 case_ids: active.case_ids,
                 provider_name: provider.name.clone(),

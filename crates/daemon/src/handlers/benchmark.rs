@@ -68,11 +68,31 @@ impl RpcHandler for Start {
             .map_err(|error| CoreError::Validation(format!("invalid params: {error}")))?;
         let runtime = runtime_handle(daemon)?;
         let suite_id = params.suite_id;
-        let result = tokio::task::spawn_blocking(move || runtime.start(&suite_id))
+        let start_runtime = runtime.clone();
+        let result = tokio::task::spawn_blocking(move || start_runtime.start(&suite_id))
             .await
             .map_err(|error| {
                 CoreError::Config(format!("benchmark start task failed: {error}"))
             })??;
+
+        let run_id = result.run_id.clone();
+        let embedding_result = async {
+            for entry_id in runtime.active_fixture_entry_ids(&run_id)? {
+                crate::handlers::embed::embed_entry_chunks(daemon, entry_id, true).await?;
+            }
+            Ok::<(), CoreError>(())
+        }
+        .await;
+        if let Err(error) = embedding_result {
+            let cleanup_runtime = runtime.clone();
+            let cleanup_run_id = run_id.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || cleanup_runtime.abort(&cleanup_run_id)).await;
+            daemon.search_cache.clear();
+            daemon.search_cache.bump_generation();
+            return Err(error);
+        }
+
         daemon.search_cache.clear();
         daemon.search_cache.bump_generation();
         Ok(json!({

@@ -108,7 +108,7 @@ impl RpcHandler for Create {
         // gap (the "background embedder" was never implemented); now done
         // synchronously in-handler. Entry is already committed; embed failure
         // returns provider error (1002) without rolling back the entry.
-        crate::handlers::embed::embed_entry_chunks(daemon, entry.id).await?;
+        crate::handlers::embed::embed_entry_chunks(daemon, entry.id, false).await?;
 
         // Spec 7: invalidate search cache (new entry affects both search RPCs).
         daemon.search_cache.bump_generation();

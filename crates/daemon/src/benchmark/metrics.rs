@@ -39,6 +39,7 @@ pub(crate) struct ResolvedFixtureIds {
 pub(crate) struct CaseMetrics {
     pub hit_at_k: f64,
     pub recall_at_k: f64,
+    pub precision_at_k: f64,
     pub mrr: f64,
     pub ndcg: f64,
     pub required_tools_success: bool,
@@ -60,6 +61,7 @@ pub(crate) struct CaseReport {
 pub(crate) struct SummaryMetrics {
     pub hit_at_k: f64,
     pub recall_at_k: f64,
+    pub precision_at_k: f64,
     pub mrr: f64,
     pub ndcg: f64,
     pub required_tools_success: f64,
@@ -122,24 +124,41 @@ pub(crate) fn score_case(
         .filter(|call| call.ok && is_search_method(&call.method))
         .flat_map(|call| call.results.iter())
         .collect();
-    let top_k = ranked.iter().take(case.retrieval.k as usize);
-    let relevant_in_top_k: HashSet<String> = top_k
-        .flat_map(|result| relevant_keys(result, &relevant_entries, &relevant_blocks))
+    let top_k: Vec<&RetrievedResult> = ranked
+        .iter()
+        .take(case.retrieval.k as usize)
+        .copied()
         .collect();
-    let relevant_count = relevant_entries.len() + relevant_blocks.len();
+    let relevant_entries_in_top_k: HashSet<String> = top_k
+        .iter()
+        .filter_map(|result| result.entry_id.as_ref())
+        .filter(|entry_id| relevant_entries.contains(*entry_id))
+        .cloned()
+        .collect();
+    let relevant_results_in_top_k = top_k
+        .iter()
+        .filter(|result| is_relevant(result, &relevant_entries, &relevant_blocks))
+        .count();
 
     let first_relevant_rank = ranked
         .iter()
-        .position(|result| !relevant_keys(result, &relevant_entries, &relevant_blocks).is_empty());
-    let hit_at_k = if relevant_in_top_k.is_empty() {
+        .position(|result| is_relevant(result, &relevant_entries, &relevant_blocks));
+    let hit_at_k = if relevant_results_in_top_k == 0 {
         0.0
     } else {
         1.0
     };
-    let recall_at_k = if relevant_count == 0 {
+    let recall_at_k = if relevant_entries.is_empty() {
         0.0
     } else {
-        relevant_in_top_k.len() as f64 / relevant_count as f64
+        relevant_entries_in_top_k.len() as f64 / relevant_entries.len() as f64
+    };
+    let precision_at_k = if top_k.is_empty() {
+        0.0
+    } else {
+        // Use the number of returned results as the denominator so a search
+        // that returns fewer than k results is scored on its actual output.
+        relevant_results_in_top_k as f64 / top_k.len() as f64
     };
     let mrr = first_relevant_rank
         .map(|rank| 1.0 / (rank as f64 + 1.0))
@@ -186,6 +205,7 @@ pub(crate) fn score_case(
     CaseMetrics {
         hit_at_k,
         recall_at_k,
+        precision_at_k,
         mrr,
         ndcg,
         required_tools_success,
@@ -203,6 +223,7 @@ pub(crate) fn summarize(cases: &[CaseReport]) -> SummaryMetrics {
         return SummaryMetrics {
             hit_at_k: 0.0,
             recall_at_k: 0.0,
+            precision_at_k: 0.0,
             mrr: 0.0,
             ndcg: 0.0,
             required_tools_success: 0.0,
@@ -222,6 +243,7 @@ pub(crate) fn summarize(cases: &[CaseReport]) -> SummaryMetrics {
     SummaryMetrics {
         hit_at_k: cases.iter().map(|c| c.metrics.hit_at_k).sum::<f64>() / n,
         recall_at_k: cases.iter().map(|c| c.metrics.recall_at_k).sum::<f64>() / n,
+        precision_at_k: cases.iter().map(|c| c.metrics.precision_at_k).sum::<f64>() / n,
         mrr: cases.iter().map(|c| c.metrics.mrr).sum::<f64>() / n,
         ndcg: cases.iter().map(|c| c.metrics.ndcg).sum::<f64>() / n,
         required_tools_success: cases
@@ -263,23 +285,19 @@ fn is_evidence_method(method: &str) -> bool {
     matches!(method, "entry.get" | "block.get")
 }
 
-fn relevant_keys(
+fn is_relevant(
     result: &RetrievedResult,
     relevant_entries: &HashSet<String>,
     relevant_blocks: &HashSet<String>,
-) -> Vec<String> {
-    let mut keys = Vec::with_capacity(2);
-    if let Some(entry_id) = &result.entry_id
-        && relevant_entries.contains(entry_id)
-    {
-        keys.push(entry_id.clone());
-    }
-    if let Some(block_id) = &result.block_id
-        && relevant_blocks.contains(block_id)
-    {
-        keys.push(block_id.clone());
-    }
-    keys
+) -> bool {
+    result
+        .entry_id
+        .as_ref()
+        .is_some_and(|id| relevant_entries.contains(id))
+        || result
+            .block_id
+            .as_ref()
+            .is_some_and(|id| relevant_blocks.contains(id))
 }
 
 fn ndcg_binary(
@@ -292,10 +310,10 @@ fn ndcg_binary(
         .iter()
         .take(k)
         .enumerate()
-        .filter(|(_, result)| !relevant_keys(result, relevant_entries, relevant_blocks).is_empty())
+        .filter(|(_, result)| is_relevant(result, relevant_entries, relevant_blocks))
         .map(|(rank, _)| 1.0 / (rank as f64 + 2.0).log2())
         .sum();
-    let relevant_count = relevant_entries.len() + relevant_blocks.len();
+    let relevant_count = relevant_entries.len().max(relevant_blocks.len());
     let ideal_count = relevant_count.min(k);
     let idcg: f64 = (0..ideal_count)
         .map(|rank| 1.0 / (rank as f64 + 2.0).log2())
@@ -383,6 +401,7 @@ mod tests {
         let metrics = score_case(&case, &trace, &resolved);
         assert_eq!(metrics.hit_at_k, 1.0);
         assert_eq!(metrics.recall_at_k, 0.5);
+        assert_eq!(metrics.precision_at_k, 0.5);
         assert_eq!(metrics.mrr, 0.5);
         let expected_ndcg = (1.0 / 3.0_f64.log2()) / (1.0 + 1.0 / 3.0_f64.log2());
         assert!((metrics.ndcg - expected_ndcg).abs() < 1e-9);
@@ -470,6 +489,7 @@ mod tests {
         let metrics = CaseMetrics {
             hit_at_k: 1.0,
             recall_at_k: 0.5,
+            precision_at_k: 0.5,
             mrr: 0.5,
             ndcg: 0.75,
             required_tools_success: true,
@@ -486,6 +506,7 @@ mod tests {
         }]);
         assert_eq!(summary.required_tools_success, 1.0);
         assert_eq!(summary.evidence_entry_hit, 0.0);
+        assert_eq!(summary.precision_at_k, 0.5);
         assert_eq!(summary.search_call_count, 2.0);
         assert_eq!(summary.judge_score, Some(0.8));
     }

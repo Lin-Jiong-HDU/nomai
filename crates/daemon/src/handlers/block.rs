@@ -106,7 +106,7 @@ impl RpcHandler for Append {
         rerender_entry_nomai(&entries, entry_id).await?;
 
         // 0.2.3: embed the new block's chunk(s) so search.semantic works.
-        crate::handlers::embed::embed_entry_chunks(daemon, entry_id).await?;
+        crate::handlers::embed::embed_entry_chunks(daemon, entry_id, false).await?;
 
         // Spec 7: invalidate search cache.
         daemon.search_cache.bump_generation();
@@ -204,7 +204,7 @@ impl RpcHandler for Update {
 
         // 0.2.3: re-embed (text may have changed → chunks re-derived →
         // chunks_ad cleaned old embeddings, new ones need embedding).
-        crate::handlers::embed::embed_entry_chunks(daemon, block.entry_id).await?;
+        crate::handlers::embed::embed_entry_chunks(daemon, block.entry_id, false).await?;
 
         // Spec 7: invalidate search cache.
         daemon.search_cache.bump_generation();

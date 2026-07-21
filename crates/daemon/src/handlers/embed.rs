@@ -22,8 +22,8 @@ use crate::handlers::entry::blocking;
 /// `vec_chunk_embeddings`.
 ///
 /// Three phases:
-/// 1. sync (spawn_blocking): collect `Vec<(chunk_id, text)>` via
-///    `block_service().list` + `chunks.list`.
+/// 1. sync (spawn_blocking): collect `Vec<(chunk_id, text)>` via the matching
+///    normal or benchmark-visible block and chunk list methods.
 /// 2. async: batch `daemon.cache().embed(&texts)` (CachedEmbedder → emb_cache).
 /// 3. sync (spawn_blocking): `chunks.write_embedding(chunk_id, vec)` each.
 ///
@@ -31,7 +31,11 @@ use crate::handlers::entry::blocking;
 /// propagated (caller maps to RPC 1002 / storage error). The entry itself
 /// is already committed by the caller; this function only enriches the
 /// vector index and does NOT roll back the entry on failure.
-pub(crate) async fn embed_entry_chunks(daemon: &Daemon, entry_id: Ulid) -> Result<(), CoreError> {
+pub(crate) async fn embed_entry_chunks(
+    daemon: &Daemon,
+    entry_id: Ulid,
+    include_benchmark: bool,
+) -> Result<(), CoreError> {
     let entries: Arc<EntryService> = daemon.entries().clone();
     let chunks: Arc<ChunkService> = daemon.chunks().clone();
 
@@ -40,10 +44,19 @@ pub(crate) async fn embed_entry_chunks(daemon: &Daemon, entry_id: Ulid) -> Resul
         let entries = entries.clone();
         let chunks = chunks.clone();
         blocking(move || -> Result<Vec<(Ulid, String)>, CoreError> {
-            let blocks = entries.block_service().list(entry_id)?;
+            let blocks = if include_benchmark {
+                entries.block_service().list_with_benchmark(entry_id)?
+            } else {
+                entries.block_service().list(entry_id)?
+            };
             let mut out: Vec<(Ulid, String)> = Vec::new();
             for b in blocks.items {
-                for c in chunks.list(b.id)?.items {
+                let chunk_list = if include_benchmark {
+                    chunks.list_with_benchmark(b.id)?
+                } else {
+                    chunks.list(b.id)?
+                };
+                for c in chunk_list.items {
                     out.push((c.id, c.text));
                 }
             }

@@ -268,7 +268,7 @@ impl RpcHandler for Batch {
                 }
             }
             for entry_id in touched.keys() {
-                crate::handlers::embed::embed_entry_chunks(daemon, *entry_id).await?;
+                crate::handlers::embed::embed_entry_chunks(daemon, *entry_id, false).await?;
             }
         }
 

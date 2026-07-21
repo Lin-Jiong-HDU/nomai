@@ -15,8 +15,8 @@ struct NullEmbed;
 
 #[async_trait]
 impl EmbeddingProvider for NullEmbed {
-    async fn embed(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, nomai_protocol::ProviderError> {
-        Ok(vec![])
+    async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, nomai_protocol::ProviderError> {
+        Ok(texts.iter().map(|_| vec![0.1; EMBEDDING_DIM]).collect())
     }
 
     fn dim(&self) -> usize {
@@ -81,7 +81,7 @@ title = "Benchmark evidence"
   text = "The benchmark evidence says to inspect the retrieved note."
 
 [retrieval]
-required_tools = ["search.fulltext", "entry.get"]
+required_tools = ["search.fulltext", "search.semantic", "entry.get"]
 relevant_entry_ids = ["01J0K3H6Y0F9Q7V8X1A2B3C4D5"]
 relevant_block_ids = ["01J0K3H6Y1F9Q7V8X1A2B3C4D6"]
 k = 5
@@ -101,7 +101,7 @@ judge = false
         baselines.join("baseline.json"),
         r#"
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "suite_id": "suite-1",
   "case_ids": ["case-1"],
   "provider": {"name": "test", "base_url": ""},
@@ -110,6 +110,7 @@ judge = false
   "metrics": {
     "hit_at_k": 0.0,
     "recall_at_k": 0.0,
+    "precision_at_k": 0.0,
     "mrr": 0.0,
     "ndcg": 0.0,
     "required_tools_success": 0.0,
@@ -121,6 +122,7 @@ judge = false
   "thresholds": {
     "hit_at_k": {"minimum": 0.0},
     "recall_at_k": {"minimum": 0.0},
+    "precision_at_k": {"minimum": 0.0},
     "mrr": {"minimum": 0.0},
     "ndcg": {"minimum": 0.0},
     "required_tools_success": {"minimum": 0.0},
@@ -210,15 +212,25 @@ async fn enabled_daemon_runs_model_like_benchmark_workflow_end_to_end() {
         .result
         .unwrap();
     let entry_id = search["items"][0]["entry"]["id"].as_str().unwrap();
+    let semantic = daemon
+        .dispatch(request(
+            5,
+            "search.semantic",
+            json!({"query": "evidence", "limit": 5}),
+        ))
+        .await
+        .result
+        .unwrap();
+    assert!(!semantic["items"].as_array().unwrap().is_empty());
     let _evidence = daemon
-        .dispatch(request(5, "entry.get", json!({"id": entry_id})))
+        .dispatch(request(6, "entry.get", json!({"id": entry_id})))
         .await
         .result
         .unwrap();
 
     let answer = daemon
         .dispatch(request(
-            6,
+            7,
             "benchmark.record_answer",
             json!({
                 "run_id": run_id,
@@ -230,10 +242,11 @@ async fn enabled_daemon_runs_model_like_benchmark_workflow_end_to_end() {
         .result
         .unwrap();
     assert_eq!(answer["metrics"]["hit_at_k"], 1.0);
+    assert_eq!(answer["metrics"]["precision_at_k"], 1.0);
     assert_eq!(answer["metrics"]["evidence_entry_hit"], true);
 
     let report = daemon
-        .dispatch(request(7, "benchmark.finish", json!({"run_id": run_id})))
+        .dispatch(request(8, "benchmark.finish", json!({"run_id": run_id})))
         .await
         .result
         .unwrap();

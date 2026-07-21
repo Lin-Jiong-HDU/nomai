@@ -523,7 +523,7 @@ impl Daemon {
     pub(crate) async fn startup_sync(&self) {
         let sync_result = sync_index_from_fs_at_startup(self.entries());
         for id in &sync_result.reindexed_ids {
-            if let Err(e) = crate::handlers::embed::embed_entry_chunks(self, *id).await {
+            if let Err(e) = crate::handlers::embed::embed_entry_chunks(self, *id, false).await {
                 eprintln!("warn: startup re-embed entry {id} failed: {e}");
             }
         }
