@@ -5,6 +5,7 @@
 
 pub mod attachment;
 pub mod batch;
+pub mod benchmark;
 pub mod block;
 pub mod cache;
 pub mod chunk;

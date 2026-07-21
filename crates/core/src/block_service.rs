@@ -397,13 +397,30 @@ impl BlockService {
     /// the entry has no blocks or doesn't exist (callers can distinguish
     /// via EntryService::get if needed).
     pub fn list(&self, entry_id: Ulid) -> Result<BlockListResult, CoreError> {
+        self.list_visible(entry_id, false)
+    }
+
+    /// List blocks while an active benchmark run exposes its fixtures.
+    pub fn list_with_benchmark(&self, entry_id: Ulid) -> Result<BlockListResult, CoreError> {
+        self.list_visible(entry_id, true)
+    }
+
+    fn list_visible(
+        &self,
+        entry_id: Ulid,
+        include_benchmark: bool,
+    ) -> Result<BlockListResult, CoreError> {
         let conn = self.conn.lock().unwrap();
+        let visibility = if include_benchmark {
+            "1 = 1".to_string()
+        } else {
+            format!("NOT {}", crate::service::BENCHMARK_ENTRY_PREDICATE)
+        };
         let sql = format!(
             "SELECT b.id, b.entry_id, b.ordinal, b.type, b.text, b.attrs, b.created_at, b.updated_at
              FROM blocks b JOIN entries e ON e.id = b.entry_id
-             WHERE b.entry_id = ?1 AND NOT {predicate}
+             WHERE b.entry_id = ?1 AND {visibility}
              ORDER BY b.ordinal ASC",
-            predicate = crate::service::BENCHMARK_ENTRY_PREDICATE,
         );
         let mut stmt = conn.prepare(&sql)?;
         let items: Result<Vec<Block>, _> = stmt
@@ -416,12 +433,25 @@ impl BlockService {
 
     /// Fetch a single block by id. NotFound if missing.
     pub fn get(&self, id: Ulid) -> Result<Block, CoreError> {
+        self.get_visible(id, false)
+    }
+
+    /// Fetch a block while an active benchmark run exposes its fixtures.
+    pub fn get_with_benchmark(&self, id: Ulid) -> Result<Block, CoreError> {
+        self.get_visible(id, true)
+    }
+
+    fn get_visible(&self, id: Ulid, include_benchmark: bool) -> Result<Block, CoreError> {
         let conn = self.conn.lock().unwrap();
+        let visibility = if include_benchmark {
+            "1 = 1".to_string()
+        } else {
+            format!("NOT {}", crate::service::BENCHMARK_ENTRY_PREDICATE)
+        };
         let sql = format!(
             "SELECT b.id, b.entry_id, b.ordinal, b.type, b.text, b.attrs, b.created_at, b.updated_at
              FROM blocks b JOIN entries e ON e.id = b.entry_id
-             WHERE b.id = ?1 AND NOT {predicate}",
-            predicate = crate::service::BENCHMARK_ENTRY_PREDICATE,
+             WHERE b.id = ?1 AND {visibility}",
         );
         match conn.query_row(&sql, params![id.to_string()], |row| row_to_block(row, 0)) {
             Ok(block) => Ok(block),

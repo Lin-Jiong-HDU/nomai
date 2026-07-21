@@ -48,13 +48,26 @@ impl ChunkService {
 
     /// Fetch a single chunk by id.
     pub fn get(&self, id: Ulid) -> Result<Chunk, CoreError> {
+        self.get_visible(id, false)
+    }
+
+    /// Fetch a chunk while an active benchmark run exposes its fixtures.
+    pub fn get_with_benchmark(&self, id: Ulid) -> Result<Chunk, CoreError> {
+        self.get_visible(id, true)
+    }
+
+    fn get_visible(&self, id: Ulid, include_benchmark: bool) -> Result<Chunk, CoreError> {
         let conn = self.conn.lock().unwrap();
+        let visibility = if include_benchmark {
+            "1 = 1".to_string()
+        } else {
+            format!("NOT {}", crate::service::BENCHMARK_ENTRY_PREDICATE)
+        };
         let sql = format!(
             "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at
              FROM chunks c JOIN blocks b ON b.id = c.block_id
              JOIN entries e ON e.id = b.entry_id
-             WHERE c.id = ?1 AND NOT {predicate}",
-            predicate = crate::service::BENCHMARK_ENTRY_PREDICATE,
+             WHERE c.id = ?1 AND {visibility}",
         );
         match conn.query_row(&sql, params![id.to_string()], |row| row_to_chunk(row, 0)) {
             Ok(c) => Ok(c),
@@ -65,13 +78,30 @@ impl ChunkService {
 
     /// List chunks for a block, ordered by ordinal.
     pub fn list(&self, block_id: Ulid) -> Result<ChunkListResult, CoreError> {
+        self.list_visible(block_id, false)
+    }
+
+    /// List chunks while an active benchmark run exposes its fixtures.
+    pub fn list_with_benchmark(&self, block_id: Ulid) -> Result<ChunkListResult, CoreError> {
+        self.list_visible(block_id, true)
+    }
+
+    fn list_visible(
+        &self,
+        block_id: Ulid,
+        include_benchmark: bool,
+    ) -> Result<ChunkListResult, CoreError> {
         let conn = self.conn.lock().unwrap();
+        let visibility = if include_benchmark {
+            "1 = 1".to_string()
+        } else {
+            format!("NOT {}", crate::service::BENCHMARK_ENTRY_PREDICATE)
+        };
         let sql = format!(
             "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at
              FROM chunks c JOIN blocks b ON b.id = c.block_id
              JOIN entries e ON e.id = b.entry_id
-             WHERE c.block_id = ?1 AND NOT {predicate} ORDER BY c.ordinal ASC",
-            predicate = crate::service::BENCHMARK_ENTRY_PREDICATE,
+             WHERE c.block_id = ?1 AND {visibility} ORDER BY c.ordinal ASC",
         );
         let mut stmt = conn.prepare(&sql)?;
         let items: Result<Vec<Chunk>, _> = stmt
@@ -200,11 +230,36 @@ impl ChunkService {
         limit: usize,
         block_type: Option<&str>,
     ) -> Result<Vec<ChunkSearchResult>, CoreError> {
+        self.semantic_search_visible(query_embedding, limit, block_type, false)
+    }
+
+    /// Semantic search including active benchmark fixtures.
+    pub fn semantic_search_with_benchmark(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        block_type: Option<&str>,
+    ) -> Result<Vec<ChunkSearchResult>, CoreError> {
+        self.semantic_search_visible(query_embedding, limit, block_type, true)
+    }
+
+    fn semantic_search_visible(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        block_type: Option<&str>,
+        include_benchmark: bool,
+    ) -> Result<Vec<ChunkSearchResult>, CoreError> {
         let query_bytes: Vec<u8> = query_embedding
             .iter()
             .flat_map(|f| f.to_le_bytes())
             .collect();
         let conn = self.conn.lock().unwrap();
+        let visibility = if include_benchmark {
+            "1 = 1".to_string()
+        } else {
+            format!("NOT {}", crate::service::BENCHMARK_ENTRY_PREDICATE)
+        };
         let sql = match block_type {
             Some(_) => {
                 format!(
@@ -214,9 +269,8 @@ impl ChunkService {
                      JOIN chunks c ON c.id = vec.chunk_id
                      JOIN blocks b ON b.id = c.block_id
                      JOIN entries e ON e.id = b.entry_id
-                     WHERE NOT {predicate} AND vec.embedding MATCH ?1 AND k = ?2 AND b.type = ?3
+                     WHERE {visibility} AND vec.embedding MATCH ?1 AND k = ?2 AND b.type = ?3
                      ORDER BY vec.distance",
-                    predicate = crate::service::BENCHMARK_ENTRY_PREDICATE,
                 )
             }
             None => {
@@ -227,9 +281,8 @@ impl ChunkService {
                      JOIN chunks c ON c.id = vec.chunk_id
                      JOIN blocks b ON b.id = c.block_id
                      JOIN entries e ON e.id = b.entry_id
-                     WHERE NOT {predicate} AND vec.embedding MATCH ?1 AND k = ?2
+                     WHERE {visibility} AND vec.embedding MATCH ?1 AND k = ?2
                      ORDER BY vec.distance",
-                    predicate = crate::service::BENCHMARK_ENTRY_PREDICATE,
                 )
             }
         };

@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::handlers::{
-    attachment, batch, block, cache, chunk, entry, events, index, link, mcp, provider, search,
-    sync, system,
+    attachment, batch, benchmark, block, cache, chunk, entry, events, index, link, mcp, provider,
+    search, sync, system,
 };
 use crate::rpc::RpcHandler;
 
@@ -132,9 +132,18 @@ pub fn registry_with_benchmark(enabled: bool) -> HashMap<&'static str, Arc<dyn R
     m.insert(h.method(), Arc::new(h));
 
     if enabled {
-        // Benchmark handlers are introduced in a later task. The gate is
-        // already wired here so that the development config can opt in once
-        // those handlers exist.
+        let h = benchmark::Start;
+        m.insert(h.method(), Arc::new(h));
+        let h = benchmark::NextCase;
+        m.insert(h.method(), Arc::new(h));
+        let h = benchmark::RecordAnswer;
+        m.insert(h.method(), Arc::new(h));
+        let h = benchmark::Finish;
+        m.insert(h.method(), Arc::new(h));
+        let h = benchmark::Abort;
+        m.insert(h.method(), Arc::new(h));
+        let h = benchmark::Status;
+        m.insert(h.method(), Arc::new(h));
     }
 
     m
@@ -153,5 +162,20 @@ mod tests {
         assert!(!methods.contains_key("benchmark.finish"));
         assert!(!methods.contains_key("benchmark.abort"));
         assert!(!methods.contains_key("benchmark.status"));
+    }
+
+    #[test]
+    fn registry_exposes_all_benchmark_handlers_when_enabled() {
+        let methods = registry_with_benchmark(true);
+        for method in [
+            "benchmark.start",
+            "benchmark.next_case",
+            "benchmark.record_answer",
+            "benchmark.finish",
+            "benchmark.abort",
+            "benchmark.status",
+        ] {
+            assert!(methods.contains_key(method), "missing {method}");
+        }
     }
 }

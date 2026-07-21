@@ -138,7 +138,18 @@ impl RpcHandler for Get {
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
         let entries = daemon.entries.clone();
-        let entry = blocking(move || entries.get(p.id)).await??;
+        let include_benchmark = daemon
+            .benchmark
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_active());
+        let entry = blocking(move || {
+            if include_benchmark {
+                entries.get_with_benchmark(p.id)
+            } else {
+                entries.get(p.id)
+            }
+        })
+        .await??;
 
         serde_json::to_value(&entry).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
@@ -275,7 +286,18 @@ impl RpcHandler for List {
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
         let entries = daemon.entries.clone();
-        let result = blocking(move || entries.list(query)).await??;
+        let include_benchmark = daemon
+            .benchmark
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_active());
+        let result = blocking(move || {
+            if include_benchmark {
+                entries.list_with_benchmark(query)
+            } else {
+                entries.list(query)
+            }
+        })
+        .await??;
 
         Ok(json!({
             "items": result.items,

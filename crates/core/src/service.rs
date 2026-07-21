@@ -556,12 +556,26 @@ impl EntryService {
     }
 
     pub fn get(&self, id: Ulid) -> Result<Entry, CoreError> {
+        self.get_visible(id, false)
+    }
+
+    /// Fetch an entry while an active benchmark run is exposing its fixtures.
+    /// Normal callers must continue using `get`, which hides benchmark rows.
+    pub fn get_with_benchmark(&self, id: Ulid) -> Result<Entry, CoreError> {
+        self.get_visible(id, true)
+    }
+
+    fn get_visible(&self, id: Ulid, include_benchmark: bool) -> Result<Entry, CoreError> {
         let mut entry = {
             let conn = self.conn.lock().unwrap();
+            let visibility = if include_benchmark {
+                "1 = 1".to_string()
+            } else {
+                format!("NOT {BENCHMARK_ENTRY_PREDICATE}")
+            };
             let sql = format!(
                 "SELECT id, title, tags, attrs, source, created_at, updated_at
-                 FROM entries e WHERE e.id = ?1 AND NOT {predicate}",
-                predicate = BENCHMARK_ENTRY_PREDICATE,
+                 FROM entries e WHERE e.id = ?1 AND {visibility}",
             );
             match conn.query_row(&sql, params![id.to_string()], |row| row_to_entry(row, 0)) {
                 Ok(e) => e,
@@ -569,8 +583,14 @@ impl EntryService {
                 Err(e) => return Err(CoreError::Storage(e)),
             }
         };
-        // Populate blocks via BlockService (separate lock acquisition).
-        let blocks_result = self.block_service.list(id)?;
+        // Populate blocks via BlockService (separate lock acquisition). The
+        // benchmark-aware path must use the matching visibility boundary or
+        // an active fixture would be returned without its evidence blocks.
+        let blocks_result = if include_benchmark {
+            self.block_service.list_with_benchmark(id)?
+        } else {
+            self.block_service.list(id)?
+        };
         entry.blocks = blocks_result.items;
         Ok(entry)
     }
@@ -1217,6 +1237,19 @@ impl EntryService {
     }
 
     pub fn list(&self, query: EntryListQuery) -> Result<EntryListResult, CoreError> {
+        self.list_visible(query, false)
+    }
+
+    /// List entries while an active benchmark run exposes its fixtures.
+    pub fn list_with_benchmark(&self, query: EntryListQuery) -> Result<EntryListResult, CoreError> {
+        self.list_visible(query, true)
+    }
+
+    fn list_visible(
+        &self,
+        query: EntryListQuery,
+        include_benchmark: bool,
+    ) -> Result<EntryListResult, CoreError> {
         let order_clause = match query.order {
             EntryListOrder::CreatedDesc => "created_at DESC",
             EntryListOrder::CreatedAsc => "created_at ASC",
@@ -1233,7 +1266,9 @@ impl EntryService {
         let mut wheres: Vec<String> = Vec::new();
         let mut filter_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-        wheres.push(format!("NOT {BENCHMARK_ENTRY_PREDICATE}"));
+        if !include_benchmark {
+            wheres.push(format!("NOT {BENCHMARK_ENTRY_PREDICATE}"));
+        }
 
         if let Some(tag) = &query.tag {
             from_extra = ", json_each(e.tags) AS t".to_string();
@@ -1291,7 +1326,11 @@ impl EntryService {
             // Populate blocks per entry via BlockService. Done outside the
             // list lock above so each block query takes its own lock.
             for entry in &mut items {
-                let blocks = self.block_service.list(entry.id)?;
+                let blocks = if include_benchmark {
+                    self.block_service.list_with_benchmark(entry.id)?
+                } else {
+                    self.block_service.list(entry.id)?
+                };
                 entry.blocks = blocks.items;
             }
         }
@@ -1466,17 +1505,38 @@ impl EntryService {
         limit: u32,
         block_type: Option<&str>,
     ) -> Result<Vec<FulltextSearchResult>, CoreError> {
+        self.fulltext_search_visible(query, limit, block_type, false)
+    }
+
+    /// Fulltext search including active benchmark fixtures. The daemon only
+    /// calls this during an active development benchmark run.
+    pub fn fulltext_search_with_benchmark(
+        &self,
+        query: &str,
+        limit: u32,
+        block_type: Option<&str>,
+    ) -> Result<Vec<FulltextSearchResult>, CoreError> {
+        self.fulltext_search_visible(query, limit, block_type, true)
+    }
+
+    fn fulltext_search_visible(
+        &self,
+        query: &str,
+        limit: u32,
+        block_type: Option<&str>,
+        include_benchmark: bool,
+    ) -> Result<Vec<FulltextSearchResult>, CoreError> {
         let conn = self.conn.lock().unwrap();
         // Pull matching (entry_id, block_id, type, text, rank) rows via a
         // direct FTS5 query (or LIKE for short queries), aggregate per entry
         // in `dedupe_hits`, then fetch entry rows + build snippets.
         let rows = if query.chars().count() >= 3 {
-            Self::fts_match_pairs(&conn, query, block_type)?
+            Self::fts_match_pairs(&conn, query, block_type, include_benchmark)?
         } else {
-            Self::like_match_pairs(&conn, query, block_type)?
+            Self::like_match_pairs(&conn, query, block_type, include_benchmark)?
         };
         let hits = Self::dedupe_hits(rows, limit);
-        Self::build_results(&conn, &hits, query)
+        Self::build_results(&conn, &hits, query, include_benchmark)
     }
 
     /// FTS5 trigram path (queries >=3 chars): MATCH + bm25, ordered by rank.
@@ -1484,16 +1544,22 @@ impl EntryService {
         conn: &Connection,
         query: &str,
         block_type: Option<&str>,
+        include_benchmark: bool,
     ) -> Result<Vec<FtsRow>, CoreError> {
+        let visibility = if include_benchmark {
+            "1 = 1".to_string()
+        } else {
+            format!("NOT {BENCHMARK_ENTRY_PREDICATE}")
+        };
         let sql = match block_type {
             Some(_) => {
                 format!(
                     "SELECT f.entry_id, f.block_id, f.type, f.text, bm25(fts_blocks) AS rank
                             FROM fts_blocks f
                             JOIN entries e ON e.id = f.entry_id
-                            WHERE NOT {predicate} AND fts_blocks MATCH ?1 AND f.type = ?2
+                            WHERE {visibility} AND fts_blocks MATCH ?1 AND f.type = ?2
                             ORDER BY rank",
-                    predicate = BENCHMARK_ENTRY_PREDICATE,
+                    visibility = visibility,
                 )
             }
             None => {
@@ -1501,9 +1567,9 @@ impl EntryService {
                     "SELECT f.entry_id, f.block_id, f.type, f.text, bm25(fts_blocks) AS rank
                          FROM fts_blocks f
                          JOIN entries e ON e.id = f.entry_id
-                         WHERE NOT {predicate} AND fts_blocks MATCH ?1
+                         WHERE {visibility} AND fts_blocks MATCH ?1
                          ORDER BY rank",
-                    predicate = BENCHMARK_ENTRY_PREDICATE,
+                    visibility = visibility,
                 )
             }
         };
@@ -1535,7 +1601,13 @@ impl EntryService {
         conn: &Connection,
         query: &str,
         block_type: Option<&str>,
+        include_benchmark: bool,
     ) -> Result<Vec<FtsRow>, CoreError> {
+        let visibility = if include_benchmark {
+            "1 = 1".to_string()
+        } else {
+            format!("NOT {BENCHMARK_ENTRY_PREDICATE}")
+        };
         let escaped: String = query
             .chars()
             .flat_map(|c| match c {
@@ -1549,18 +1621,18 @@ impl EntryService {
                 format!(
                     "SELECT b.entry_id, b.id, b.type, b.text FROM blocks b
                             JOIN entries e ON e.id = b.entry_id
-                            WHERE NOT {predicate} AND LOWER(b.text) LIKE LOWER(?1) ESCAPE '\\' AND b.type = ?2
+                            WHERE {visibility} AND LOWER(b.text) LIKE LOWER(?1) ESCAPE '\\' AND b.type = ?2
                             ORDER BY b.rowid DESC",
-                    predicate = BENCHMARK_ENTRY_PREDICATE,
+                    visibility = visibility,
                 )
             }
             None => {
                 format!(
                     "SELECT b.entry_id, b.id, b.type, b.text FROM blocks b
                          JOIN entries e ON e.id = b.entry_id
-                         WHERE NOT {predicate} AND LOWER(b.text) LIKE LOWER(?1) ESCAPE '\\'
+                         WHERE {visibility} AND LOWER(b.text) LIKE LOWER(?1) ESCAPE '\\'
                          ORDER BY b.rowid DESC",
-                    predicate = BENCHMARK_ENTRY_PREDICATE,
+                    visibility = visibility,
                 )
             }
         };
@@ -1632,16 +1704,21 @@ impl EntryService {
         conn: &Connection,
         hits: &[DedupedHit],
         query: &str,
+        include_benchmark: bool,
     ) -> Result<Vec<FulltextSearchResult>, CoreError> {
         if hits.is_empty() {
             return Ok(Vec::new());
         }
         let mut results: Vec<FulltextSearchResult> = Vec::with_capacity(hits.len());
         for hit in hits {
+            let visibility = if include_benchmark {
+                "1 = 1".to_string()
+            } else {
+                format!("NOT {BENCHMARK_ENTRY_PREDICATE}")
+            };
             let sql = format!(
                 "SELECT id, title, tags, attrs, source, created_at, updated_at
-                 FROM entries e WHERE e.id = ?1 AND NOT {predicate}",
-                predicate = BENCHMARK_ENTRY_PREDICATE,
+                 FROM entries e WHERE e.id = ?1 AND {visibility}",
             );
             let entry = match conn.query_row(&sql, params![hit.entry_id.to_string()], |row| {
                 row_to_entry(row, 0)
@@ -2247,6 +2324,21 @@ mod tests {
         ));
         assert_eq!(chunks.list(temporary_block).unwrap().total, 0);
 
+        let visible = svc.get_with_benchmark(temporary.id).unwrap();
+        assert_eq!(visible.blocks.len(), 1);
+        let listed = svc
+            .list_with_benchmark(EntryListQuery {
+                include_blocks: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+        let listed_temporary = listed
+            .items
+            .iter()
+            .find(|entry| entry.id == temporary.id)
+            .unwrap();
+        assert_eq!(listed_temporary.blocks.len(), 1);
+
         let fulltext = svc.fulltext_search("marker", 10, None).unwrap();
         assert_eq!(fulltext.len(), 1);
         assert_eq!(fulltext[0].entry.id, ordinary.id);
@@ -2259,7 +2351,7 @@ mod tests {
         let deleted = svc.purge_benchmark_entries().unwrap();
         assert_eq!(deleted, vec![temporary.id]);
         assert!(svc.get(ordinary.id).is_ok());
-        assert!(svc.is_benchmark_entry(temporary.id).unwrap() == false);
+        assert!(!svc.is_benchmark_entry(temporary.id).unwrap());
 
         let event_count: i64 = svc
             .conn_for_test()
@@ -2338,8 +2430,13 @@ mod tests {
         svc.purge_transient(None, false).unwrap();
         let after = events.list(Default::default()).unwrap();
         assert_eq!(after.items.len() - before, 1);
-        let last_type = after.items[after.items.len() - 1].type_.clone();
-        assert_eq!(last_type, "entry.deleted");
+        assert!(
+            after
+                .items
+                .iter()
+                .skip(before)
+                .any(|event| event.type_ == "entry.deleted")
+        );
     }
 
     #[test]

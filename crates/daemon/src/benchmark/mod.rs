@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nomai_core::{BlockInput, CoreError, CreateEntry, EntryService};
-use nomai_providers::LlmProvider;
+use nomai_providers::{ChatMessage, CompletionRequest, LlmProvider, MessageRole};
 use serde::Serialize;
 use serde_json::Value;
 use ulid::Ulid;
@@ -44,6 +44,7 @@ pub(crate) struct StatusResult {
     pub active: bool,
     pub run_id: Option<String>,
     pub suite_id: Option<String>,
+    pub case_id: Option<String>,
     pub next_case_index: Option<usize>,
 }
 
@@ -58,8 +59,18 @@ struct ActiveRun {
 
 pub(crate) struct BenchmarkRuntime {
     catalog: BenchmarkCatalog,
+    baselines: Vec<baseline::BaselineFile>,
     entries: Arc<EntryService>,
     state: Mutex<Option<ActiveRun>>,
+    provider: Mutex<ProviderMetadata>,
+}
+
+#[derive(Default)]
+struct ProviderMetadata {
+    name: String,
+    base_url: String,
+    embedding_model: String,
+    llm_model: String,
 }
 
 impl BenchmarkRuntime {
@@ -67,15 +78,37 @@ impl BenchmarkRuntime {
         config: crate::config::DevelopmentConfig,
         entries: Arc<EntryService>,
     ) -> Result<Self, CoreError> {
+        let catalog = BenchmarkCatalog::load(&config)?;
+        let baselines = baseline::load_baselines(&config, &catalog)?;
         Ok(Self {
-            catalog: BenchmarkCatalog::load(&config)?,
+            catalog,
+            baselines,
             entries,
             state: Mutex::new(None),
+            provider: Mutex::new(ProviderMetadata::default()),
         })
+    }
+
+    pub(crate) fn set_provider_metadata(
+        &self,
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        embedding_model: impl Into<String>,
+        llm_model: impl Into<String>,
+    ) {
+        let mut provider = self.provider.lock().unwrap();
+        provider.name = name.into();
+        provider.base_url = base_url.into();
+        provider.embedding_model = embedding_model.into();
+        provider.llm_model = llm_model.into();
     }
 
     pub(crate) fn recover_stale_entries(&self) -> Result<Vec<Ulid>, CoreError> {
         self.entries.purge_benchmark_entries()
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.state.lock().unwrap().is_some()
     }
 
     pub(crate) fn start(&self, suite_id: &str) -> Result<StartResult, CoreError> {
@@ -178,42 +211,53 @@ impl BenchmarkRuntime {
                     .map(|value| extract_tool_results(method, value))
                     .unwrap_or_default(),
                 error: result.as_ref().err().map(ToString::to_string),
-                ..Default::default()
             });
     }
 
-    pub(crate) fn record_answer(
+    pub(crate) async fn record_answer(
         &self,
         run_id: &str,
         case_id: &str,
         answer: String,
-        _llm: &dyn LlmProvider,
+        llm: &dyn LlmProvider,
     ) -> Result<CaseReport, CoreError> {
+        let case = {
+            let mut state = self.state.lock().unwrap();
+            let active = active_run_mut(&mut state, run_id)?;
+            if !active.case_ids.iter().any(|id| id == case_id) {
+                return Err(CoreError::Validation(format!(
+                    "case is not part of benchmark run: {case_id}"
+                )));
+            }
+            self.catalog.case(case_id)?.clone()
+        };
+
+        let (judge_score, judge_error) = if case.answer.judge {
+            match run_judge(&case, &answer, llm).await {
+                Ok(score) => (Some(score), None),
+                Err(error) => (None, Some(error)),
+            }
+        } else {
+            (None, None)
+        };
+
         let mut state = self.state.lock().unwrap();
         let active = active_run_mut(&mut state, run_id)?;
-        if !active.case_ids.iter().any(|id| id == case_id) {
-            return Err(CoreError::Validation(format!(
-                "case is not part of benchmark run: {case_id}"
-            )));
-        }
         let trace = active.traces.entry(case_id.into()).or_default();
         trace.answer = Some(answer);
-        let case = self.catalog.case(case_id)?;
+        trace.judge_score = judge_score;
+        trace.judge_error = judge_error;
         let resolved = active
             .resolved
             .get(case_id)
             .ok_or_else(|| CoreError::Config("missing fixture mapping".into()))?;
         Ok(CaseReport {
             case_id: case_id.into(),
-            metrics: metrics::score_case(case, trace, resolved),
+            metrics: metrics::score_case(&case, trace, resolved),
         })
     }
 
-    pub(crate) fn finish(
-        &self,
-        run_id: &str,
-        _llm: &dyn LlmProvider,
-    ) -> Result<RunReport, CoreError> {
+    pub(crate) fn finish(&self, run_id: &str) -> Result<RunReport, CoreError> {
         let mut state = self.state.lock().unwrap();
         let active = state
             .take()
@@ -240,20 +284,29 @@ impl BenchmarkRuntime {
             *state = Some(active);
             return Err(error);
         }
-        Ok(RunReport {
+        let provider = self.provider.lock().unwrap();
+        let mut report = RunReport {
             metadata: RunMetadata {
                 schema_version: 1,
                 suite_id: active.suite_id,
                 case_ids: active.case_ids,
-                provider_name: String::new(),
-                provider_base_url: String::new(),
-                embedding_model: String::new(),
-                llm_model: String::new(),
+                provider_name: provider.name.clone(),
+                provider_base_url: provider.base_url.clone(),
+                embedding_model: provider.embedding_model.clone(),
+                llm_model: provider.llm_model.clone(),
             },
             summary: metrics::summarize(&reports),
             cases: reports,
             baseline_comparison: None,
-        })
+        };
+        if let Some(baseline) = self
+            .baselines
+            .iter()
+            .find(|baseline| baseline.suite_id == report.metadata.suite_id)
+        {
+            report.baseline_comparison = Some(baseline::compare_baseline(&report, baseline));
+        }
+        Ok(report)
     }
 
     pub(crate) fn abort(&self, run_id: &str) -> Result<AbortResult, CoreError> {
@@ -285,12 +338,17 @@ impl BenchmarkRuntime {
                 active: true,
                 run_id: Some(active.run_id.clone()),
                 suite_id: Some(active.suite_id.clone()),
+                case_id: active
+                    .next_case_index
+                    .checked_sub(1)
+                    .and_then(|index| active.case_ids.get(index).cloned()),
                 next_case_index: Some(active.next_case_index),
             },
             None => StatusResult {
                 active: false,
                 run_id: None,
                 suite_id: None,
+                case_id: None,
                 next_case_index: None,
             },
         }
@@ -390,6 +448,41 @@ fn extract_tool_results(method: &str, value: &Value) -> Vec<metrics::RetrievedRe
             .collect(),
         _ => Vec::new(),
     }
+}
+
+async fn run_judge(case: &CaseSpec, answer: &str, llm: &dyn LlmProvider) -> Result<f64, String> {
+    let response = llm
+        .complete(CompletionRequest {
+            system: Some(
+                "You are a benchmark judge. Compare the model answer to the reference answer. Return only a number from 0 to 1, where 1 is fully correct and 0 is incorrect.".into(),
+            ),
+            messages: vec![ChatMessage {
+                role: MessageRole::User,
+                content: format!(
+                    "Question:\n{}\n\nReference answer:\n{}\n\nModel answer:\n{}",
+                    case.question, case.answer.reference, answer
+                ),
+            }],
+            max_tokens: Some(16),
+            temperature: Some(0.0),
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let score = response
+        .content
+        .split_whitespace()
+        .find_map(|token| {
+            token
+                .trim_matches(|ch: char| !ch.is_ascii_digit() && ch != '.')
+                .parse::<f64>()
+                .ok()
+        })
+        .ok_or_else(|| "judge response did not contain a numeric score".to_string())?;
+    if !score.is_finite() || !(0.0..=1.0).contains(&score) {
+        return Err(format!("judge score out of range: {score}"));
+    }
+    Ok(score)
 }
 
 fn active_run_mut<'a>(
@@ -510,14 +603,25 @@ judge = false
         (root, entries, runtime, config)
     }
 
-    #[test]
-    fn runtime_loads_fixture_next_case_and_cleans_on_abort() {
+    #[tokio::test]
+    async fn runtime_loads_fixture_next_case_and_cleans_on_abort() {
         let (_root, entries, runtime, _config) = test_runtime();
         let start = runtime.start("suite-1").unwrap();
         assert_eq!(start.case_ids, vec!["case-1"]);
         assert_eq!(entries.list(Default::default()).unwrap().total, 0);
         let next = runtime.next_case(&start.run_id).unwrap();
         assert_eq!(next.question, "Which fixture should the model retrieve?");
+        let next_json = serde_json::to_value(&next).unwrap();
+        for key in [
+            "reference",
+            "relevant_entry_ids",
+            "relevant_block_ids",
+            "judge",
+            "baseline",
+            "fixtures",
+        ] {
+            assert!(next_json.get(key).is_none(), "gold field leaked: {key}");
+        }
         assert!(runtime.next_case(&start.run_id).is_err());
         assert!(runtime.start("suite-1").is_err());
 
@@ -529,6 +633,7 @@ judge = false
         );
         let report = runtime
             .record_answer(&start.run_id, "case-1", "fixture".into(), &NullLlm)
+            .await
             .unwrap();
         assert!(report.metrics.required_tools_success);
         let aborted = runtime.abort(&start.run_id).unwrap();
@@ -547,7 +652,7 @@ judge = false
         let deleted = recovered.recover_stale_entries().unwrap();
         assert_eq!(deleted.len(), 1);
         assert_eq!(entries.list(Default::default()).unwrap().total, 0);
-        assert!(start.run_id.len() > 0);
+        assert!(!start.run_id.is_empty());
     }
 
     #[test]

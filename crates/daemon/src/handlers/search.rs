@@ -141,6 +141,10 @@ impl RpcHandler for Fulltext {
         let query = p.query;
         let limit = p.limit;
         let block_type = p.block_type;
+        let include_benchmark = daemon
+            .benchmark
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_active());
         // Snapshot the strings we need inside the compute closure. `query`
         // is moved; `block_type` is cloned because we need to also pass an
         // `Option<&str>` to lookup_or_compute below.
@@ -158,7 +162,15 @@ impl RpcHandler for Fulltext {
                     let query_for_closure = query.clone();
                     async move {
                         let items_inner = blocking(move || {
-                            entries.fulltext_search(&query_for_closure, limit, bt.as_deref())
+                            if include_benchmark {
+                                entries.fulltext_search_with_benchmark(
+                                    &query_for_closure,
+                                    limit,
+                                    bt.as_deref(),
+                                )
+                            } else {
+                                entries.fulltext_search(&query_for_closure, limit, bt.as_deref())
+                            }
                         })
                         .await??;
                         // Map to JSON value items matching the existing wire
@@ -201,6 +213,10 @@ impl RpcHandler for Semantic {
         let query_str = p.query;
         let limit = p.limit;
         let block_type = p.block_type;
+        let include_benchmark = daemon
+            .benchmark
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_active());
         let bt_for_compute = block_type.clone();
 
         let cache = daemon.search_cache.clone();
@@ -224,7 +240,15 @@ impl RpcHandler for Semantic {
                             .next()
                             .ok_or_else(|| CoreError::Config("empty embedding response".into()))?;
                         let items_inner = blocking(move || {
-                            chunks.semantic_search(&qvec, limit as usize, bt.as_deref())
+                            if include_benchmark {
+                                chunks.semantic_search_with_benchmark(
+                                    &qvec,
+                                    limit as usize,
+                                    bt.as_deref(),
+                                )
+                            } else {
+                                chunks.semantic_search(&qvec, limit as usize, bt.as_deref())
+                            }
                         })
                         .await??;
                         Ok(items_inner

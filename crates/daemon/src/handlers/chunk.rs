@@ -34,7 +34,18 @@ impl RpcHandler for Get {
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
         let chunks: std::sync::Arc<ChunkService> = daemon.chunks.clone();
-        let chunk = blocking(move || chunks.get(p.id)).await??;
+        let include_benchmark = daemon
+            .benchmark
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_active());
+        let chunk = blocking(move || {
+            if include_benchmark {
+                chunks.get_with_benchmark(p.id)
+            } else {
+                chunks.get(p.id)
+            }
+        })
+        .await??;
 
         serde_json::to_value(&chunk).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
@@ -66,7 +77,18 @@ impl RpcHandler for List {
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
         let chunks = daemon.chunks.clone();
-        let result = blocking(move || chunks.list(p.block_id)).await??;
+        let include_benchmark = daemon
+            .benchmark
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_active());
+        let result = blocking(move || {
+            if include_benchmark {
+                chunks.list_with_benchmark(p.block_id)
+            } else {
+                chunks.list(p.block_id)
+            }
+        })
+        .await??;
 
         Ok(json!({
             "items": result.items,

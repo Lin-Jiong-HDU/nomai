@@ -10,6 +10,7 @@ pub(crate) struct CaseTrace {
     pub tool_traces: Vec<ToolTrace>,
     pub answer: Option<String>,
     pub judge_score: Option<f64>,
+    pub judge_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -46,6 +47,7 @@ pub(crate) struct CaseMetrics {
     pub latency_ms_total: u64,
     pub latency_ms_average: u64,
     pub judge_score: Option<f64>,
+    pub judge_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,13 +124,13 @@ pub(crate) fn score_case(
         .collect();
     let top_k = ranked.iter().take(case.retrieval.k as usize);
     let relevant_in_top_k: HashSet<String> = top_k
-        .filter_map(|result| relevant_key(result, &relevant_entries, &relevant_blocks))
+        .flat_map(|result| relevant_keys(result, &relevant_entries, &relevant_blocks))
         .collect();
     let relevant_count = relevant_entries.len() + relevant_blocks.len();
 
     let first_relevant_rank = ranked
         .iter()
-        .position(|result| relevant_key(result, &relevant_entries, &relevant_blocks).is_some());
+        .position(|result| !relevant_keys(result, &relevant_entries, &relevant_blocks).is_empty());
     let hit_at_k = if relevant_in_top_k.is_empty() {
         0.0
     } else {
@@ -192,6 +194,7 @@ pub(crate) fn score_case(
         latency_ms_total,
         latency_ms_average,
         judge_score: trace.judge_score,
+        judge_error: trace.judge_error.clone(),
     }
 }
 
@@ -260,23 +263,23 @@ fn is_evidence_method(method: &str) -> bool {
     matches!(method, "entry.get" | "block.get")
 }
 
-fn relevant_key(
+fn relevant_keys(
     result: &RetrievedResult,
     relevant_entries: &HashSet<String>,
     relevant_blocks: &HashSet<String>,
-) -> Option<String> {
-    result
-        .entry_id
-        .as_ref()
-        .filter(|id| relevant_entries.contains(*id))
-        .cloned()
-        .or_else(|| {
-            result
-                .block_id
-                .as_ref()
-                .filter(|id| relevant_blocks.contains(*id))
-                .cloned()
-        })
+) -> Vec<String> {
+    let mut keys = Vec::with_capacity(2);
+    if let Some(entry_id) = &result.entry_id
+        && relevant_entries.contains(entry_id)
+    {
+        keys.push(entry_id.clone());
+    }
+    if let Some(block_id) = &result.block_id
+        && relevant_blocks.contains(block_id)
+    {
+        keys.push(block_id.clone());
+    }
+    keys
 }
 
 fn ndcg_binary(
@@ -289,7 +292,7 @@ fn ndcg_binary(
         .iter()
         .take(k)
         .enumerate()
-        .filter(|(_, result)| relevant_key(result, relevant_entries, relevant_blocks).is_some())
+        .filter(|(_, result)| !relevant_keys(result, relevant_entries, relevant_blocks).is_empty())
         .map(|(rank, _)| 1.0 / (rank as f64 + 2.0).log2())
         .sum();
     let relevant_count = relevant_entries.len() + relevant_blocks.len();
@@ -303,7 +306,9 @@ fn ndcg_binary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::benchmark::cases::{AnswerSpec, CaseSpec, FixtureEntrySpec, RetrievalSpec};
+    use crate::benchmark::cases::{
+        AnswerSpec, CaseSpec, FixtureBlockSpec, FixtureEntrySpec, RetrievalSpec,
+    };
 
     fn id(value: u128) -> Ulid {
         Ulid::from(value)
@@ -407,6 +412,60 @@ mod tests {
     }
 
     #[test]
+    fn a_search_result_can_hit_relevant_entry_and_block_ids() {
+        let entry = id(1);
+        let block = id(2);
+        let case = CaseSpec {
+            id: "case".into(),
+            question: "question".into(),
+            fixtures: vec![FixtureEntrySpec {
+                id: entry,
+                title: "entry".into(),
+                tags: vec![],
+                attrs: serde_json::json!({}),
+                blocks: vec![FixtureBlockSpec {
+                    id: block,
+                    block_type: "note".into(),
+                    text: "text".into(),
+                    attrs: serde_json::json!({}),
+                }],
+            }],
+            retrieval: RetrievalSpec {
+                required_tools: vec!["search.fulltext".into()],
+                relevant_entry_ids: vec![entry],
+                relevant_block_ids: vec![block],
+                k: 5,
+            },
+            answer: AnswerSpec {
+                reference: "answer".into(),
+                judge: false,
+            },
+        };
+        let resolved = ResolvedFixtureIds {
+            entries: HashMap::from([(entry, id(11))]),
+            blocks: HashMap::from([(block, id(22))]),
+        };
+        let trace = CaseTrace {
+            tool_traces: vec![ToolTrace {
+                method: "search.fulltext".into(),
+                ok: true,
+                results: vec![RetrievedResult {
+                    entry_id: Some(id(11).to_string()),
+                    block_id: Some(id(22).to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let metrics = score_case(&case, &trace, &resolved);
+        assert_eq!(metrics.hit_at_k, 1.0);
+        assert_eq!(metrics.recall_at_k, 1.0);
+        assert!(metrics.ndcg > 0.0);
+    }
+
+    #[test]
     fn summarizes_case_metrics_as_numeric_baseline_values() {
         let metrics = CaseMetrics {
             hit_at_k: 1.0,
@@ -419,6 +478,7 @@ mod tests {
             latency_ms_total: 30,
             latency_ms_average: 15,
             judge_score: Some(0.8),
+            judge_error: None,
         };
         let summary = summarize(&[CaseReport {
             case_id: "case".into(),

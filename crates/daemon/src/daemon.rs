@@ -227,6 +227,14 @@ impl Daemon {
         } else {
             None
         };
+        if let Some(runtime) = &benchmark {
+            runtime.set_provider_metadata(
+                "openai",
+                config.embedding.base_url.clone(),
+                config.embedding.model.clone(),
+                config.llm.model.clone(),
+            );
+        }
         let daemon = Self {
             config: Some(config.clone()),
             entries,
@@ -446,6 +454,51 @@ impl Daemon {
             handlers,
             restart_slot: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Construct a lib-mode daemon with the development benchmark capability
+    /// explicitly enabled. The existing `from_services` constructor remains
+    /// benchmark-disabled for compatibility and least surprise.
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_services_with_development(
+        conn: Arc<std::sync::Mutex<Connection>>,
+        content_store: Arc<ContentStore>,
+        embedder: Arc<dyn EmbeddingProvider>,
+        llm: Arc<dyn LlmProvider>,
+        embedding_dim: usize,
+        chunk_target_size: usize,
+        cache_model: impl Into<String>,
+        warn_rows: u64,
+        attachment_max_bytes: usize,
+        development: crate::config::DevelopmentConfig,
+    ) -> Result<Self, CoreError> {
+        let mut daemon = Self::from_services(
+            conn,
+            content_store,
+            embedder,
+            llm,
+            embedding_dim,
+            chunk_target_size,
+            cache_model,
+            warn_rows,
+            attachment_max_bytes,
+        )?;
+        if development.enabled {
+            let runtime = Arc::new(crate::benchmark::BenchmarkRuntime::new(
+                development,
+                daemon.entries.clone(),
+            )?);
+            runtime.set_provider_metadata(
+                "test",
+                "",
+                daemon.embedding_model.clone(),
+                daemon.llm_model.clone(),
+            );
+            daemon.benchmark = Some(runtime);
+            daemon.handlers = crate::handlers::registry_with_benchmark(true);
+        }
+        Ok(daemon)
     }
 
     /// Spec §9.1: sync FS → index at startup AND re-embed chunks of changed

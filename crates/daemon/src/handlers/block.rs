@@ -285,9 +285,20 @@ impl RpcHandler for List {
 
         let entries: Arc<EntryService> = daemon.entries.clone();
         let entry_id = p.entry_id;
+        let include_benchmark = daemon
+            .benchmark
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_active());
         let result = {
             let entries = entries.clone();
-            blocking(move || entries.block_service().list(entry_id)).await??
+            blocking(move || {
+                if include_benchmark {
+                    entries.block_service().list_with_benchmark(entry_id)
+                } else {
+                    entries.block_service().list(entry_id)
+                }
+            })
+            .await??
         };
 
         Ok(json!({
@@ -322,9 +333,20 @@ impl RpcHandler for Get {
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
         let entries: Arc<EntryService> = daemon.entries.clone();
         let id = p.id;
+        let include_benchmark = daemon
+            .benchmark
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_active());
         let block = {
             let entries = entries.clone();
-            blocking(move || entries.block_service().get(id)).await??
+            blocking(move || {
+                if include_benchmark {
+                    entries.block_service().get_with_benchmark(id)
+                } else {
+                    entries.block_service().get(id)
+                }
+            })
+            .await??
         };
         serde_json::to_value(&block).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
