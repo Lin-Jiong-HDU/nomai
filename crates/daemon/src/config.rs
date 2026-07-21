@@ -272,6 +272,9 @@ mod tests {
         unsafe { std::env::set_var("TEST_OPENAI_KEY", "sk-test") };
 
         let toml_text = r#"
+[data]
+db_path = "/tmp/test.sqlite"
+
 [embedding]
 base_url = "https://api.openai.com/v1"
 api_key_env = "TEST_OPENAI_KEY"
@@ -306,8 +309,7 @@ model = "gpt-4o-mini"
     #[test]
     fn parses_minimal_config() {
         let _guard = lock();
-        let mut config = parse_test_config_without_development();
-        config.data.db_path = PathBuf::from("/tmp/test.sqlite");
+        let config = parse_test_config_without_development();
         assert_eq!(config.embedding.dim, 1536);
         assert_eq!(config.llm.model, "gpt-4o-mini");
         assert_eq!(config.data.db_path, PathBuf::from("/tmp/test.sqlite"));
