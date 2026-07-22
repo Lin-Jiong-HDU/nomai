@@ -11,6 +11,7 @@ For project overview and install, see the [README](../README.md) first.
 ## Table of contents
 
 - [Transport: how to talk to the daemon](#transport)
+- [Development benchmark workflow](#development-benchmark-workflow)
 - [The five primitives](#the-five-primitives)
   - [Entry](#entry)
   - [Block](#block)
@@ -46,6 +47,67 @@ For long-lived clients, open the daemon as a subprocess and keep stdin/stdout pi
 **Notifications**: requests without an `id` field are notifications — daemon processes them but writes no response.
 
 For the full method list with params and return shapes, see the [RPC reference](reference.md#rpc-reference).
+
+---
+
+## Development benchmark workflow
+
+The daemon includes an optional benchmark workflow for evaluating retrieval
+and tool-use behavior against Git-tracked cases. It is a measurement harness,
+not an agent runner: the model or client owns the loop and must call the real
+search and evidence RPCs.
+
+### Enabling benchmark tools
+
+Benchmark tools are disabled by default. Enable them in the daemon config:
+
+```toml
+[development]
+enabled = true
+benchmark_cases_dir = "/Users/johnlin/Dev/rust/nomai-kb/benchmark/cases"
+benchmark_suites_dir = "/Users/johnlin/Dev/rust/nomai-kb/benchmark/suites"
+benchmark_baselines_dir = "/Users/johnlin/Dev/rust/nomai-kb/benchmark/baselines"
+```
+
+The three configured paths must exist when the daemon starts. Cases, suites,
+and baselines are read from those directories; baselines are read-only and
+the daemon never writes benchmark files.
+
+`development.enabled` is a startup setting. After changing it, rerun the
+relevant MCP installer so the client registration uses the intended config
+path, then restart the MCP client and daemon. The setting is not hot-reloaded.
+When it is `false`, benchmark methods are not registered, do not appear in
+`tools/list`, and direct calls return `-32601` (Method not found).
+
+### Model-controlled run
+
+The expected sequence is:
+
+```text
+benchmark.start
+  -> benchmark.next_case
+  -> search.semantic or search.fulltext
+  -> entry.get or block.get when evidence is needed
+  -> benchmark.record_answer
+  -> benchmark.next_case ...
+  -> benchmark.finish
+```
+
+`benchmark.next_case` is the only source of the question. Its response does
+not include the reference answer, relevant entry/block IDs, rubric, fixture
+body, or baseline data. The client should record only its answer with
+`benchmark.record_answer`; it must not inspect the Git case or baseline files.
+
+`benchmark.start` loads each case fixture as a temporary benchmark entry and
+embeds it before returning. The daemon records calls to the search and
+evidence RPCs during the active case. `benchmark.finish` returns per-case and
+summary retrieval metrics plus a comparison with the matching read-only
+baseline. Use `benchmark.abort` if a run cannot be completed. Both finish and
+abort remove temporary fixtures; the daemon also removes stale benchmark
+fixtures left by an interrupted process during startup recovery.
+
+See the [benchmark RPC reference](reference.md#benchmark-methods) for exact
+parameters, return shapes, and metrics.
 
 ---
 

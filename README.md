@@ -49,8 +49,8 @@ echo '{"jsonrpc":"2.0","id":1,"method":"entry.create","params":{"title":"Hello",
 
 ## Documentation
 
-- **[docs/guide.md](docs/guide.md)** — Concepts: transport, the five primitives, storage model.
-- **[docs/reference.md](docs/reference.md)** — Full RPC reference, error codes, configuration.
+- **[docs/guide.md](docs/guide.md)** — Concepts: transport, the five primitives, storage model, and the development benchmark workflow.
+- **[docs/reference.md](docs/reference.md)** — Full RPC reference, benchmark methods, error codes, and configuration.
 - **[docs/lib.md](docs/lib.md)** — Embedding nomai as a Rust library (lib mode, custom RPCs).
 
 Examples live in `crates/daemon/examples/` — RAG, GraphRAG, custom RPCs, incremental sync, and more. Run with `cargo run --example <name>`.

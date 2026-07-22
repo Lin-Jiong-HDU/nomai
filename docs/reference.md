@@ -18,6 +18,7 @@ Complete reference for the JSON-RPC API, error codes, configuration, and cache i
   - [batch.\*](#batch)
   - [cache.\*](#cache)
   - [sync.\*](#sync-methods)
+- [benchmark.\*](#benchmark-methods)
   - [MCP lifecycle](#mcp)
 - [Error codes](#error-codes)
 - [Configuration](#configuration)
@@ -260,6 +261,58 @@ than misreporting a conflict.
 
 ---
 
+### benchmark.{#benchmark-methods}
+
+These are development-only benchmark lifecycle methods. They are registered
+only when [development].enabled = true. Otherwise they are absent from
+tools/list and direct calls return -32601. Benchmark catalog files are loaded
+from the configured case, suite, and baseline directories at daemon startup.
+The catalog and baselines are read-only Git artifacts.
+
+| Method | Params | Returns | Notes |
+| --- | --- | --- | --- |
+| benchmark.start | suite_id | {run_id, suite_id, case_count, provider: {name, embedding_model, llm_model}} | Starts one run, loads and embeds temporary fixtures, and rejects a second active run. |
+| benchmark.next_case | run_id | {run_id, case_id, question} | Advances in suite order. Does not expose the reference answer, relevant IDs, rubric, fixture body, or baseline. Returns 1003 when the run is invalid or exhausted. |
+| benchmark.record_answer | run_id, case_id, answer | {case_id, metrics} | Records the model answer and returns metrics for the current case. If the case enables judging, the configured LLM produces an optional judge_score. |
+| benchmark.finish | run_id | RunReport plus run_id | Scores all cases, compares the matching read-only baseline when available, removes temporary fixtures, and returns the run report. |
+| benchmark.abort | run_id | {run_id, aborted: true, deleted_entry_count} | Aborts the run and removes all temporary fixtures. |
+| benchmark.status | {} | {enabled: true, run_id, case_id, state: "running" or "idle"} | Reports the active run state; run_id and case_id are null while idle. |
+
+benchmark.next_case is the only model-visible source of benchmark questions.
+The daemon records these calls while a case is active:
+search.semantic, search.fulltext, entry.get, and block.get. Search results
+are scored from their returned ranking; evidence calls are scored separately,
+so retrieving the right entry does not by itself satisfy a required
+search-tool constraint.
+
+The metrics object contains the following per-case fields:
+
+| Field | Meaning |
+| --- | --- |
+| hit_at_k | 1 when at least one relevant entry/block is in the top k, otherwise 0. |
+| recall_at_k | Relevant entries found in the top k divided by all relevant entries. |
+| precision_at_k | Relevant returned results divided by the number of results actually returned in the top k. |
+| mrr | Reciprocal rank of the first relevant result, or 0. |
+| ndcg | Binary relevance nDCG over the ranked results and case k. |
+| required_tools_success | Whether every tool named by the case completed successfully. |
+| evidence_entry_hit | Whether a successful entry.get/block.get returned a relevant fixture. |
+| search_call_count | Number of recorded search calls. |
+| latency_ms_total, latency_ms_average | Recorded tool-call latency in milliseconds. |
+| judge_score, judge_error | Optional LLM judge result or failure message. |
+
+The run report contains metadata, one cases item per suite case, a summary
+containing averages/aggregates, and an optional baseline_comparison with
+compatible, metric deltas, and threshold violations. A baseline is
+incompatible when its schema, suite/case order, provider, endpoint, or model
+metadata differs from the current run; such a comparison must not be treated
+as a retrieval regression.
+
+Temporary benchmark entries are hidden from normal retrieval when no
+benchmark run is active, and are purged on finish, abort, or daemon startup
+recovery. Cleanup does not modify the Git catalog or baseline files.
+
+---
+
 ### MCP lifecycle{#mcp}
 
 nomai is a native MCP (Model Context Protocol) server. Any MCP-compatible client (Claude Desktop, Cursor, etc.) can connect via stdio and call all RPCs as tools.
@@ -340,6 +393,12 @@ warn_rows   = 100000            # soft cap; cache.stats returns warning=true abo
 
 [chunking]
 target_size = 1024              # chunk char budget; paragraph → sentence → hard cut
+
+[development]
+enabled = false                 # exposes benchmark.* only when true
+benchmark_cases_dir = "benchmark/cases"
+benchmark_suites_dir = "benchmark/suites"
+benchmark_baselines_dir = "benchmark/baselines"
 ```
 
 **API keys are referenced by env var name**, never stored in the config file. Set the env vars in your shell:
@@ -354,6 +413,13 @@ set -Ux NOMAI_LLM_API_KEY "sk-..."
 **Changing `chunking.target_size`**: takes effect on the next `entry.create` / `block.append` / `block.update`. Existing chunks keep the old size until you run `index.rebuild` (which re-derives chunks from `.nomai` files). Mixed sizes within a knowledge base are fine for retrieval but cause KNN distance variance — prefer one size per deployment.
 
 **Compatible endpoints**: any OpenAI-compatible `/v1/embeddings` and `/v1/chat/completions` endpoint works — OpenAI, DeepSeek, Moonshot, local Ollama, etc.
+
+**Development benchmark settings**: development.enabled defaults to false.
+When enabled, all three benchmark directories must already exist at daemon
+startup. The setting is read once at startup; rerun the MCP installer with
+the selected config path and restart the client/daemon after changing it.
+The daemon does not create cases, suites, baselines, or benchmark reports in
+those directories.
 
 ---
 

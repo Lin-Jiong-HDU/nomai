@@ -127,6 +127,11 @@ See `crates/daemon/examples/` for complete working examples:
 
 ---
 
+The development benchmark workflow is daemon/config based and is not enabled
+by Daemon::from_services or DaemonBuilder. Use a configured nomai-daemon with
+the benchmark MCP handlers for end-to-end benchmark runs; lib mode remains
+the lower-level embedding and RPC composition API.
+
 ## Embedding in lib mode
 
 `EntryService::create` writes the entry + emits the event, but does **not** call the embedding provider (that's daemon-layer orchestration). You must call `entries.write_embedding(id, &vec)` yourself after creating. Same for `chunks.write_embedding`. The `nomai-providers` crate provides the `EmbeddingProvider` trait and an OpenAI-compatible implementation.
