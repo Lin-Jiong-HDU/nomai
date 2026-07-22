@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Development-gated benchmark workflow.** When
+  `[development].enabled = true`, the daemon exposes benchmark lifecycle
+  tools driven by `benchmark.next_case`, records the model's real search and
+  evidence-tool calls, and reports retrieval metrics including entry recall,
+  precision@k, MRR, and nDCG. Git-tracked cases, suites, and read-only
+  baselines are loaded from the configured catalog; benchmark fixtures are
+  cleaned up when a run finishes, aborts, or is recovered at startup.
+
 ### Fixed
 
 - **Startup-sync now re-embeds chunks.** The boot-time FS → index
