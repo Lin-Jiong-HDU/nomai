@@ -1504,8 +1504,9 @@ impl EntryService {
         query: &str,
         limit: u32,
         block_type: Option<&str>,
+        tag: Option<&str>,
     ) -> Result<Vec<FulltextSearchResult>, CoreError> {
-        self.fulltext_search_visible(query, limit, block_type, false)
+        self.fulltext_search_visible(query, limit, block_type, tag, false)
     }
 
     /// Fulltext search including active benchmark fixtures. The daemon only
@@ -1515,8 +1516,9 @@ impl EntryService {
         query: &str,
         limit: u32,
         block_type: Option<&str>,
+        tag: Option<&str>,
     ) -> Result<Vec<FulltextSearchResult>, CoreError> {
-        self.fulltext_search_visible(query, limit, block_type, true)
+        self.fulltext_search_visible(query, limit, block_type, tag, true)
     }
 
     fn fulltext_search_visible(
@@ -1524,6 +1526,7 @@ impl EntryService {
         query: &str,
         limit: u32,
         block_type: Option<&str>,
+        tag: Option<&str>,
         include_benchmark: bool,
     ) -> Result<Vec<FulltextSearchResult>, CoreError> {
         let conn = self.conn.lock().unwrap();
@@ -1531,9 +1534,9 @@ impl EntryService {
         // direct FTS5 query (or LIKE for short queries), aggregate per entry
         // in `dedupe_hits`, then fetch entry rows + build snippets.
         let rows = if query.chars().count() >= 3 {
-            Self::fts_match_pairs(&conn, query, block_type, include_benchmark)?
+            Self::fts_match_pairs(&conn, query, block_type, tag, include_benchmark)?
         } else {
-            Self::like_match_pairs(&conn, query, block_type, include_benchmark)?
+            Self::like_match_pairs(&conn, query, block_type, tag, include_benchmark)?
         };
         let hits = Self::dedupe_hits(rows, limit);
         Self::build_results(&conn, &hits, query, include_benchmark)
@@ -1544,6 +1547,7 @@ impl EntryService {
         conn: &Connection,
         query: &str,
         block_type: Option<&str>,
+        tag: Option<&str>,
         include_benchmark: bool,
     ) -> Result<Vec<FtsRow>, CoreError> {
         let visibility = if include_benchmark {
@@ -1551,15 +1555,20 @@ impl EntryService {
         } else {
             format!("NOT {BENCHMARK_ENTRY_PREDICATE}")
         };
+        let tag_clause = match tag {
+            Some(_) => " AND EXISTS (SELECT 1 FROM json_each(e.tags) j WHERE j.value = ?)",
+            None => "",
+        };
         let sql = match block_type {
             Some(_) => {
                 format!(
                     "SELECT f.entry_id, f.block_id, f.type, f.text, bm25(fts_blocks) AS rank
                             FROM fts_blocks f
                             JOIN entries e ON e.id = f.entry_id
-                            WHERE {visibility} AND fts_blocks MATCH ?1 AND f.type = ?2
+                            WHERE {visibility} AND fts_blocks MATCH ? AND f.type = ?{tag_clause}
                             ORDER BY rank",
                     visibility = visibility,
+                    tag_clause = tag_clause,
                 )
             }
             None => {
@@ -1567,9 +1576,10 @@ impl EntryService {
                     "SELECT f.entry_id, f.block_id, f.type, f.text, bm25(fts_blocks) AS rank
                          FROM fts_blocks f
                          JOIN entries e ON e.id = f.entry_id
-                         WHERE {visibility} AND fts_blocks MATCH ?1
+                         WHERE {visibility} AND fts_blocks MATCH ?{tag_clause}
                          ORDER BY rank",
                     visibility = visibility,
+                    tag_clause = tag_clause,
                 )
             }
         };
@@ -1583,14 +1593,16 @@ impl EntryService {
                 rank: r.get(4)?,
             })
         };
-        let rows = match block_type {
-            Some(t) => stmt
-                .query_map(params![query, t], map_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?,
-            None => stmt
-                .query_map(params![query], map_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?,
-        };
+        let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&query];
+        if let Some(t) = block_type.as_ref() {
+            binds.push(t);
+        }
+        if let Some(tg) = tag.as_ref() {
+            binds.push(tg);
+        }
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(binds.iter()), map_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
@@ -1601,6 +1613,7 @@ impl EntryService {
         conn: &Connection,
         query: &str,
         block_type: Option<&str>,
+        tag: Option<&str>,
         include_benchmark: bool,
     ) -> Result<Vec<FtsRow>, CoreError> {
         let visibility = if include_benchmark {
@@ -1616,23 +1629,29 @@ impl EntryService {
             })
             .collect();
         let pattern = format!("%{escaped}%");
+        let tag_clause = match tag {
+            Some(_) => " AND EXISTS (SELECT 1 FROM json_each(e.tags) j WHERE j.value = ?)",
+            None => "",
+        };
         let sql = match block_type {
             Some(_) => {
                 format!(
                     "SELECT b.entry_id, b.id, b.type, b.text FROM blocks b
                             JOIN entries e ON e.id = b.entry_id
-                            WHERE {visibility} AND LOWER(b.text) LIKE LOWER(?1) ESCAPE '\\' AND b.type = ?2
+                            WHERE {visibility} AND LOWER(b.text) LIKE LOWER(?) ESCAPE '\\' AND b.type = ?{tag_clause}
                             ORDER BY b.rowid DESC",
                     visibility = visibility,
+                    tag_clause = tag_clause,
                 )
             }
             None => {
                 format!(
                     "SELECT b.entry_id, b.id, b.type, b.text FROM blocks b
                          JOIN entries e ON e.id = b.entry_id
-                         WHERE {visibility} AND LOWER(b.text) LIKE LOWER(?1) ESCAPE '\\'
+                         WHERE {visibility} AND LOWER(b.text) LIKE LOWER(?) ESCAPE '\\'{tag_clause}
                          ORDER BY b.rowid DESC",
                     visibility = visibility,
+                    tag_clause = tag_clause,
                 )
             }
         };
@@ -1646,14 +1665,16 @@ impl EntryService {
                 rank: 0.0,
             })
         };
-        let rows = match block_type {
-            Some(t) => stmt
-                .query_map(params![pattern, t], map_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?,
-            None => stmt
-                .query_map(params![pattern], map_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?,
-        };
+        let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&pattern];
+        if let Some(t) = block_type.as_ref() {
+            binds.push(t);
+        }
+        if let Some(tg) = tag.as_ref() {
+            binds.push(tg);
+        }
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(binds.iter()), map_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
@@ -2339,7 +2360,7 @@ mod tests {
             .unwrap();
         assert_eq!(listed_temporary.blocks.len(), 1);
 
-        let fulltext = svc.fulltext_search("marker", 10, None).unwrap();
+        let fulltext = svc.fulltext_search("marker", 10, None, None).unwrap();
         assert_eq!(fulltext.len(), 1);
         assert_eq!(fulltext[0].entry.id, ordinary.id);
         let semantic = chunks.semantic_search(&vec![1.0; 1536], 10, None).unwrap();
@@ -2624,7 +2645,7 @@ mod tests {
         })
         .unwrap();
 
-        let hits = svc.fulltext_search("rust", 10, None).unwrap();
+        let hits = svc.fulltext_search("rust", 10, None, None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].entry.title, "Rust guide");
         assert!(hits[0].score > 0.0);
@@ -2635,7 +2656,7 @@ mod tests {
         let svc = EntryService::for_test().unwrap();
         seed(&svc, "t", vec![]);
         let hits = svc
-            .fulltext_search("nonexistentterm12345", 10, None)
+            .fulltext_search("nonexistentterm12345", 10, None, None)
             .unwrap();
         assert!(hits.is_empty());
     }
@@ -2658,7 +2679,7 @@ mod tests {
         svc.delete(id).unwrap();
         assert!(svc.get(id).is_err());
 
-        let hits = svc.fulltext_search("needle", 10, None).unwrap();
+        let hits = svc.fulltext_search("needle", 10, None, None).unwrap();
         assert!(hits.iter().all(|h| h.entry.id != id));
     }
 
@@ -2691,22 +2712,90 @@ mod tests {
         .unwrap();
 
         // Unfiltered: matches the entry.
-        let hits = svc.fulltext_search("orbit", 10, None).unwrap();
+        let hits = svc.fulltext_search("orbit", 10, None, None).unwrap();
         assert_eq!(hits.len(), 1);
 
         // Filter to note only: still matches the entry (note block contains "orbit").
-        let hits_note = svc.fulltext_search("orbit", 10, Some("note")).unwrap();
+        let hits_note = svc.fulltext_search("orbit", 10, Some("note"), None).unwrap();
         assert_eq!(hits_note.len(), 1);
 
         // Filter to claim only: under the trigram tokenizer (V10), "orbit"
         // shares 3-grams (orb/rbi/bit) with "orbits" in the claim block, so
         // the claim also matches — the filter still narrows to claim blocks.
-        let hits_claim = svc.fulltext_search("orbit", 10, Some("claim")).unwrap();
+        let hits_claim = svc.fulltext_search("orbit", 10, Some("claim"), None).unwrap();
         assert_eq!(hits_claim.len(), 1);
 
         // Filter to evidence: no match.
-        let hits_none = svc.fulltext_search("orbit", 10, Some("evidence")).unwrap();
+        let hits_none = svc.fulltext_search("orbit", 10, Some("evidence"), None).unwrap();
         assert!(hits_none.is_empty());
+    }
+
+    #[test]
+    fn fulltext_search_filters_by_tag() {
+        let svc = EntryService::for_test().unwrap();
+        // 三个 entry，文本都含 "orbit"，但 tag 不同。
+        svc.create(CreateEntry {
+            title: "alpha".into(),
+            blocks: vec![crate::block_model::BlockInput {
+                r#type: "note".into(),
+                text: "orbit dynamics".into(),
+                attrs: None,
+            }],
+            tags: Some(vec!["alpha".into(), "shared".into()]),
+            attrs: None,
+            source: None,
+            attachments: None,
+        })
+        .unwrap();
+        svc.create(CreateEntry {
+            title: "beta".into(),
+            blocks: vec![crate::block_model::BlockInput {
+                r#type: "note".into(),
+                text: "orbit dynamics".into(),
+                attrs: None,
+            }],
+            tags: Some(vec!["beta".into()]),
+            attrs: None,
+            source: None,
+            attachments: None,
+        })
+        .unwrap();
+        svc.create(CreateEntry {
+            title: "notags".into(),
+            blocks: vec![crate::block_model::BlockInput {
+                r#type: "note".into(),
+                text: "orbit dynamics".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: None,
+            source: None,
+            attachments: None,
+        })
+        .unwrap();
+
+        // tag=alpha → 只命中 alpha（trigram 路径，≥3 char）
+        let hits = svc.fulltext_search("orbit", 10, None, Some("alpha")).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry.title, "alpha");
+
+        // tag=shared → alpha 仍命中（多 tag entry，过滤其一即可）
+        let shared = svc.fulltext_search("orbit", 10, None, Some("shared")).unwrap();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].entry.title, "alpha");
+
+        // tag 不存在 → 空
+        let none = svc.fulltext_search("orbit", 10, None, Some("zzz")).unwrap();
+        assert!(none.is_empty());
+
+        // tag=None → 全部 3 个（行为如初）
+        let all = svc.fulltext_search("orbit", 10, None, None).unwrap();
+        assert_eq!(all.len(), 3);
+
+        // LIKE 路径（<3 char）也走 tag 过滤
+        let short = svc.fulltext_search("or", 10, None, Some("alpha")).unwrap();
+        assert_eq!(short.len(), 1);
+        assert_eq!(short[0].entry.title, "alpha");
     }
 
     #[test]
@@ -2725,7 +2814,7 @@ mod tests {
             attachments: None,
         })
         .unwrap();
-        let hits = svc.fulltext_search("Nomai 文化", 10, None).unwrap();
+        let hits = svc.fulltext_search("Nomai 文化", 10, None, None).unwrap();
         assert_eq!(hits.len(), 1, "trigram should match the Chinese phrase");
     }
 
@@ -2746,7 +2835,7 @@ mod tests {
         })
         .unwrap();
         // "入门" is 2 chars — trigram returns empty; LIKE must catch it.
-        let hits = svc.fulltext_search("入门", 10, None).unwrap();
+        let hits = svc.fulltext_search("入门", 10, None, None).unwrap();
         assert_eq!(hits.len(), 1, "2-char query falls back to LIKE");
     }
 
@@ -2766,7 +2855,7 @@ mod tests {
             attachments: None,
         })
         .unwrap();
-        let hits = svc.fulltext_search("Rust", 10, None).unwrap();
+        let hits = svc.fulltext_search("Rust", 10, None, None).unwrap();
         assert_eq!(hits.len(), 1, "English >=3 chars matches via trigram");
     }
 
@@ -2794,13 +2883,13 @@ mod tests {
         })
         .unwrap();
         // >=3 char path with block_type filter: "keyword" is in the claim block.
-        let claims = svc.fulltext_search("keyword", 10, Some("claim")).unwrap();
+        let claims = svc.fulltext_search("keyword", 10, Some("claim"), None).unwrap();
         assert_eq!(claims.len(), 1);
         // <3 char path with block_type filter to a type that has no block.
         // "sh" is in both blocks; filtering to "evidence" (no such block)
         // must return empty — proves the filter is applied on the LIKE path,
         // not ignored.
-        let none = svc.fulltext_search("sh", 10, Some("evidence")).unwrap();
+        let none = svc.fulltext_search("sh", 10, Some("evidence"), None).unwrap();
         assert!(none.is_empty(), "LIKE path honors block_type filter");
     }
 
@@ -2837,7 +2926,7 @@ mod tests {
         // "0%" is 2 chars → LIKE path. With % escaped, only the entry
         // literally containing "0%" matches. If % were unescaped (regression),
         // "0%" would act as "0<any>" and match BOTH entries.
-        let hits = svc.fulltext_search("0%", 10, None).unwrap();
+        let hits = svc.fulltext_search("0%", 10, None, None).unwrap();
         assert_eq!(hits.len(), 1, "% escaped → only literal '0%' matches");
     }
 
@@ -2865,7 +2954,7 @@ mod tests {
         })
         .unwrap();
         // Two blocks in one entry both match "keyword" — entry appears once.
-        let hits = svc.fulltext_search("keyword", 10, None).unwrap();
+        let hits = svc.fulltext_search("keyword", 10, None, None).unwrap();
         assert_eq!(hits.len(), 1, "FTS path dedupes by entry");
     }
 
@@ -2907,7 +2996,7 @@ mod tests {
         })
         .unwrap();
 
-        let hits = svc.fulltext_search("orbit", 10, None).unwrap();
+        let hits = svc.fulltext_search("orbit", 10, None, None).unwrap();
         assert_eq!(hits.len(), 1, "only the orbit entry matches");
         let h = &hits[0];
         assert_eq!(h.match_count, 2, "both blocks matched: {}", h.match_count);
@@ -2933,7 +3022,7 @@ mod tests {
         })
         .unwrap();
         // "入门" is 2 chars -> LIKE path.
-        let hits = svc.fulltext_search("入门", 10, None).unwrap();
+        let hits = svc.fulltext_search("入门", 10, None, None).unwrap();
         assert_eq!(hits.len(), 1);
         let h = &hits[0];
         assert_eq!(h.match_count, 1);
@@ -2962,7 +3051,7 @@ mod tests {
             attachments: None,
         })
         .unwrap();
-        let hits = svc.fulltext_search("token", 10, None).unwrap();
+        let hits = svc.fulltext_search("token", 10, None, None).unwrap();
         let h = &hits[0];
         assert_eq!(h.match_count, 70, "true count preserved");
         assert_eq!(h.matched_block_ids.len(), 64, "ids capped at 64");

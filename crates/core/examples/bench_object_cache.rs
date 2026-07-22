@@ -165,7 +165,7 @@ fn main() {
     });
 
     let t_fts = bench("fulltext_search (top 10)", 1000, 100, || {
-        let _ = entries.fulltext_search("entry topic", 10, None);
+        let _ = entries.fulltext_search("entry topic", 10, None, None);
     });
 
     let t_semantic = bench("semantic_search (top 10)", 1000, 100, || {

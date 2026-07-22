@@ -167,9 +167,15 @@ impl RpcHandler for Fulltext {
                                     &query_for_closure,
                                     limit,
                                     bt.as_deref(),
+                                    None, // TODO(Task 3): 接通 p.tag
                                 )
                             } else {
-                                entries.fulltext_search(&query_for_closure, limit, bt.as_deref())
+                                entries.fulltext_search(
+                                    &query_for_closure,
+                                    limit,
+                                    bt.as_deref(),
+                                    None, // TODO(Task 3): 接通 p.tag
+                                )
                             }
                         })
                         .await??;
@@ -315,7 +321,7 @@ mod descriptor_tests {
             attachments: None,
         })
         .unwrap();
-        let hits = svc.fulltext_search("rust", 10, None).unwrap();
+        let hits = svc.fulltext_search("rust", 10, None, None).unwrap();
         let items: Vec<Value> = hits.iter().map(serialize_fulltext_result).collect();
         let demoted = downrank_transient_fulltext_for_test(items, &svc).unwrap();
         // 长期必须排到第一(其 score 未变,短期 score *= 0.5 沉后)
@@ -382,7 +388,7 @@ mod descriptor_tests {
             attachments: None,
         })
         .unwrap();
-        let results = svc.fulltext_search("setsid", 10, None).unwrap();
+        let results = svc.fulltext_search("setsid", 10, None, None).unwrap();
         let v = serialize_fulltext_result(&results[0]);
         assert!(v.get("entry").is_some());
         assert!(v["match_count"].as_u64().is_some());
