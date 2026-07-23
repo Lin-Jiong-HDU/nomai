@@ -773,7 +773,7 @@
       "name": "provider.list"
     },
     {
-      "description": "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Score is relative relevance (not a boolean hit marker): higher means stronger match; near-zero means weak match. Each call is cached per (query, limit, block_type).",
+      "description": "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Score is relative relevance (not a boolean hit marker): higher means stronger match; near-zero means weak match. Each call is cached per (query, limit, block_type, tag).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -793,6 +793,14 @@
           },
           "query": {
             "type": "string"
+          },
+          "tag": {
+            "default": null,
+            "description": "Optional tag filter: restricts matches to entries whose `tags` JSON\narray contains this exact value (same semantics as `entry.list`'s\n`tag`). Whitespace-only / empty values are treated as no filter.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -824,6 +832,14 @@
           },
           "query": {
             "type": "string"
+          },
+          "tag": {
+            "default": null,
+            "description": "Optional tag filter: restricts matches to entries whose `tags` JSON\narray contains this exact value (same semantics as `entry.list`'s\n`tag`). Whitespace-only / empty values are treated as no filter.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [

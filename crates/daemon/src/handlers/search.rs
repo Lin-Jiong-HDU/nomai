@@ -27,6 +27,12 @@ struct FulltextParams {
     #[serde(default)]
     #[schemars(default)]
     block_type: Option<String>,
+    /// Optional tag filter: restricts matches to entries whose `tags` JSON
+    /// array contains this exact value (same semantics as `entry.list`'s
+    /// `tag`). Whitespace-only / empty values are treated as no filter.
+    #[serde(default)]
+    #[schemars(default)]
+    tag: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -39,6 +45,12 @@ struct SemanticParams {
     #[serde(default)]
     #[schemars(default)]
     block_type: Option<String>,
+    /// Optional tag filter: restricts matches to entries whose `tags` JSON
+    /// array contains this exact value (same semantics as `entry.list`'s
+    /// `tag`). Whitespace-only / empty values are treated as no filter.
+    #[serde(default)]
+    #[schemars(default)]
+    tag: Option<String>,
 }
 
 /// Map a `FulltextSearchResult` to the wire JSON object. Extracted so the
@@ -128,7 +140,7 @@ impl RpcHandler for Fulltext {
         "search.fulltext"
     }
     fn description(&self) -> &'static str {
-        "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Score is relative relevance (not a boolean hit marker): higher means stronger match; near-zero means weak match. Each call is cached per (query, limit, block_type)."
+        "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Score is relative relevance (not a boolean hit marker): higher means stronger match; near-zero means weak match. Each call is cached per (query, limit, block_type, tag)."
     }
     fn input_schema(&self) -> Option<Value> {
         Some(schemars::schema_for!(FulltextParams).to_value())
@@ -141,14 +153,20 @@ impl RpcHandler for Fulltext {
         let query = p.query;
         let limit = p.limit;
         let block_type = p.block_type;
+        // Trim-normalize tag: empty / whitespace-only → None (no filter).
+        let tag = p.tag.and_then(|t| {
+            let t = t.trim();
+            (!t.is_empty()).then(|| t.to_string())
+        });
         let include_benchmark = daemon
             .benchmark
             .as_ref()
             .is_some_and(|runtime| runtime.is_active());
         // Snapshot the strings we need inside the compute closure. `query`
-        // is moved; `block_type` is cloned because we need to also pass an
-        // `Option<&str>` to lookup_or_compute below.
+        // is moved; `block_type`/`tag` are cloned because we need to also
+        // pass an `Option<&str>` to lookup_or_compute below.
         let bt_for_compute = block_type.clone();
+        let tag_for_compute = tag.clone();
         let cached = daemon
             .search_cache
             .lookup_or_compute(
@@ -156,9 +174,11 @@ impl RpcHandler for Fulltext {
                 &query,
                 limit,
                 block_type.as_deref(),
+                tag.as_deref(),
                 || {
                     let entries = entries.clone();
                     let bt = bt_for_compute.clone();
+                    let tg = tag_for_compute.clone();
                     let query_for_closure = query.clone();
                     async move {
                         let items_inner = blocking(move || {
@@ -167,14 +187,14 @@ impl RpcHandler for Fulltext {
                                     &query_for_closure,
                                     limit,
                                     bt.as_deref(),
-                                    None, // TODO(Task 3): 接通 p.tag
+                                    tg.as_deref(),
                                 )
                             } else {
                                 entries.fulltext_search(
                                     &query_for_closure,
                                     limit,
                                     bt.as_deref(),
-                                    None, // TODO(Task 3): 接通 p.tag
+                                    tg.as_deref(),
                                 )
                             }
                         })
@@ -219,11 +239,17 @@ impl RpcHandler for Semantic {
         let query_str = p.query;
         let limit = p.limit;
         let block_type = p.block_type;
+        // Trim-normalize tag: empty / whitespace-only → None (no filter).
+        let tag = p.tag.and_then(|t| {
+            let t = t.trim();
+            (!t.is_empty()).then(|| t.to_string())
+        });
         let include_benchmark = daemon
             .benchmark
             .as_ref()
             .is_some_and(|runtime| runtime.is_active());
         let bt_for_compute = block_type.clone();
+        let tag_for_compute = tag.clone();
 
         let cache = daemon.search_cache.clone();
         let embed = daemon.cache.clone();
@@ -234,11 +260,13 @@ impl RpcHandler for Semantic {
                 &query_str,
                 limit,
                 block_type.as_deref(),
+                tag.as_deref(),
                 || {
                     let embed = embed.clone();
                     let chunks = chunks.clone();
                     let query_owned = query_str.clone();
                     let bt = bt_for_compute.clone();
+                    let tg = tag_for_compute.clone();
                     async move {
                         let embeddings = embed.embed(&[&query_owned]).await?;
                         let qvec = embeddings
@@ -251,10 +279,11 @@ impl RpcHandler for Semantic {
                                     &qvec,
                                     limit as usize,
                                     bt.as_deref(),
-                                    None, // TODO(Task 3): 接通 p.tag
+                                    tg.as_deref(),
                                 )
                             } else {
-                                chunks.semantic_search(&qvec, limit as usize, bt.as_deref(), None)
+                                chunks
+                                    .semantic_search(&qvec, limit as usize, bt.as_deref(), tg.as_deref())
                             }
                         })
                         .await??;
@@ -369,6 +398,18 @@ mod descriptor_tests {
     fn semantic_schema_rejects_missing_query() {
         let schema = Semantic.input_schema().unwrap();
         assert!(validate(&schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn fulltext_schema_accepts_tag() {
+        let schema = Fulltext.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"query": "hello", "tag": "nomai"})).is_ok());
+    }
+
+    #[test]
+    fn semantic_schema_accepts_tag() {
+        let schema = Semantic.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"query": "hello", "tag": "nomai"})).is_ok());
     }
 
     #[test]
