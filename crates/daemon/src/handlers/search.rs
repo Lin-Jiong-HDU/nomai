@@ -251,9 +251,10 @@ impl RpcHandler for Semantic {
                                     &qvec,
                                     limit as usize,
                                     bt.as_deref(),
+                                    None, // TODO(Task 3): 接通 p.tag
                                 )
                             } else {
-                                chunks.semantic_search(&qvec, limit as usize, bt.as_deref())
+                                chunks.semantic_search(&qvec, limit as usize, bt.as_deref(), None)
                             }
                         })
                         .await??;

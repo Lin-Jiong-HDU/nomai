@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. KNN top-K semantic search over chunks (Plan 4). Each hit includes
     //    the chunk text; we resolve its parent block/entry via the daemon's
     //    block→entry JOIN when needed.
-    let chunk_hits = chunks.semantic_search(&qvec, TOP_K, None)?;
+    let chunk_hits = chunks.semantic_search(&qvec, TOP_K, None, None)?;
 
     // 5. Build context from chunk text + look up parent entry for headings.
     let mut context_parts: Vec<String> = Vec::new();

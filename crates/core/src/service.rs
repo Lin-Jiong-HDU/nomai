@@ -2363,7 +2363,7 @@ mod tests {
         let fulltext = svc.fulltext_search("marker", 10, None, None).unwrap();
         assert_eq!(fulltext.len(), 1);
         assert_eq!(fulltext[0].entry.id, ordinary.id);
-        let semantic = chunks.semantic_search(&vec![1.0; 1536], 10, None).unwrap();
+        let semantic = chunks.semantic_search(&vec![1.0; 1536], 10, None, None).unwrap();
         assert_eq!(semantic.len(), 1);
         assert_eq!(semantic[0].entry_id, ordinary.id);
 

@@ -224,13 +224,16 @@ impl ChunkService {
 
     /// KNN search over chunk embeddings. Returns top-K chunks.
     /// `block_type` filter (Plan 4): when supplied, JOIN `blocks` to filter.
+    /// `tag` filter: when supplied, restricts to entries whose `tags` JSON
+    /// array contains `tag` (single-tag exact match).
     pub fn semantic_search(
         &self,
         query_embedding: &[f32],
         limit: usize,
         block_type: Option<&str>,
+        tag: Option<&str>,
     ) -> Result<Vec<ChunkSearchResult>, CoreError> {
-        self.semantic_search_visible(query_embedding, limit, block_type, false)
+        self.semantic_search_visible(query_embedding, limit, block_type, tag, false)
     }
 
     /// Semantic search including active benchmark fixtures.
@@ -239,8 +242,9 @@ impl ChunkService {
         query_embedding: &[f32],
         limit: usize,
         block_type: Option<&str>,
+        tag: Option<&str>,
     ) -> Result<Vec<ChunkSearchResult>, CoreError> {
-        self.semantic_search_visible(query_embedding, limit, block_type, true)
+        self.semantic_search_visible(query_embedding, limit, block_type, tag, true)
     }
 
     fn semantic_search_visible(
@@ -248,6 +252,7 @@ impl ChunkService {
         query_embedding: &[f32],
         limit: usize,
         block_type: Option<&str>,
+        tag: Option<&str>,
         include_benchmark: bool,
     ) -> Result<Vec<ChunkSearchResult>, CoreError> {
         let query_bytes: Vec<u8> = query_embedding
@@ -260,67 +265,57 @@ impl ChunkService {
         } else {
             format!("NOT {}", crate::service::BENCHMARK_ENTRY_PREDICATE)
         };
+        let tag_clause = match tag {
+            Some(_) => " AND EXISTS (SELECT 1 FROM json_each(e.tags) j WHERE j.value = ?)",
+            None => "",
+        };
         let sql = match block_type {
-            Some(_) => {
-                format!(
-                    "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
-                            b.entry_id, vec.distance
-                     FROM vec_chunk_embeddings vec
-                     JOIN chunks c ON c.id = vec.chunk_id
-                     JOIN blocks b ON b.id = c.block_id
-                     JOIN entries e ON e.id = b.entry_id
-                     WHERE {visibility} AND vec.embedding MATCH ?1 AND k = ?2 AND b.type = ?3
-                     ORDER BY vec.distance",
-                )
-            }
-            None => {
-                format!(
-                    "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
-                            b.entry_id, vec.distance
-                     FROM vec_chunk_embeddings vec
-                     JOIN chunks c ON c.id = vec.chunk_id
-                     JOIN blocks b ON b.id = c.block_id
-                     JOIN entries e ON e.id = b.entry_id
-                     WHERE {visibility} AND vec.embedding MATCH ?1 AND k = ?2
-                     ORDER BY vec.distance",
-                )
-            }
+            Some(_) => format!(
+                "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
+                        b.entry_id, vec.distance
+                 FROM vec_chunk_embeddings vec
+                 JOIN chunks c ON c.id = vec.chunk_id
+                 JOIN blocks b ON b.id = c.block_id
+                 JOIN entries e ON e.id = b.entry_id
+                 WHERE {visibility} AND vec.embedding MATCH ? AND k = ? AND b.type = ?{tag_clause}
+                 ORDER BY vec.distance",
+            ),
+            None => format!(
+                "SELECT c.id, c.block_id, c.ordinal, c.text, c.attrs, c.created_at, c.updated_at,
+                        b.entry_id, vec.distance
+                 FROM vec_chunk_embeddings vec
+                 JOIN chunks c ON c.id = vec.chunk_id
+                 JOIN blocks b ON b.id = c.block_id
+                 JOIN entries e ON e.id = b.entry_id
+                 WHERE {visibility} AND vec.embedding MATCH ? AND k = ?{tag_clause}
+                 ORDER BY vec.distance",
+            ),
         };
         let mut stmt = conn.prepare(&sql)?;
-        let rows = match block_type {
-            Some(t) => stmt
-                .query_map(params![&query_bytes, limit as i64, t], |row| {
-                    let chunk = row_to_chunk(row, 0)?;
-                    let entry_id_str: String = row.get(7)?;
-                    let distance: f64 = row.get(8)?;
-                    Ok(ChunkSearchResult {
-                        chunk,
-                        score: (1.0 - distance) as f32,
-                        entry_id: crate::storage::from_text(
-                            7,
-                            &entry_id_str,
-                            ulid::Ulid::from_string,
-                        )?,
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?,
-            None => stmt
-                .query_map(params![&query_bytes, limit as i64], |row| {
-                    let chunk = row_to_chunk(row, 0)?;
-                    let entry_id_str: String = row.get(7)?;
-                    let distance: f64 = row.get(8)?;
-                    Ok(ChunkSearchResult {
-                        chunk,
-                        score: (1.0 - distance) as f32,
-                        entry_id: crate::storage::from_text(
-                            7,
-                            &entry_id_str,
-                            ulid::Ulid::from_string,
-                        )?,
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?,
-        };
+        let limit_i64 = limit as i64;
+        let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&query_bytes, &limit_i64];
+        if let Some(t) = block_type.as_ref() {
+            binds.push(t);
+        }
+        if let Some(tg) = tag.as_ref() {
+            binds.push(tg);
+        }
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+                let chunk = row_to_chunk(row, 0)?;
+                let entry_id_str: String = row.get(7)?;
+                let distance: f64 = row.get(8)?;
+                Ok(ChunkSearchResult {
+                    chunk,
+                    score: (1.0 - distance) as f32,
+                    entry_id: crate::storage::from_text(
+                        7,
+                        &entry_id_str,
+                        ulid::Ulid::from_string,
+                    )?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 }
@@ -743,7 +738,7 @@ mod tests {
 
         // Query slightly off +X: near should rank above far.
         let hits = chunks
-            .semantic_search(&vec_1536(&[0.9, 0.1, 0.0]), 10, None)
+            .semantic_search(&vec_1536(&[0.9, 0.1, 0.0]), 10, None, None)
             .unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].chunk.id, near, "near should rank first");
@@ -768,7 +763,7 @@ mod tests {
         let near = insert_chunk_sql(&conn, block_id, 0, "near", json!({}));
         chunks.write_embedding(near, &vec_1536(&[1.0])).unwrap();
         let hits = chunks
-            .semantic_search(&vec_1536(&[0.9, 0.1, 0.0]), 10, None)
+            .semantic_search(&vec_1536(&[0.9, 0.1, 0.0]), 10, None, None)
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(
@@ -813,7 +808,7 @@ mod tests {
         chunks.write_embedding(chunk_a, &a).unwrap();
         chunks.write_embedding(chunk_b, &b).unwrap();
 
-        let hits = chunks.semantic_search(&a, 10, None).unwrap();
+        let hits = chunks.semantic_search(&a, 10, None, None).unwrap();
         assert_eq!(hits.len(), 2, "both chunks should be returned");
         // Both should score ~1.0 (identical direction under cosine). Under L2,
         // B's score would be 1.0 - 1.0 = 0.0 because |B - A| = 1.
@@ -876,10 +871,76 @@ mod tests {
 
         // Filter by block_type="claim": only the claim chunk matches.
         let hits = chunks
-            .semantic_search(&vec_1536(&[0.9, 0.1]), 10, Some("claim"))
+            .semantic_search(&vec_1536(&[0.9, 0.1]), 10, Some("claim"), None)
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.id, claim_chunk);
+    }
+
+    #[test]
+    fn semantic_search_filters_by_tag() {
+        crate::storage::init_sqlite_extensions();
+        let entries = crate::EntryService::for_test().unwrap();
+        let conn = entries.conn_for_test();
+        // 两个 entry，文本相同、embedding 相同，但 tag 不同。
+        let a = entries
+            .create(crate::CreateEntry {
+                title: "a".into(),
+                blocks: vec![crate::BlockInput {
+                    r#type: "note".into(),
+                    text: "note text".into(),
+                    attrs: None,
+                }],
+                tags: Some(vec!["alpha".into()]),
+                attrs: None,
+                source: None,
+                attachments: None,
+            })
+            .unwrap();
+        let b = entries
+            .create(crate::CreateEntry {
+                title: "b".into(),
+                blocks: vec![crate::BlockInput {
+                    r#type: "note".into(),
+                    text: "note text".into(),
+                    attrs: None,
+                }],
+                tags: Some(vec!["beta".into()]),
+                attrs: None,
+                source: None,
+                attachments: None,
+            })
+            .unwrap();
+        let blocks = crate::BlockService::new(conn.clone(), 1024).unwrap();
+        let a_block = blocks.list(a.id).unwrap().items[0].id;
+        let b_block = blocks.list(b.id).unwrap().items[0].id;
+
+        let chunks = ChunkService::new(conn.clone()).unwrap();
+        chunks.ensure_vec_chunk_embeddings(1536).unwrap();
+        let a_chunk = chunks.list(a_block).unwrap().items[0].id;
+        let b_chunk = chunks.list(b_block).unwrap().items[0].id;
+        let emb = vec_1536(&[1.0]);
+        chunks.write_embedding(a_chunk, &emb).unwrap();
+        chunks.write_embedding(b_chunk, &emb).unwrap();
+
+        // tag=alpha → 只命中 a 的 chunk
+        let hits = chunks
+            .semantic_search(&vec_1536(&[0.9, 0.1]), 10, None, Some("alpha"))
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.id, a_chunk);
+
+        // tag 不存在 → 空
+        let none = chunks
+            .semantic_search(&vec_1536(&[0.9, 0.1]), 10, None, Some("zzz"))
+            .unwrap();
+        assert!(none.is_empty());
+
+        // tag=None → 两个都命中（行为如初）
+        let all = chunks
+            .semantic_search(&vec_1536(&[0.9, 0.1]), 10, None, None)
+            .unwrap();
+        assert_eq!(all.len(), 2);
     }
 
     #[test]
@@ -891,7 +952,7 @@ mod tests {
         // Auto-derived chunk exists but no embedding written.
         assert_eq!(chunks.list(block_id).unwrap().total, 1);
 
-        let hits = chunks.semantic_search(&vec_1536(&[1.0]), 10, None).unwrap();
+        let hits = chunks.semantic_search(&vec_1536(&[1.0]), 10, None, None).unwrap();
         assert!(hits.is_empty());
     }
 
@@ -916,7 +977,7 @@ mod tests {
             chunks.write_embedding(cid, &emb).unwrap();
         }
 
-        let hits = chunks.semantic_search(&vec_1536(&[1.0]), 3, None).unwrap();
+        let hits = chunks.semantic_search(&vec_1536(&[1.0]), 3, None, None).unwrap();
         assert_eq!(hits.len(), 3);
     }
 

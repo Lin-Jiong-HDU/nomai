@@ -169,7 +169,7 @@ fn main() {
     });
 
     let t_semantic = bench("semantic_search (top 10)", 1000, 100, || {
-        let _ = chunks.semantic_search(&[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], 10, None);
+        let _ = chunks.semantic_search(&[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], 10, None, None);
     });
 
     println!("\n=== Per-operation mean cost ===\n");
