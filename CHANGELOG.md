@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`tag` filter on `search.fulltext` / `search.semantic`.** Both search
+  RPCs accept an optional `tag` restricting matches to entries whose
+  `tags` array contains that exact value (same semantics as `entry.list`'s
+  `tag`). Filtering happens in SQL before ranking, preserving top-k/limit
+  semantics. Omitting `tag` (or whitespace-only) behaves exactly as before;
+  the search cache keys on `tag`, so same-query different-tag results never
+  cross-contaminate.
+
 - **Development-gated benchmark workflow.** When
   `[development].enabled = true`, the daemon exposes benchmark lifecycle
   tools driven by `benchmark.next_case`, records the model's real search and

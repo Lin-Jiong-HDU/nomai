@@ -773,7 +773,7 @@
       "name": "provider.list"
     },
     {
-      "description": "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Score is relative relevance (not a boolean hit marker): higher means stronger match; near-zero means weak match. Each call is cached per (query, limit, block_type, tag).",
+      "description": "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Score is relative relevance (not a boolean hit marker): higher means stronger match; near-zero means weak match. Optional `tag` restricts results to entries whose `tags` array contains that value. Each call is cached per (query, limit, block_type, tag).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -812,7 +812,7 @@
       "name": "search.fulltext"
     },
     {
-      "description": "Semantic search over chunk embeddings via sqlite-vec cosine similarity. Queries the embedding provider on each unique query (cached). Returns chunks ranked by similarity.",
+      "description": "Semantic search over chunk embeddings via sqlite-vec cosine similarity. Queries the embedding provider on each unique query (cached). Returns chunks ranked by similarity. Optional `tag` restricts results to entries whose `tags` array contains that value.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {

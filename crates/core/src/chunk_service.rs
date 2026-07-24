@@ -891,7 +891,7 @@ mod tests {
                     text: "note text".into(),
                     attrs: None,
                 }],
-                tags: Some(vec!["alpha".into()]),
+                tags: Some(vec!["alpha".into(), "shared".into()]),
                 attrs: None,
                 source: None,
                 attachments: None,
@@ -941,6 +941,20 @@ mod tests {
             .semantic_search(&vec_1536(&[0.9, 0.1]), 10, None, None)
             .unwrap();
         assert_eq!(all.len(), 2);
+
+        // 多 tag entry：tag=shared 也命中 a（any-match）
+        let shared = chunks
+            .semantic_search(&vec_1536(&[0.9, 0.1]), 10, None, Some("shared"))
+            .unwrap();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].chunk.id, a_chunk);
+
+        // block_type × tag 组合（第 4 个 SQL 绑定分支）：note + alpha → a
+        let combo = chunks
+            .semantic_search(&vec_1536(&[0.9, 0.1]), 10, Some("note"), Some("alpha"))
+            .unwrap();
+        assert_eq!(combo.len(), 1);
+        assert_eq!(combo[0].chunk.id, a_chunk);
     }
 
     #[test]

@@ -16,6 +16,16 @@ fn default_search_limit() -> u32 {
     10
 }
 
+/// Normalize an optional tag from wire input: trim whitespace and treat an
+/// empty result as `None` (no filter). Shared by `search.fulltext` and
+/// `search.semantic` so the cache key never distinguishes `"  "` from `None`.
+fn normalize_tag(tag: Option<String>) -> Option<String> {
+    tag.and_then(|t| {
+        let t = t.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    })
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 struct FulltextParams {
     query: String,
@@ -140,7 +150,7 @@ impl RpcHandler for Fulltext {
         "search.fulltext"
     }
     fn description(&self) -> &'static str {
-        "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Score is relative relevance (not a boolean hit marker): higher means stronger match; near-zero means weak match. Each call is cached per (query, limit, block_type, tag)."
+        "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Score is relative relevance (not a boolean hit marker): higher means stronger match; near-zero means weak match. Optional `tag` restricts results to entries whose `tags` array contains that value. Each call is cached per (query, limit, block_type, tag)."
     }
     fn input_schema(&self) -> Option<Value> {
         Some(schemars::schema_for!(FulltextParams).to_value())
@@ -154,10 +164,7 @@ impl RpcHandler for Fulltext {
         let limit = p.limit;
         let block_type = p.block_type;
         // Trim-normalize tag: empty / whitespace-only → None (no filter).
-        let tag = p.tag.and_then(|t| {
-            let t = t.trim();
-            (!t.is_empty()).then(|| t.to_string())
-        });
+        let tag = normalize_tag(p.tag);
         let include_benchmark = daemon
             .benchmark
             .as_ref()
@@ -227,7 +234,7 @@ impl RpcHandler for Semantic {
         "search.semantic"
     }
     fn description(&self) -> &'static str {
-        "Semantic search over chunk embeddings via sqlite-vec cosine similarity. Queries the embedding provider on each unique query (cached). Returns chunks ranked by similarity."
+        "Semantic search over chunk embeddings via sqlite-vec cosine similarity. Queries the embedding provider on each unique query (cached). Returns chunks ranked by similarity. Optional `tag` restricts results to entries whose `tags` array contains that value."
     }
     fn input_schema(&self) -> Option<Value> {
         Some(schemars::schema_for!(SemanticParams).to_value())
@@ -240,10 +247,7 @@ impl RpcHandler for Semantic {
         let limit = p.limit;
         let block_type = p.block_type;
         // Trim-normalize tag: empty / whitespace-only → None (no filter).
-        let tag = p.tag.and_then(|t| {
-            let t = t.trim();
-            (!t.is_empty()).then(|| t.to_string())
-        });
+        let tag = normalize_tag(p.tag);
         let include_benchmark = daemon
             .benchmark
             .as_ref()
@@ -410,6 +414,15 @@ mod descriptor_tests {
     fn semantic_schema_accepts_tag() {
         let schema = Semantic.input_schema().unwrap();
         assert!(validate(&schema, &json!({"query": "hello", "tag": "nomai"})).is_ok());
+    }
+
+    #[test]
+    fn normalize_tag_trims_and_drops_empty() {
+        assert_eq!(normalize_tag(None), None);
+        assert_eq!(normalize_tag(Some(String::new())), None);
+        assert_eq!(normalize_tag(Some("   ".into())), None);
+        assert_eq!(normalize_tag(Some("\t nomai \n".into())), Some("nomai".into()));
+        assert_eq!(normalize_tag(Some("nomai".into())), Some("nomai".into()));
     }
 
     #[test]

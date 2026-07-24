@@ -2796,6 +2796,13 @@ mod tests {
         let short = svc.fulltext_search("or", 10, None, Some("alpha")).unwrap();
         assert_eq!(short.len(), 1);
         assert_eq!(short[0].entry.title, "alpha");
+
+        // block_type × tag 组合（第 4 个 SQL 绑定分支）：note + alpha → alpha
+        let combo = svc
+            .fulltext_search("orbit", 10, Some("note"), Some("alpha"))
+            .unwrap();
+        assert_eq!(combo.len(), 1);
+        assert_eq!(combo[0].entry.title, "alpha");
     }
 
     #[test]
