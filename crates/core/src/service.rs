@@ -2363,7 +2363,9 @@ mod tests {
         let fulltext = svc.fulltext_search("marker", 10, None, None).unwrap();
         assert_eq!(fulltext.len(), 1);
         assert_eq!(fulltext[0].entry.id, ordinary.id);
-        let semantic = chunks.semantic_search(&vec![1.0; 1536], 10, None, None).unwrap();
+        let semantic = chunks
+            .semantic_search(&vec![1.0; 1536], 10, None, None)
+            .unwrap();
         assert_eq!(semantic.len(), 1);
         assert_eq!(semantic[0].entry_id, ordinary.id);
 
@@ -2716,17 +2718,23 @@ mod tests {
         assert_eq!(hits.len(), 1);
 
         // Filter to note only: still matches the entry (note block contains "orbit").
-        let hits_note = svc.fulltext_search("orbit", 10, Some("note"), None).unwrap();
+        let hits_note = svc
+            .fulltext_search("orbit", 10, Some("note"), None)
+            .unwrap();
         assert_eq!(hits_note.len(), 1);
 
         // Filter to claim only: under the trigram tokenizer (V10), "orbit"
         // shares 3-grams (orb/rbi/bit) with "orbits" in the claim block, so
         // the claim also matches — the filter still narrows to claim blocks.
-        let hits_claim = svc.fulltext_search("orbit", 10, Some("claim"), None).unwrap();
+        let hits_claim = svc
+            .fulltext_search("orbit", 10, Some("claim"), None)
+            .unwrap();
         assert_eq!(hits_claim.len(), 1);
 
         // Filter to evidence: no match.
-        let hits_none = svc.fulltext_search("orbit", 10, Some("evidence"), None).unwrap();
+        let hits_none = svc
+            .fulltext_search("orbit", 10, Some("evidence"), None)
+            .unwrap();
         assert!(hits_none.is_empty());
     }
 
@@ -2775,12 +2783,16 @@ mod tests {
         .unwrap();
 
         // tag=alpha → 只命中 alpha（trigram 路径，≥3 char）
-        let hits = svc.fulltext_search("orbit", 10, None, Some("alpha")).unwrap();
+        let hits = svc
+            .fulltext_search("orbit", 10, None, Some("alpha"))
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].entry.title, "alpha");
 
         // tag=shared → alpha 仍命中（多 tag entry，过滤其一即可）
-        let shared = svc.fulltext_search("orbit", 10, None, Some("shared")).unwrap();
+        let shared = svc
+            .fulltext_search("orbit", 10, None, Some("shared"))
+            .unwrap();
         assert_eq!(shared.len(), 1);
         assert_eq!(shared[0].entry.title, "alpha");
 
@@ -2890,13 +2902,17 @@ mod tests {
         })
         .unwrap();
         // >=3 char path with block_type filter: "keyword" is in the claim block.
-        let claims = svc.fulltext_search("keyword", 10, Some("claim"), None).unwrap();
+        let claims = svc
+            .fulltext_search("keyword", 10, Some("claim"), None)
+            .unwrap();
         assert_eq!(claims.len(), 1);
         // <3 char path with block_type filter to a type that has no block.
         // "sh" is in both blocks; filtering to "evidence" (no such block)
         // must return empty — proves the filter is applied on the LIKE path,
         // not ignored.
-        let none = svc.fulltext_search("sh", 10, Some("evidence"), None).unwrap();
+        let none = svc
+            .fulltext_search("sh", 10, Some("evidence"), None)
+            .unwrap();
         assert!(none.is_empty(), "LIKE path honors block_type filter");
     }
 

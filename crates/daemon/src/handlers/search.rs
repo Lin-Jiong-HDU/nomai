@@ -421,7 +421,10 @@ mod descriptor_tests {
         assert_eq!(normalize_tag(None), None);
         assert_eq!(normalize_tag(Some(String::new())), None);
         assert_eq!(normalize_tag(Some("   ".into())), None);
-        assert_eq!(normalize_tag(Some("\t nomai \n".into())), Some("nomai".into()));
+        assert_eq!(
+            normalize_tag(Some("\t nomai \n".into())),
+            Some("nomai".into())
+        );
         assert_eq!(normalize_tag(Some("nomai".into())), Some("nomai".into()));
     }
 

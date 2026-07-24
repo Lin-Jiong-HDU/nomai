@@ -428,15 +428,25 @@ mod tests {
         // Same query/limit/block_type, different tag → two misses (keys differ
         // by tag_hash, so the second lookup does not hit the first's entry).
         let a = cache
-            .lookup_or_compute(SearchRpc::Fulltext, "rust", 10, None, Some("alpha"), || {
-                async move { Ok(vec![json!({"v": "a"})]) }
-            })
+            .lookup_or_compute(
+                SearchRpc::Fulltext,
+                "rust",
+                10,
+                None,
+                Some("alpha"),
+                || async move { Ok(vec![json!({"v": "a"})]) },
+            )
             .await
             .unwrap();
         let b = cache
-            .lookup_or_compute(SearchRpc::Fulltext, "rust", 10, None, Some("beta"), || {
-                async move { Ok(vec![json!({"v": "b"})]) }
-            })
+            .lookup_or_compute(
+                SearchRpc::Fulltext,
+                "rust",
+                10,
+                None,
+                Some("beta"),
+                || async move { Ok(vec![json!({"v": "b"})]) },
+            )
             .await
             .unwrap();
         assert_eq!(a[0]["v"], "a");

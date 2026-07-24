@@ -308,11 +308,7 @@ impl ChunkService {
                 Ok(ChunkSearchResult {
                     chunk,
                     score: (1.0 - distance) as f32,
-                    entry_id: crate::storage::from_text(
-                        7,
-                        &entry_id_str,
-                        ulid::Ulid::from_string,
-                    )?,
+                    entry_id: crate::storage::from_text(7, &entry_id_str, ulid::Ulid::from_string)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -966,7 +962,9 @@ mod tests {
         // Auto-derived chunk exists but no embedding written.
         assert_eq!(chunks.list(block_id).unwrap().total, 1);
 
-        let hits = chunks.semantic_search(&vec_1536(&[1.0]), 10, None, None).unwrap();
+        let hits = chunks
+            .semantic_search(&vec_1536(&[1.0]), 10, None, None)
+            .unwrap();
         assert!(hits.is_empty());
     }
 
@@ -991,7 +989,9 @@ mod tests {
             chunks.write_embedding(cid, &emb).unwrap();
         }
 
-        let hits = chunks.semantic_search(&vec_1536(&[1.0]), 3, None, None).unwrap();
+        let hits = chunks
+            .semantic_search(&vec_1536(&[1.0]), 3, None, None)
+            .unwrap();
         assert_eq!(hits.len(), 3);
     }
 
