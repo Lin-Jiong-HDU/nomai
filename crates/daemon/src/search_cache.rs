@@ -16,6 +16,8 @@ use serde_json::Value;
 pub(crate) enum SearchRpc {
     Semantic,
     Fulltext,
+    #[allow(dead_code)] // constructed by a future task
+    Hybrid,
 }
 
 /// Cache key. `generation` is the snapshot of the daemon-wide counter at
@@ -61,6 +63,8 @@ pub struct SearchCache {
     semantic_misses: AtomicU64,
     fulltext_hits: AtomicU64,
     fulltext_misses: AtomicU64,
+    hybrid_hits: AtomicU64,
+    hybrid_misses: AtomicU64,
 }
 
 /// Snapshot of cache statistics returned by `SearchCache::stats`. Spec §7.1.
@@ -74,6 +78,8 @@ pub struct SearchCacheStats {
     pub semantic_misses: u64,
     pub fulltext_hits: u64,
     pub fulltext_misses: u64,
+    pub hybrid_hits: u64,
+    pub hybrid_misses: u64,
 }
 
 impl SearchCacheStats {
@@ -99,6 +105,8 @@ impl SearchCache {
             semantic_misses: AtomicU64::new(0),
             fulltext_hits: AtomicU64::new(0),
             fulltext_misses: AtomicU64::new(0),
+            hybrid_hits: AtomicU64::new(0),
+            hybrid_misses: AtomicU64::new(0),
         }
     }
 
@@ -202,6 +210,8 @@ impl SearchCache {
             semantic_misses: self.semantic_misses.load(Ordering::Relaxed),
             fulltext_hits: self.fulltext_hits.load(Ordering::Relaxed),
             fulltext_misses: self.fulltext_misses.load(Ordering::Relaxed),
+            hybrid_hits: self.hybrid_hits.load(Ordering::Relaxed),
+            hybrid_misses: self.hybrid_misses.load(Ordering::Relaxed),
         }
     }
 
@@ -211,6 +221,8 @@ impl SearchCache {
             (SearchRpc::Semantic, false) => (&self.misses, &self.semantic_misses),
             (SearchRpc::Fulltext, true) => (&self.hits, &self.fulltext_hits),
             (SearchRpc::Fulltext, false) => (&self.misses, &self.fulltext_misses),
+            (SearchRpc::Hybrid, true) => (&self.hits, &self.hybrid_hits),
+            (SearchRpc::Hybrid, false) => (&self.misses, &self.hybrid_misses),
         };
         total.fetch_add(1, Ordering::Relaxed);
         per_rpc.fetch_add(1, Ordering::Relaxed);
@@ -491,6 +503,24 @@ mod tests {
         assert_eq!(stats.semantic_hits, 0);
         assert_eq!(stats.semantic_misses, 0);
         assert_eq!(stats.fulltext_hits, 0);
+        assert_eq!(stats.fulltext_misses, 0);
+        assert_eq!(stats.hybrid_hits, 0);
+        assert_eq!(stats.hybrid_misses, 0);
+    }
+
+    #[tokio::test]
+    async fn hybrid_rpc_counts_separately() {
+        let cache = mk_cache();
+        let _ = cache
+            .lookup_or_compute(SearchRpc::Hybrid, "q", 5, None, None, || async {
+                Ok(vec![json!({"fusion_score": 0.03})])
+            })
+            .await
+            .unwrap();
+        let stats = cache.stats();
+        assert_eq!(stats.hybrid_misses, 1);
+        assert_eq!(stats.hybrid_hits, 0);
+        assert_eq!(stats.semantic_misses, 0);
         assert_eq!(stats.fulltext_misses, 0);
     }
 }
