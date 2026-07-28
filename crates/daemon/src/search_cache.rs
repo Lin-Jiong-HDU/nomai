@@ -31,6 +31,7 @@ pub(crate) struct Key {
     pub(crate) limit: u32,
     pub(crate) block_type_hash: Option<u64>,
     pub(crate) tag_hash: Option<u64>,
+    pub(crate) weights_hash: Option<u64>,
 }
 
 /// Hash an optional filter string into a fixed-size `Option<u64>` for use
@@ -47,6 +48,20 @@ fn hash_opt(s: Option<&str>) -> Option<u64> {
             .expect("blake3 yields 32 bytes");
         u64::from_le_bytes(bytes)
     })
+}
+
+/// Hash a pair of f32 weights into a `u64` for use as part of the cache
+/// key. Two weight vectors that differ are never confused; identical weight
+/// vectors hash identically.
+pub(crate) fn hash_weights(fw: f32, sw: f32) -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&fw.to_le_bytes());
+    hasher.update(&sw.to_le_bytes());
+    let h = hasher.finalize();
+    let bytes: [u8; 8] = h.as_bytes()[..8]
+        .try_into()
+        .expect("blake3 yields 32 bytes");
+    u64::from_le_bytes(bytes)
 }
 
 /// Cached value. `Arc` so a hit path is one atomic increment (no deep
@@ -147,17 +162,23 @@ impl SearchCache {
         cleared
     }
 
-    /// Look up a cached result by `(rpc, query, limit, block_type, tag)`. On
-    /// hit, returns the cached `Arc<Vec<Value>>` (one atomic increment). On
-    /// miss, invokes `compute()`, persists the result, and returns it.
-    /// Failures from `compute()` propagate and are NOT cached.
+    /// Look up a cached result by `(rpc, query, limit, block_type, tag,
+    /// weights_hash)`. On hit, returns the cached `Arc<Vec<Value>>` (one
+    /// atomic increment). On miss, invokes `compute()`, persists the result,
+    /// and returns it. Failures from `compute()` propagate and are NOT cached.
     ///
     /// `block_type`/`tag: Option<&str>` — `None` means no filter; `Some(s)`
     /// is hashed (via shared `hash_opt`) so the key is fixed-size. None vs
     /// Some("") are distinct.
     ///
+    /// `weights_hash: Option<u64>` — `None` for RPCs that don't use weights
+    /// (fulltext, semantic); `Some(hash_weights(fw, sw))` for RPCs that do
+    /// (hybrid). Required so two Hybrid calls with different weight values
+    /// don't share the same cache entry.
+    ///
     /// Generic bounds (`F: FnOnce() -> Fut, Fut: Future`) let call sites
     /// pass `|| async move { ... }` async closures; verified by Task 2 tests.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn lookup_or_compute<F, Fut>(
         &self,
         rpc: SearchRpc,
@@ -165,6 +186,7 @@ impl SearchCache {
         limit: u32,
         block_type: Option<&str>,
         tag: Option<&str>,
+        weights_hash: Option<u64>,
         compute: F,
     ) -> Result<CachedResults, CoreError>
     where
@@ -178,6 +200,7 @@ impl SearchCache {
             limit,
             block_type_hash: hash_opt(block_type),
             tag_hash: hash_opt(tag),
+            weights_hash,
         };
 
         // 1. Lookup. Ref drops at end of block so compute() doesn't hold
@@ -273,7 +296,7 @@ mod tests {
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cc = call_count.clone();
         let r1 = cache
-            .lookup_or_compute(SearchRpc::Fulltext, "rust", 10, None, None, || {
+            .lookup_or_compute(SearchRpc::Fulltext, "rust", 10, None, None, None, || {
                 let cc = cc.clone();
                 async move {
                     cc.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -286,7 +309,7 @@ mod tests {
 
         let cc2 = call_count.clone();
         let r2 = cache
-            .lookup_or_compute(SearchRpc::Fulltext, "rust", 10, None, None, || {
+            .lookup_or_compute(SearchRpc::Fulltext, "rust", 10, None, None, None, || {
                 let cc = cc2.clone();
                 async move {
                     cc.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -316,7 +339,7 @@ mod tests {
         // First call: miss, populates cache.
         let c1 = calls.clone();
         let _ = cache
-            .lookup_or_compute(SearchRpc::Fulltext, "q", 5, None, None, || {
+            .lookup_or_compute(SearchRpc::Fulltext, "q", 5, None, None, None, || {
                 let c1 = c1.clone();
                 async move {
                     c1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -330,7 +353,7 @@ mod tests {
         // Same query, new generation → miss again.
         let c2 = calls.clone();
         let _ = cache
-            .lookup_or_compute(SearchRpc::Fulltext, "q", 5, None, None, || {
+            .lookup_or_compute(SearchRpc::Fulltext, "q", 5, None, None, None, || {
                 let c2 = c2.clone();
                 async move {
                     c2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -353,7 +376,9 @@ mod tests {
         let err: Result<Vec<serde_json::Value>, CoreError> =
             Err(CoreError::Storage(rusqlite::Error::ExecuteReturnedResults));
         let _ = cache
-            .lookup_or_compute(SearchRpc::Fulltext, "q", 5, None, None, || async { err })
+            .lookup_or_compute(SearchRpc::Fulltext, "q", 5, None, None, None, || async {
+                err
+            })
             .await;
         // Map empty: failure was not cached.
         assert_eq!(cache.len(), 0);
@@ -369,7 +394,7 @@ mod tests {
         for rpc in [SearchRpc::Semantic, SearchRpc::Fulltext] {
             let c = calls.clone();
             let _ = cache
-                .lookup_or_compute(rpc, "same", 5, None, None, || {
+                .lookup_or_compute(rpc, "same", 5, None, None, None, || {
                     let c = c.clone();
                     async move {
                         c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -393,7 +418,7 @@ mod tests {
         for limit in [5u32, 50u32] {
             let c = calls.clone();
             let _ = cache
-                .lookup_or_compute(SearchRpc::Fulltext, "q", limit, None, None, || {
+                .lookup_or_compute(SearchRpc::Fulltext, "q", limit, None, None, None, || {
                     let c = c.clone();
                     async move {
                         c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -417,7 +442,7 @@ mod tests {
         for bt in [None, Some("note"), Some("claim")] {
             let c = calls.clone();
             let _ = cache
-                .lookup_or_compute(SearchRpc::Fulltext, "q", 5, bt, None, || {
+                .lookup_or_compute(SearchRpc::Fulltext, "q", 5, bt, None, None, || {
                     let c = c.clone();
                     async move {
                         c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -446,6 +471,7 @@ mod tests {
                 10,
                 None,
                 Some("alpha"),
+                None,
                 || async move { Ok(vec![json!({"v": "a"})]) },
             )
             .await
@@ -457,6 +483,7 @@ mod tests {
                 10,
                 None,
                 Some("beta"),
+                None,
                 || async move { Ok(vec![json!({"v": "b"})]) },
             )
             .await
@@ -476,7 +503,7 @@ mod tests {
         let gen_before = cache.generation();
         // Populate.
         let _ = cache
-            .lookup_or_compute(SearchRpc::Fulltext, "q", 5, None, None, || async {
+            .lookup_or_compute(SearchRpc::Fulltext, "q", 5, None, None, None, || async {
                 Ok(vec![json!(1)])
             })
             .await
@@ -512,7 +539,7 @@ mod tests {
     async fn hybrid_rpc_counts_separately() {
         let cache = mk_cache();
         let _ = cache
-            .lookup_or_compute(SearchRpc::Hybrid, "q", 5, None, None, || async {
+            .lookup_or_compute(SearchRpc::Hybrid, "q", 5, None, None, None, || async {
                 Ok(vec![json!({"fusion_score": 0.03})])
             })
             .await

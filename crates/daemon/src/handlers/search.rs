@@ -133,6 +133,31 @@ fn downrank_fulltext(
     items
 }
 
+/// Hybrid wire items expose `entry.id` and use `fusion_score` (not `score`).
+fn downrank_hybrid(
+    mut items: Vec<Value>,
+    transient: &std::collections::HashSet<String>,
+) -> Vec<Value> {
+    for it in items.iter_mut() {
+        let is_t = it["entry"]["id"]
+            .as_str()
+            .map(|id| transient.contains(id))
+            .unwrap_or(false);
+        if is_t {
+            if let Some(s) = it["fusion_score"].as_f64() {
+                it["fusion_score"] = json!(s * TRANSIENT_PENALTY);
+            }
+        }
+    }
+    items.sort_by(|a, b| {
+        b["fusion_score"]
+            .as_f64()
+            .partial_cmp(&a["fusion_score"].as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    items
+}
+
 /// Semantic wire items expose `entry_id`.
 fn downrank_semantic(
     mut items: Vec<Value>,
@@ -183,6 +208,7 @@ impl RpcHandler for Fulltext {
                 limit,
                 block_type.as_deref(),
                 tag.as_deref(),
+                None,
                 || {
                     let entries = entries.clone();
                     let bt = bt_for_compute.clone();
@@ -266,6 +292,7 @@ impl RpcHandler for Semantic {
                 limit,
                 block_type.as_deref(),
                 tag.as_deref(),
+                None,
                 || {
                     let embed = embed.clone();
                     let chunks = chunks.clone();
@@ -339,7 +366,7 @@ fn default_one_f32() -> f32 {
 }
 
 /// Serialize a single HybridSearchResult to the wire JSON object.
-fn serialize_hybrid_result(r: &nomai_core::HybridSearchResult, _query: &str) -> serde_json::Value {
+fn serialize_hybrid_result(r: &nomai_core::HybridSearchResult) -> serde_json::Value {
     let mut obj = json!({
         "entry": r.entry,
         "fusion_score": r.fusion_score,
@@ -408,6 +435,7 @@ impl RpcHandler for Hybrid {
         let tag_for_compute = tag.clone();
         let query_for_compute = query.clone();
 
+        let weights_hash = Some(crate::search_cache::hash_weights(fw, sw));
         let cached = daemon
             .search_cache
             .lookup_or_compute(
@@ -416,6 +444,7 @@ impl RpcHandler for Hybrid {
                 limit,
                 block_type.as_deref(),
                 tag.as_deref(),
+                weights_hash,
                 || {
                     let entries = entries.clone();
                     let chunks = chunks.clone();
@@ -573,19 +602,16 @@ impl RpcHandler for Hybrid {
                                     snippet: r.best_match.snippet.clone(),
                                 });
 
-                            items.push(serialize_hybrid_result(
-                                &nomai_core::HybridSearchResult {
-                                    entry,
-                                    fusion_score: *fusion_score,
-                                    fulltext_rank: ft_rank,
-                                    fulltext_score: ft_score,
-                                    semantic_rank: sem_rank,
-                                    semantic_score: sem_score,
-                                    matched_chunk,
-                                    matched_block,
-                                },
-                                &q,
-                            ));
+                            items.push(serialize_hybrid_result(&nomai_core::HybridSearchResult {
+                                entry,
+                                fusion_score: *fusion_score,
+                                fulltext_rank: ft_rank,
+                                fulltext_score: ft_score,
+                                semantic_rank: sem_rank,
+                                semantic_score: sem_score,
+                                matched_chunk,
+                                matched_block,
+                            }));
                         }
 
                         Ok(items)
@@ -600,8 +626,8 @@ impl RpcHandler for Hybrid {
             .filter_map(|v| v["entry"]["id"].as_str().map(String::from))
             .collect();
         let transient = transient_set(&daemon.entries, ids).await?;
-        // Hybrid items use entry.id like fulltext, so reuse downrank_fulltext.
-        let items = downrank_fulltext(items, &transient);
+        // Hybrid items use fusion_score (not score), so call downrank_hybrid.
+        let items = downrank_hybrid(items, &transient);
         Ok(json!({ "items": items }))
     }
 }
