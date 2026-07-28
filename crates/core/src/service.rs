@@ -273,6 +273,93 @@ pub struct BestMatch {
     pub snippet: String,
 }
 
+/// One entry-level result from hybrid search (RRF fusion of fulltext +
+/// semantic). Mirrors the wire format in `search.hybrid`'s response.
+#[derive(Debug, Clone, Serialize)]
+pub struct HybridSearchResult {
+    pub entry: Entry,
+    /// RRF fusion score: sum(w_i / (k + rank_i)). Higher is better.
+    pub fusion_score: f32,
+    /// 1-based rank in the fulltext result set.
+    pub fulltext_rank: u32,
+    /// Original BM25 score from FTS5.
+    pub fulltext_score: f32,
+    /// 1-based rank in the semantic result set (0 if not in semantic results).
+    pub semantic_rank: u32,
+    /// Original cosine similarity score (0.0 if not in semantic results).
+    pub semantic_score: f32,
+    /// Best-matching chunk from the semantic side (id + text).
+    pub matched_chunk: Option<ChunkRef>,
+    /// Best-matching block from the fulltext side (id + type + snippet).
+    pub matched_block: Option<BlockRef>,
+}
+
+/// Lightweight chunk reference used in hybrid search results. Avoids cloning
+/// the full `Chunk` struct (which carries timestamps + attrs).
+#[derive(Debug, Clone, Serialize)]
+pub struct ChunkRef {
+    pub id: Ulid,
+    pub text: String,
+}
+
+/// Lightweight block reference used in hybrid search results. Avoids cloning
+/// the full `Block` struct.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlockRef {
+    pub id: Ulid,
+    pub r#type: String,
+    pub snippet: String,
+}
+
+/// RRF (Reciprocal Rank Fusion) over two ranked result sets.
+///
+/// Each input slice is already sorted by its native score descending (best
+/// first, rank=1). `weights` are per-retriever multipliers applied before
+/// summation. `k` is the smoothing constant (60 per TREC best-practice).
+/// `top_n` caps the output length.
+///
+/// An entry appearing in only one list gets zero contribution from the
+/// other (no rank penalty). The output is sorted by fusion score descending;
+/// ties are broken by the order rows appear in `fulltext_items` first, then
+/// `semantic_items` (stable sort by construction).
+///
+/// This is a pure function: no I/O, no allocations beyond the output vec.
+#[allow(dead_code)]
+pub(crate) fn rrf_fuse(
+    fulltext_items: &[(Ulid, f32)],
+    semantic_items: &[(Ulid, f32)],
+    weights: [f32; 2],
+    k: f64,
+    top_n: usize,
+) -> Vec<(Ulid, f32)> {
+    use std::collections::HashMap;
+
+    if fulltext_items.is_empty() && semantic_items.is_empty() {
+        return Vec::new();
+    }
+
+    // Assign ranks: 1-based, best score = rank 1.
+    let mut scores: HashMap<Ulid, f32> = HashMap::new();
+
+    for (rank_0based, (id, _score)) in fulltext_items.iter().enumerate() {
+        let rank = (rank_0based + 1) as f64;
+        let contribution = weights[0] as f64 / (k + rank);
+        *scores.entry(*id).or_insert(0.0) += contribution as f32;
+    }
+
+    for (rank_0based, (id, _score)) in semantic_items.iter().enumerate() {
+        let rank = (rank_0based + 1) as f64;
+        let contribution = weights[1] as f64 / (k + rank);
+        *scores.entry(*id).or_insert(0.0) += contribution as f32;
+    }
+
+    // Collect + sort by fusion score descending.
+    let mut result: Vec<(Ulid, f32)> = scores.into_iter().collect();
+    result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    result.truncate(top_n);
+    result
+}
+
 /// One matching block row projected from `fts_blocks` / `blocks`. Private
 /// helper for the fulltext data flow (Step 4). Defined at module top level
 /// (Rust does not allow `struct` items inside an `impl` block).
@@ -4067,6 +4154,67 @@ mod tests {
             svc.content_store().scan_entry_ids().is_empty(),
             "rolled-back entry dir must not linger on FS"
         );
+    }
+
+    #[test]
+    fn rrf_fuse_empty_inputs_returns_empty() {
+        let result = rrf_fuse(&[], &[], [1.0, 1.0], 60.0, 10);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn rrf_fuse_single_list_returns_ranked() {
+        // Only fulltext has results; semantic empty
+        let id_a: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let id_b: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FBW".parse().unwrap();
+        let ft = vec![(id_a, 10.0), (id_b, 5.0)];
+        let result = rrf_fuse(&ft, &[], [1.0, 1.0], 60.0, 10);
+        assert_eq!(result.len(), 2);
+        // id_a rank=1 => fusion = 1.0/(60+1) ~= 0.0164
+        // id_b rank=2 => fusion = 1.0/(60+2) ~= 0.0161
+        assert_eq!(result[0].0, id_a);
+        assert_eq!(result[1].0, id_b);
+        assert!(result[0].1 > result[1].1);
+    }
+
+    #[test]
+    fn rrf_fuse_both_lists_with_overlap() {
+        let id_a: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let id_b: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FBW".parse().unwrap();
+        // fulltext: A(rank=1, best), B(rank=2)
+        let ft = vec![(id_a, 10.0), (id_b, 5.0)];
+        // semantic: B(rank=1, best), A(rank=2)
+        let sem = vec![(id_b, 0.9), (id_a, 0.7)];
+        let result = rrf_fuse(&ft, &sem, [1.0, 1.0], 60.0, 10);
+        // Both entries appear in both lists => symmetric fusion scores
+        assert_eq!(result.len(), 2);
+        // A: ft_rank=1 => 1/(60+1) + sem_rank=2 => 1/(60+2) ~= 0.0164 + 0.0161 = 0.0325
+        // B: ft_rank=2 => 1/(60+2) + sem_rank=1 => 1/(60+1) ~= 0.0161 + 0.0164 = 0.0325
+        // Same score => stable sort preserves input order (A first from fulltext)
+    }
+
+    #[test]
+    fn rrf_fuse_unequal_weights() {
+        let id_a: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let id_b: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FBW".parse().unwrap();
+        let ft = vec![(id_a, 10.0), (id_b, 5.0)];
+        let sem = vec![(id_b, 0.9), (id_a, 0.7)];
+        // fulltext_weight=2.0, semantic_weight=0.5 => fulltext dominates
+        let result = rrf_fuse(&ft, &sem, [2.0, 0.5], 60.0, 10);
+        // A gets more weight from fulltext where it's #1
+        assert_eq!(result[0].0, id_a);
+    }
+
+    #[test]
+    fn rrf_fuse_respects_top_n() {
+        let ids: Vec<Ulid> = (0..10).map(|_| Ulid::new()).collect();
+        let ft: Vec<(Ulid, f32)> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, (10 - i) as f32))
+            .collect();
+        let result = rrf_fuse(&ft, &[], [1.0, 1.0], 60.0, 3);
+        assert_eq!(result.len(), 3);
     }
 
     /// Helper for the validate tests — a minimal valid CreateEntry.
