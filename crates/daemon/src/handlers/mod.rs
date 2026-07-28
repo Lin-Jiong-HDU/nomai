@@ -458,13 +458,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_hybrid_returns_method_not_found() {
+    async fn search_hybrid_rejects_empty_params() {
         let server = MockServer::start().await;
         let daemon = setup_daemon(&server).await;
         let resp = daemon.dispatch(req("search.hybrid", json!({}))).await;
         assert!(resp.result.is_none());
         let err = resp.error.unwrap();
-        assert_eq!(err.code, -32601);
+        // Now that Hybrid is registered, empty params trigger a validation
+        // error (-1003) instead of METHOD_NOT_FOUND (-32601).
+        assert_ne!(err.code, -32601, "Hybrid should be registered");
+        assert_eq!(err.code, 1003);
     }
 
     #[tokio::test]
@@ -1373,10 +1376,10 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 33 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:5,
-        // attachment:2, events:3, search:2, provider:1, cache:2, batch:1,
+        // 34 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:5,
+        // attachment:2, events:3, search:3, provider:1, cache:2, batch:1,
         // index:3, system:2) + sync.init + sync.run.
-        assert_eq!(tools.len(), 36);
+        assert_eq!(tools.len(), 37);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1509,7 +1512,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 37); // 36 built-in + custom.echo
+        assert_eq!(tools.len(), 38); // 37 built-in + custom.echo
     }
 
     // ----- batch RPC e2e (Plan 2 Task 3) -----

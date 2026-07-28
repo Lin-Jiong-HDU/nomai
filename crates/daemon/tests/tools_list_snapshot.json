@@ -812,6 +812,53 @@
       "name": "search.fulltext"
     },
     {
+      "description": "Hybrid search fusing fulltext (FTS5 BM25) and semantic (cosine similarity) results via Reciprocal Rank Fusion (k=60). Returns entry-granularity results with per-retriever scores and ranks. Optional weights bias the fusion toward one retriever. Cached per (query, limit, block_type, tag, weights).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "block_type": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fulltext_weight": {
+            "default": 1.0,
+            "format": "float",
+            "type": "number"
+          },
+          "limit": {
+            "default": 10,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "semantic_weight": {
+            "default": 1.0,
+            "format": "float",
+            "type": "number"
+          },
+          "tag": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "HybridParams",
+        "type": "object"
+      },
+      "name": "search.hybrid"
+    },
+    {
       "description": "Semantic search over chunk embeddings via sqlite-vec cosine similarity. Queries the embedding provider on each unique query (cached). Returns chunks ranked by similarity. Optional `tag` restricts results to entries whose `tags` array contains that value.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

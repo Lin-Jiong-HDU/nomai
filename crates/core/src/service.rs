@@ -326,7 +326,7 @@ pub struct BlockRef {
 /// arbitrary. This is a pure function: no I/O, no allocations beyond the
 /// output vec.
 #[allow(dead_code)]
-pub(crate) fn rrf_fuse(
+pub fn rrf_fuse(
     fulltext_items: &[(Ulid, f32)],
     semantic_items: &[(Ulid, f32)],
     weights: [f32; 2],

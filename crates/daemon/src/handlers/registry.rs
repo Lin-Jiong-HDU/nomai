@@ -102,6 +102,8 @@ pub fn registry_with_benchmark(enabled: bool) -> HashMap<&'static str, Arc<dyn R
     m.insert(h.method(), Arc::new(h));
     let h = search::Semantic;
     m.insert(h.method(), Arc::new(h));
+    let h = search::Hybrid;
+    m.insert(h.method(), Arc::new(h));
 
     // provider.*
     let h = provider::List;

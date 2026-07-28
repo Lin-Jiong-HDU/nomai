@@ -20,7 +20,6 @@ pub mod entries {
 pub mod search {
     pub const FULLTEXT: &str = "search.fulltext";
     pub const SEMANTIC: &str = "search.semantic";
-    /// Reserved: returns `METHOD_NOT_FOUND` (-32601) in MVP.
     pub const HYBRID: &str = "search.hybrid";
 }
 

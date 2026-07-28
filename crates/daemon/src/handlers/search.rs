@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use ulid::Ulid;
 
 use nomai_core::CoreError;
 use nomai_providers::EmbeddingProvider;
@@ -310,6 +311,301 @@ impl RpcHandler for Semantic {
     }
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+struct HybridParams {
+    query: String,
+    #[serde(default = "default_search_limit")]
+    #[schemars(default = "default_search_limit")]
+    limit: u32,
+    #[serde(default)]
+    #[schemars(default)]
+    block_type: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
+    tag: Option<String>,
+    #[serde(default = "default_one")]
+    #[schemars(default = "default_one_f32")]
+    fulltext_weight: f32,
+    #[serde(default = "default_one")]
+    #[schemars(default = "default_one_f32")]
+    semantic_weight: f32,
+}
+
+fn default_one() -> f32 {
+    1.0
+}
+fn default_one_f32() -> f32 {
+    1.0
+}
+
+/// Serialize a single HybridSearchResult to the wire JSON object.
+fn serialize_hybrid_result(r: &nomai_core::HybridSearchResult, _query: &str) -> serde_json::Value {
+    let mut obj = json!({
+        "entry": r.entry,
+        "fusion_score": r.fusion_score,
+        "fulltext_rank": r.fulltext_rank,
+        "fulltext_score": r.fulltext_score,
+        "semantic_rank": r.semantic_rank,
+        "semantic_score": r.semantic_score,
+    });
+    if let Some(ref chunk) = r.matched_chunk {
+        obj["matched_chunk"] = json!({
+            "id": chunk.id,
+            "text": chunk.text,
+        });
+    }
+    if let Some(ref block) = r.matched_block {
+        obj["matched_block"] = json!({
+            "id": block.id,
+            "type": block.r#type,
+            "snippet": block.snippet,
+        });
+    } else {
+        // Fulltext-side snippet for the best block (always present).
+        obj["matched_block"] = json!({
+            "id": r.matched_block.as_ref().map(|b| b.id),
+            "type": r.matched_block.as_ref().map(|b| b.r#type.as_str()),
+            "snippet": r.matched_block.as_ref().map(|b| b.snippet.as_str()),
+        });
+    }
+    obj
+}
+
+pub struct Hybrid;
+
+#[async_trait]
+impl RpcHandler for Hybrid {
+    fn method(&self) -> &'static str {
+        "search.hybrid"
+    }
+    fn description(&self) -> &'static str {
+        "Hybrid search fusing fulltext (FTS5 BM25) and semantic (cosine similarity) results via Reciprocal Rank Fusion (k=60). Returns entry-granularity results with per-retriever scores and ranks. Optional weights bias the fusion toward one retriever. Cached per (query, limit, block_type, tag, weights)."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(schemars::schema_for!(HybridParams).to_value())
+    }
+    async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
+        let p: HybridParams = serde_json::from_value(params)
+            .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+
+        let query = p.query;
+        let limit = p.limit;
+        let block_type = p.block_type;
+        let tag = normalize_tag(p.tag);
+        let fw = p.fulltext_weight;
+        let sw = p.semantic_weight;
+        let include_benchmark = daemon
+            .benchmark
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_active());
+
+        let entries = daemon.entries.clone();
+        let chunks = daemon.chunks.clone();
+        let embed = daemon.cache.clone();
+
+        // Snapshot for the compute closure.
+        let bt_for_compute = block_type.clone();
+        let tag_for_compute = tag.clone();
+        let query_for_compute = query.clone();
+
+        let cached = daemon
+            .search_cache
+            .lookup_or_compute(
+                SearchRpc::Hybrid,
+                &query,
+                limit,
+                block_type.as_deref(),
+                tag.as_deref(),
+                || {
+                    let entries = entries.clone();
+                    let chunks = chunks.clone();
+                    let embed = embed.clone();
+                    let bt = bt_for_compute.clone();
+                    let tg = tag_for_compute.clone();
+                    let q = query_for_compute.clone();
+                    async move {
+                        // Expand recall window to 2*limit for RRF boundary cases.
+                        let recall = (limit * 2).max(20) as u32;
+
+                        // Parallel fulltext + semantic.
+                        let (ft_result, sem_result) = tokio::try_join!(
+                            // Fulltext (sync, wrap in blocking)
+                            {
+                                let entries = entries.clone();
+                                let q = q.clone();
+                                let bt = bt.clone();
+                                let tg = tg.clone();
+                                async move {
+                                    blocking(move || {
+                                        if include_benchmark {
+                                            entries.fulltext_search_with_benchmark(
+                                                &q,
+                                                recall,
+                                                bt.as_deref(),
+                                                tg.as_deref(),
+                                            )
+                                        } else {
+                                            entries.fulltext_search(
+                                                &q,
+                                                recall,
+                                                bt.as_deref(),
+                                                tg.as_deref(),
+                                            )
+                                        }
+                                    })
+                                    .await?
+                                }
+                            },
+                            // Semantic (async embed + sync search)
+                            {
+                                let embed = embed.clone();
+                                let chunks = chunks.clone();
+                                let q = q.clone();
+                                let bt = bt.clone();
+                                let tg = tg.clone();
+                                async move {
+                                    let embeddings = embed.embed(&[&q]).await?;
+                                    let qvec = embeddings.into_iter().next().ok_or_else(|| {
+                                        CoreError::Config("empty embedding response".into())
+                                    })?;
+                                    blocking(move || {
+                                        if include_benchmark {
+                                            chunks.semantic_search_with_benchmark(
+                                                &qvec,
+                                                recall as usize,
+                                                bt.as_deref(),
+                                                tg.as_deref(),
+                                            )
+                                        } else {
+                                            chunks.semantic_search(
+                                                &qvec,
+                                                recall as usize,
+                                                bt.as_deref(),
+                                                tg.as_deref(),
+                                            )
+                                        }
+                                    })
+                                    .await?
+                                }
+                            },
+                        )?;
+
+                        // Build ranked (entry_id, score) pairs for RRF.
+                        // Fulltext: entry-level scores from FulltextSearchResult.
+                        let ft_pairs: Vec<(Ulid, f32)> =
+                            ft_result.iter().map(|r| (r.entry.id, r.score)).collect();
+
+                        // Semantic: entry dedup — take highest-scoring chunk per entry.
+                        let mut sem_map: std::collections::HashMap<Ulid, f32> =
+                            std::collections::HashMap::new();
+                        for r in &sem_result {
+                            let e = sem_map.entry(r.entry_id).or_insert(r.score);
+                            if r.score > *e {
+                                *e = r.score;
+                            }
+                        }
+                        let mut sem_pairs: Vec<(Ulid, f32)> = sem_map.into_iter().collect();
+                        sem_pairs.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+
+                        // RRF fuse.
+                        let fused =
+                            nomai_core::rrf_fuse(&ft_pairs, &sem_pairs, [fw, sw], limit as usize);
+
+                        // Build HybridSearchResults: fetch entry + best chunk/block per fused id.
+                        let ft_by_id: std::collections::HashMap<
+                            Ulid,
+                            &nomai_core::FulltextSearchResult,
+                        > = ft_result.iter().map(|r| (r.entry.id, r)).collect();
+                        let sem_by_entry: std::collections::HashMap<
+                            Ulid,
+                            &nomai_core::ChunkSearchResult,
+                        > = {
+                            let mut m = std::collections::HashMap::new();
+                            for r in &sem_result {
+                                m.entry(r.entry_id).or_insert(r);
+                            }
+                            m
+                        };
+
+                        let mut items = Vec::with_capacity(fused.len());
+                        for (entry_id, fusion_score) in &fused {
+                            // Fetch entry (blocking).
+                            let entry = {
+                                let entries = entries.clone();
+                                let id = *entry_id;
+                                blocking(move || {
+                                    if include_benchmark {
+                                        entries.get_with_benchmark(id)
+                                    } else {
+                                        entries.get(id)
+                                    }
+                                })
+                                .await??
+                            };
+
+                            let ft_rank = ft_pairs
+                                .iter()
+                                .position(|(id, _)| id == entry_id)
+                                .map(|p| p as u32 + 1)
+                                .unwrap_or(0);
+                            let ft_score = ft_by_id.get(entry_id).map(|r| r.score).unwrap_or(0.0);
+
+                            let sem_rank = sem_pairs
+                                .iter()
+                                .position(|(id, _)| id == entry_id)
+                                .map(|p| p as u32 + 1)
+                                .unwrap_or(0);
+                            let sem_score =
+                                sem_by_entry.get(entry_id).map(|r| r.score).unwrap_or(0.0);
+
+                            let matched_chunk =
+                                sem_by_entry.get(entry_id).map(|r| nomai_core::ChunkRef {
+                                    id: r.chunk.id,
+                                    text: r.chunk.text.clone(),
+                                });
+
+                            let matched_block =
+                                ft_by_id.get(entry_id).map(|r| nomai_core::BlockRef {
+                                    id: r.best_match.block_id,
+                                    r#type: r.best_match.block_type.clone(),
+                                    snippet: r.best_match.snippet.clone(),
+                                });
+
+                            items.push(serialize_hybrid_result(
+                                &nomai_core::HybridSearchResult {
+                                    entry,
+                                    fusion_score: *fusion_score,
+                                    fulltext_rank: ft_rank,
+                                    fulltext_score: ft_score,
+                                    semantic_rank: sem_rank,
+                                    semantic_score: sem_score,
+                                    matched_chunk,
+                                    matched_block,
+                                },
+                                &q,
+                            ));
+                        }
+
+                        Ok(items)
+                    }
+                },
+            )
+            .await?;
+
+        let items: Vec<Value> = cached.as_ref().clone();
+        let ids: Vec<String> = items
+            .iter()
+            .filter_map(|v| v["entry"]["id"].as_str().map(String::from))
+            .collect();
+        let transient = transient_set(&daemon.entries, ids).await?;
+        // Hybrid items use entry.id like fulltext, so reuse downrank_fulltext.
+        let items = downrank_fulltext(items, &transient);
+        Ok(json!({ "items": items }))
+    }
+}
+
 #[cfg(test)]
 mod descriptor_tests {
     use super::*;
@@ -378,6 +674,24 @@ mod descriptor_tests {
         let v = jsonschema::validator_for(schema).unwrap();
         v.validate(params)
             .map_err(|errs| errs.map(|e| format!("{e}")).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn hybrid_schema_accepts_minimal_params() {
+        let schema = Hybrid.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"query": "hello"})).is_ok());
+    }
+
+    #[test]
+    fn hybrid_schema_accepts_weights() {
+        let schema = Hybrid.input_schema().unwrap();
+        assert!(validate(&schema, &json!({"query": "hello", "fulltext_weight": 2.0})).is_ok());
+    }
+
+    #[test]
+    fn hybrid_schema_rejects_missing_query() {
+        let schema = Hybrid.input_schema().unwrap();
+        assert!(validate(&schema, &json!({})).is_err());
     }
 
     #[test]

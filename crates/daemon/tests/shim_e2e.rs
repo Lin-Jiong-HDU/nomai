@@ -7,6 +7,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+use serde_json::json;
+
 fn binary() -> std::path::PathBuf {
     // Cargo sets CARGO_BIN_EXE_<name> with the binary name EXACTLY as declared
     // (hyphens preserved), unlike CARGO_CRATE_NAME which uses underscores.
@@ -104,4 +106,155 @@ fn shim_serves_a_readonly_rpc_via_resident_daemon() {
 
     drop(stdin); // → shim exits → resident daemon idles out (2s).
     let _ = shim.wait();
+}
+
+#[tokio::test]
+async fn search_hybrid_returns_entry_granular_results() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Start a mock embedding provider on a random port.
+    let mock_server = MockServer::start().await;
+    let dim: usize = 1536;
+    let embedding: Vec<f64> = (0..dim).map(|i| (i % 128) as f64 / 128.0).collect();
+    Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": embedding}],
+            "model": "test",
+            "usage": {"prompt_tokens": 1, "total_tokens": 1}
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Build config pointing at the mock provider.
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = dir.path().join("db.sqlite");
+    let cfg = dir.path().join("config.toml");
+    let toml = format!(
+        r#"
+[data]
+db_path = "{db}"
+
+[embedding]
+base_url = "{base}"
+api_key_env = "NOMAI_E2E_KEY"
+model = "test"
+dim = {dim}
+
+[llm]
+base_url = "{base}"
+api_key_env = "NOMAI_E2E_KEY"
+model = "test"
+
+[serve]
+idle_timeout_secs = 10
+"#,
+        db = db.display(),
+        base = mock_server.uri(),
+    );
+    std::fs::write(&cfg, toml).unwrap();
+
+    let mut child = Command::new(binary())
+        .arg("--config")
+        .arg(&cfg)
+        .env("NOMAI_E2E_KEY", "k")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn shim");
+
+    let stdin = child.stdin.take().unwrap();
+    let reader = BufReader::new(child.stdout.take().unwrap());
+
+    // Wait for the resident daemon socket.
+    let sock = dir.path().join("run").join("nomai.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match std::os::unix::net::UnixStream::connect(&sock) {
+            Ok(_) => break,
+            Err(_) => {
+                if std::time::Instant::now() > deadline {
+                    panic!("daemon never came up at {sock:?}");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+    }
+
+    // Helper: send JSON-RPC request, return parsed response.
+    let mut stdin = stdin;
+    let mut reader = reader;
+    let mut send = |method: &str, params: serde_json::Value| -> serde_json::Value {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        });
+        writeln!(stdin, "{req}").unwrap();
+        stdin.flush().unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        serde_json::from_str(line.trim()).unwrap()
+    };
+
+    // Create two entries with different content.
+    let e1 = send(
+        "entry.create",
+        json!({
+            "title": "Rust Ownership",
+            "blocks": [{"type": "note", "text": "Rust ownership is a unique feature of the language"}]
+        }),
+    );
+    assert!(
+        e1.get("result").is_some(),
+        "entry.create e1 must succeed: {e1}"
+    );
+
+    let e2 = send(
+        "entry.create",
+        json!({
+            "title": "Python Garbage Collection",
+            "blocks": [{"type": "note", "text": "Python uses reference counting and generational GC"}]
+        }),
+    );
+    assert!(
+        e2.get("result").is_some(),
+        "entry.create e2 must succeed: {e2}"
+    );
+
+    // Verify the mock server was called for each creation (two chunks → two calls).
+    let emb_reqs = mock_server.received_requests().await;
+    let n_emb = emb_reqs.as_ref().map(|v| v.len()).unwrap_or(0);
+    assert!(
+        n_emb >= 2,
+        "expected at least 2 embedding requests, got {n_emb}"
+    );
+
+    // Search hybrid.
+    let resp = send(
+        "search.hybrid",
+        json!({
+            "query": "memory management",
+            "limit": 5
+        }),
+    );
+    let result = resp
+        .get("result")
+        .unwrap_or_else(|| panic!("search.hybrid must succeed: {resp}"));
+    let items = result["items"].as_array().unwrap();
+    assert!(!items.is_empty(), "expected at least one hybrid result");
+    for item in items {
+        assert!(item["entry"]["id"].is_string());
+        assert!(item["fusion_score"].as_f64().is_some());
+        assert!(item["fulltext_rank"].as_u64().is_some());
+        assert!(item["semantic_rank"].as_u64().is_some());
+        assert!(item["fulltext_score"].as_f64().is_some());
+        assert!(item["semantic_score"].as_f64().is_some());
+    }
+
+    drop(stdin);
+    let _ = child.wait();
 }
