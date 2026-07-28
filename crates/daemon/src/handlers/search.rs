@@ -150,9 +150,10 @@ fn downrank_hybrid(
         }
     }
     items.sort_by(|a, b| {
-        b["fusion_score"]
-            .as_f64()
-            .partial_cmp(&a["fusion_score"].as_f64())
+        let a_score = a["fusion_score"].as_f64().unwrap_or(0.0);
+        let b_score = b["fusion_score"].as_f64().unwrap_or(0.0);
+        b_score
+            .partial_cmp(&a_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     items
@@ -351,17 +352,14 @@ struct HybridParams {
     #[schemars(default)]
     tag: Option<String>,
     #[serde(default = "default_one")]
-    #[schemars(default = "default_one_f32")]
+    #[schemars(default = "default_one")]
     fulltext_weight: f32,
     #[serde(default = "default_one")]
-    #[schemars(default = "default_one_f32")]
+    #[schemars(default = "default_one")]
     semantic_weight: f32,
 }
 
 fn default_one() -> f32 {
-    1.0
-}
-fn default_one_f32() -> f32 {
     1.0
 }
 
@@ -386,13 +384,6 @@ fn serialize_hybrid_result(r: &nomai_core::HybridSearchResult) -> serde_json::Va
             "id": block.id,
             "type": block.r#type,
             "snippet": block.snippet,
-        });
-    } else {
-        // Fulltext-side snippet for the best block (always present).
-        obj["matched_block"] = json!({
-            "id": r.matched_block.as_ref().map(|b| b.id),
-            "type": r.matched_block.as_ref().map(|b| b.r#type.as_str()),
-            "snippet": r.matched_block.as_ref().map(|b| b.snippet.as_str()),
         });
     }
     obj
@@ -798,5 +789,112 @@ mod descriptor_tests {
                 .unwrap()
                 .contains("**setsid**")
         );
+    }
+
+    // --- hybrid transient demotion ---
+
+    fn downrank_transient_hybrid_for_test(
+        items: Vec<Value>,
+        svc: &nomai_core::EntryService,
+    ) -> Result<Vec<Value>, CoreError> {
+        let ids: Vec<String> = items
+            .iter()
+            .filter_map(|v| v["entry"]["id"].as_str().map(String::from))
+            .collect();
+        let set = svc.transient_ids_among(&ids)?;
+        Ok(downrank_hybrid(items, &set))
+    }
+
+    #[test]
+    fn downrank_demotes_transient_hybrid_and_resorts() {
+        let svc = nomai_core::EntryService::for_test().unwrap();
+        svc.create(nomai_core::CreateEntry {
+            title: "long".into(),
+            blocks: vec![nomai_core::BlockInput {
+                r#type: "note".into(),
+                text: "rust ownership borrow".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: None,
+            source: None,
+            attachments: None,
+        })
+        .unwrap();
+        svc.create(nomai_core::CreateEntry {
+            title: "short".into(),
+            blocks: vec![nomai_core::BlockInput {
+                r#type: "note".into(),
+                text: "rust ownership borrow".into(),
+                attrs: None,
+            }],
+            tags: None,
+            attrs: Some(json!({"transient": true})),
+            source: None,
+            attachments: None,
+        })
+        .unwrap();
+        // Fulltext search yields entry-level scores; rebadge as fusion_score
+        // since that's what downrank_hybrid reads.
+        let hits = svc.fulltext_search("rust", 10, None, None).unwrap();
+        let mut items: Vec<Value> = hits.iter().map(serialize_fulltext_result).collect();
+        for item in &mut items {
+            let score = item["score"].as_f64().unwrap_or(0.0);
+            item["fusion_score"] = json!(score);
+        }
+        let demoted = downrank_transient_hybrid_for_test(items, &svc).unwrap();
+        // Non-transient must sort to top.
+        assert_eq!(demoted[0]["entry"]["title"].as_str(), Some("long"));
+        // Transient entry's fusion_score must be halved.
+        let short_item = demoted
+            .iter()
+            .find(|v| v["entry"]["title"].as_str() == Some("short"))
+            .unwrap();
+        let demoted_score = short_item["fusion_score"].as_f64().unwrap();
+        let orig: f64 = hits
+            .iter()
+            .find(|h| h.entry.title == "short")
+            .map(|h| h.score as f64)
+            .unwrap_or(0.0);
+        assert!((demoted_score - orig * 0.5).abs() < 1e-5);
+    }
+
+    // --- cache key isolation by weights ---
+
+    #[tokio::test]
+    async fn cache_key_isolation_by_weights() {
+        use crate::search_cache::hash_weights;
+
+        let cache = crate::search_cache::SearchCache::new();
+        let _ = cache
+            .lookup_or_compute(
+                crate::search_cache::SearchRpc::Hybrid,
+                "test",
+                10,
+                None,
+                None,
+                Some(hash_weights(1.0, 1.0)),
+                || async { Ok(vec![json!({"fusion_score": 0.5})]) },
+            )
+            .await
+            .unwrap();
+        let _ = cache
+            .lookup_or_compute(
+                crate::search_cache::SearchRpc::Hybrid,
+                "test",
+                10,
+                None,
+                None,
+                Some(hash_weights(2.0, 1.0)),
+                || async { Ok(vec![json!({"fusion_score": 0.3})]) },
+            )
+            .await
+            .unwrap();
+        let stats = cache.stats();
+        assert_eq!(
+            stats.hybrid_misses, 2,
+            "different weights -> 2 distinct keys -> 2 misses"
+        );
+        assert_eq!(stats.hybrid_hits, 0, "no hits when weights differ");
     }
 }

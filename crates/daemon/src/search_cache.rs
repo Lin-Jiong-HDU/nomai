@@ -16,7 +16,6 @@ use serde_json::Value;
 pub(crate) enum SearchRpc {
     Semantic,
     Fulltext,
-    #[allow(dead_code)] // constructed by a future task
     Hybrid,
 }
 

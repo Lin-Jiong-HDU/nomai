@@ -325,7 +325,6 @@ pub struct BlockRef {
 /// ties are broken by fulltext rank ascending (lower = better), then
 /// arbitrary. This is a pure function: no I/O, no allocations beyond the
 /// output vec.
-#[allow(dead_code)]
 pub fn rrf_fuse(
     fulltext_items: &[(Ulid, f32)],
     semantic_items: &[(Ulid, f32)],

@@ -258,3 +258,96 @@ idle_timeout_secs = 10
     drop(stdin);
     let _ = child.wait();
 }
+
+#[tokio::test]
+async fn search_hybrid_propagates_embedding_error() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Start a mock embedding provider that returns 500.
+    let mock_server = MockServer::start().await;
+    let dim: usize = 8;
+    Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/embeddings"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&mock_server)
+        .await;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = dir.path().join("db.sqlite");
+    let cfg = dir.path().join("config.toml");
+    let toml = format!(
+        r#"
+[data]
+db_path = "{db}"
+
+[embedding]
+base_url = "{base}"
+api_key_env = "NOMAI_E2E_KEY"
+model = "test"
+dim = {dim}
+
+[llm]
+base_url = "{base}"
+api_key_env = "NOMAI_E2E_KEY"
+model = "test"
+
+[serve]
+idle_timeout_secs = 10
+"#,
+        db = db.display(),
+        base = mock_server.uri(),
+    );
+    std::fs::write(&cfg, toml).unwrap();
+
+    let mut child = Command::new(binary())
+        .arg("--config")
+        .arg(&cfg)
+        .env("NOMAI_E2E_KEY", "k")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn shim");
+
+    let stdin = child.stdin.take().unwrap();
+    let reader = BufReader::new(child.stdout.take().unwrap());
+
+    // Wait for daemon socket.
+    let sock = dir.path().join("run").join("nomai.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match std::os::unix::net::UnixStream::connect(&sock) {
+            Ok(_) => break,
+            Err(_) => {
+                if std::time::Instant::now() > deadline {
+                    panic!("daemon never came up");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+    }
+
+    let mut stdin = stdin;
+    let mut reader = reader;
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "search.hybrid",
+        "params": {"query": "some query", "limit": 5},
+    });
+    writeln!(stdin, "{req}").unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let resp: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+
+    // The embedding error should propagate — we expect an error response,
+    // not a result with fallback to fulltext-only.
+    assert!(
+        resp.get("error").is_some(),
+        "embedding error should propagate, got: {resp}"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
