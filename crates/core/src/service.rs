@@ -315,47 +315,61 @@ pub struct BlockRef {
 ///
 /// Each input slice is already sorted by its native score descending (best
 /// first, rank=1). `weights` are per-retriever multipliers applied before
-/// summation. `k` is the smoothing constant (60 per TREC best-practice).
-/// `top_n` caps the output length.
+/// summation. `top_n` caps the output length.
+///
+/// RRF k is hardcoded to 60.0 (TREC best-practice constant). Not exposed
+/// via config (YAGNI).
 ///
 /// An entry appearing in only one list gets zero contribution from the
 /// other (no rank penalty). The output is sorted by fusion score descending;
-/// ties are broken by the order rows appear in `fulltext_items` first, then
-/// `semantic_items` (stable sort by construction).
-///
-/// This is a pure function: no I/O, no allocations beyond the output vec.
+/// ties are broken by fulltext rank ascending (lower = better), then
+/// arbitrary. This is a pure function: no I/O, no allocations beyond the
+/// output vec.
 #[allow(dead_code)]
 pub(crate) fn rrf_fuse(
     fulltext_items: &[(Ulid, f32)],
     semantic_items: &[(Ulid, f32)],
     weights: [f32; 2],
-    k: f64,
     top_n: usize,
 ) -> Vec<(Ulid, f32)> {
     use std::collections::HashMap;
+
+    const RRF_K: f64 = 60.0;
 
     if fulltext_items.is_empty() && semantic_items.is_empty() {
         return Vec::new();
     }
 
-    // Assign ranks: 1-based, best score = rank 1.
-    let mut scores: HashMap<Ulid, f32> = HashMap::new();
+    // Accumulate fusion scores per entry.  Also track each entry's 1-based
+    // fulltext rank so tie-breaking is deterministic: entries that appear
+    // earlier in the fulltext list (lower rank) win ties.  Entries absent
+    // from the fulltext list default to u32::MAX so they sort after entries
+    // that are present in both result sets.
+    let mut fusion: HashMap<Ulid, f32> = HashMap::new();
+    let mut ft_rank: HashMap<Ulid, u32> = HashMap::new();
 
     for (rank_0based, (id, _score)) in fulltext_items.iter().enumerate() {
         let rank = (rank_0based + 1) as f64;
-        let contribution = weights[0] as f64 / (k + rank);
-        *scores.entry(*id).or_insert(0.0) += contribution as f32;
+        *fusion.entry(*id).or_insert(0.0) += (weights[0] as f64 / (RRF_K + rank)) as f32;
+        ft_rank.entry(*id).or_insert((rank_0based + 1) as u32);
     }
 
     for (rank_0based, (id, _score)) in semantic_items.iter().enumerate() {
         let rank = (rank_0based + 1) as f64;
-        let contribution = weights[1] as f64 / (k + rank);
-        *scores.entry(*id).or_insert(0.0) += contribution as f32;
+        *fusion.entry(*id).or_insert(0.0) += (weights[1] as f64 / (RRF_K + rank)) as f32;
     }
 
-    // Collect + sort by fusion score descending.
-    let mut result: Vec<(Ulid, f32)> = scores.into_iter().collect();
-    result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort by fusion score descending; ties broken by fulltext rank ascending.
+    let mut result: Vec<(Ulid, f32)> = fusion.into_iter().collect();
+    result.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                let a_r = ft_rank.get(&a.0).copied().unwrap_or(u32::MAX);
+                let b_r = ft_rank.get(&b.0).copied().unwrap_or(u32::MAX);
+                a_r.cmp(&b_r)
+            })
+    });
     result.truncate(top_n);
     result
 }
@@ -4158,7 +4172,7 @@ mod tests {
 
     #[test]
     fn rrf_fuse_empty_inputs_returns_empty() {
-        let result = rrf_fuse(&[], &[], [1.0, 1.0], 60.0, 10);
+        let result = rrf_fuse(&[], &[], [1.0, 1.0], 10);
         assert!(result.is_empty());
     }
 
@@ -4168,7 +4182,7 @@ mod tests {
         let id_a: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
         let id_b: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FBW".parse().unwrap();
         let ft = vec![(id_a, 10.0), (id_b, 5.0)];
-        let result = rrf_fuse(&ft, &[], [1.0, 1.0], 60.0, 10);
+        let result = rrf_fuse(&ft, &[], [1.0, 1.0], 10);
         assert_eq!(result.len(), 2);
         // id_a rank=1 => fusion = 1.0/(60+1) ~= 0.0164
         // id_b rank=2 => fusion = 1.0/(60+2) ~= 0.0161
@@ -4185,12 +4199,28 @@ mod tests {
         let ft = vec![(id_a, 10.0), (id_b, 5.0)];
         // semantic: B(rank=1, best), A(rank=2)
         let sem = vec![(id_b, 0.9), (id_a, 0.7)];
-        let result = rrf_fuse(&ft, &sem, [1.0, 1.0], 60.0, 10);
+        let result = rrf_fuse(&ft, &sem, [1.0, 1.0], 10);
         // Both entries appear in both lists => symmetric fusion scores
         assert_eq!(result.len(), 2);
         // A: ft_rank=1 => 1/(60+1) + sem_rank=2 => 1/(60+2) ~= 0.0164 + 0.0161 = 0.0325
         // B: ft_rank=2 => 1/(60+2) + sem_rank=1 => 1/(60+1) ~= 0.0161 + 0.0164 = 0.0325
-        // Same score => stable sort preserves input order (A first from fulltext)
+        let expected_score = (1.0 / 61.0 + 1.0 / 62.0) as f32;
+        let eps = 1e-6_f32;
+        assert!(
+            (result[0].1 - expected_score).abs() < eps,
+            "result[0] score {} != expected {}",
+            result[0].1,
+            expected_score,
+        );
+        assert!(
+            (result[1].1 - expected_score).abs() < eps,
+            "result[1] score {} != expected {}",
+            result[1].1,
+            expected_score,
+        );
+        // Tie-breaking: A has ft_rank=1, B has ft_rank=2 => A comes first
+        assert_eq!(result[0].0, id_a);
+        assert_eq!(result[1].0, id_b);
     }
 
     #[test]
@@ -4200,7 +4230,7 @@ mod tests {
         let ft = vec![(id_a, 10.0), (id_b, 5.0)];
         let sem = vec![(id_b, 0.9), (id_a, 0.7)];
         // fulltext_weight=2.0, semantic_weight=0.5 => fulltext dominates
-        let result = rrf_fuse(&ft, &sem, [2.0, 0.5], 60.0, 10);
+        let result = rrf_fuse(&ft, &sem, [2.0, 0.5], 10);
         // A gets more weight from fulltext where it's #1
         assert_eq!(result[0].0, id_a);
     }
@@ -4213,7 +4243,7 @@ mod tests {
             .enumerate()
             .map(|(i, id)| (*id, (10 - i) as f32))
             .collect();
-        let result = rrf_fuse(&ft, &[], [1.0, 1.0], 60.0, 3);
+        let result = rrf_fuse(&ft, &[], [1.0, 1.0], 3);
         assert_eq!(result.len(), 3);
     }
 
