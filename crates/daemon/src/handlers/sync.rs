@@ -880,10 +880,7 @@ mod tests {
             let h = reg
                 .get(name)
                 .unwrap_or_else(|| panic!("registry has {name}"));
-            assert!(
-                h.is_mutating(),
-                "{name} should be is_mutating() == true"
-            );
+            assert!(h.is_mutating(), "{name} should be is_mutating() == true");
         }
 
         // Handlers that MUST NOT be marked mutating.
