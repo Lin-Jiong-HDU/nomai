@@ -26,9 +26,9 @@ PUBLIC = re.compile(r'\b(JSON-?RPC|MCP|Model Context Protocol|modelcontextprotoc
 
 RX_PATH     = re.compile(r'docs/superpowers/(?:specs|plans)/[^\s)`\'",>]+\.md(?:\s*§[\d.]+)?')
 RX_VERTRACE = re.compile(r',\s*Spec\s*\d+\s+Plan\s+\d+\s*/\s*F-[a-z]+-\d+')
-RX_SPEC_SEC = re.compile(r'Spec\s*\d*\s*§\s*[\d.]+')
-RX_SPEC_N   = re.compile(r'\bSpec\s+\d+\b')
-RX_PLAN     = re.compile(r'\bPlan\s+\d+(?:\s+Task\s+\d+)?\b')
+RX_SPEC_SEC = re.compile(r'[Ss]pec\s*\d*\s*§\s*[\d.]+')
+RX_SPEC_N   = re.compile(r'\b[Ss]pec\s+\d+\b')
+RX_PLAN     = re.compile(r'\b[Pp]lan[-\s]+\d+(?:\s+Task\s+\d+)?\b')
 RX_FID      = re.compile(r'\bF-[a-z]+-\d+\b')
 RX_ROADMAP  = re.compile(r'^(\s*-\s*)\*\*Spec\s*\d+\*\*\s*—\s*', re.MULTILINE)
 
