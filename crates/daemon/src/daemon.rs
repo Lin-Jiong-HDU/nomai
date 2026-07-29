@@ -10,7 +10,8 @@ use nomai_core::{
     chunk_model::DimReconciliation,
 };
 use nomai_providers::{
-    CachedEmbedder, EmbeddingProvider, LlmProvider, OpenAiCompatibleEmbed, OpenAiCompatibleLlm,
+    CachedEmbedder, EmbeddingProvider, LLMReranker, LlmProvider, NoopReranker,
+    OpenAiCompatibleEmbed, OpenAiCompatibleLlm, Reranker,
 };
 
 use crate::config::Config;
@@ -82,6 +83,9 @@ pub struct Daemon {
     pub(crate) search_cache: Arc<crate::search_cache::SearchCache>,
     pub(crate) benchmark: Option<Arc<crate::benchmark::BenchmarkRuntime>>,
     pub(crate) llm: Arc<dyn LlmProvider>,
+    /// Reranker for candidate re-scoring. Defaults to `NoopReranker` when
+    /// `[reranking]` config is absent or `enabled = false`.
+    pub(crate) reranker: Arc<dyn Reranker>,
     pub(crate) embedding_model: String,
     pub(crate) llm_model: String,
     // Used by search.semantic; keep despite no current reader.
@@ -219,6 +223,20 @@ impl Daemon {
         let llm_model = config.llm.model.clone();
         let embedding_dim = config.embedding.dim;
 
+        let reranker: Arc<dyn Reranker> = if config.reranking.enabled {
+            let model = if config.reranking.model.is_empty() {
+                config.llm.model.clone()
+            } else {
+                config.reranking.model.clone()
+            };
+            Arc::new(
+                LLMReranker::new(llm.clone(), model)
+                    .with_max_candidates(config.reranking.max_candidates),
+            )
+        } else {
+            Arc::new(NoopReranker)
+        };
+
         let benchmark = if config.development.enabled {
             Some(Arc::new(crate::benchmark::BenchmarkRuntime::new(
                 config.development.clone(),
@@ -245,6 +263,7 @@ impl Daemon {
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
             benchmark,
             llm,
+            reranker,
             embedding_model,
             llm_model,
             embedding_dim,
@@ -322,6 +341,7 @@ impl Daemon {
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
             benchmark: None,
             llm,
+            reranker: Arc::new(NoopReranker),
             embedding_model,
             llm_model,
             embedding_dim,
@@ -376,6 +396,10 @@ impl Daemon {
     #[allow(dead_code)]
     pub fn llm(&self) -> &Arc<dyn LlmProvider> {
         &self.llm
+    }
+    #[allow(dead_code)]
+    pub fn reranker(&self) -> &Arc<dyn Reranker> {
+        &self.reranker
     }
 
     /// Link this Daemon to the slot that holds it. Called once by
@@ -444,6 +468,7 @@ impl Daemon {
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
             benchmark: None,
             llm,
+            reranker: Arc::new(NoopReranker),
             embedding_model: String::new(),
             llm_model: String::new(),
             embedding_dim,
@@ -744,6 +769,7 @@ pub struct DaemonBuilder {
     cache_model: Option<String>,
     warn_rows: Option<u64>,
     attachment_max_bytes: Option<usize>,
+    reranker: Option<Arc<dyn Reranker>>,
 }
 
 #[allow(dead_code)] // lib-mode extension point; binary daemon doesn't use this
@@ -759,6 +785,7 @@ impl DaemonBuilder {
             cache_model: None,
             warn_rows: None,
             attachment_max_bytes: None,
+            reranker: None,
         }
     }
 
@@ -801,9 +828,14 @@ impl DaemonBuilder {
         self.attachment_max_bytes = Some(v);
         self
     }
+    /// Optional reranker. When unset, `NoopReranker` is used.
+    pub fn reranker(mut self, v: Arc<dyn Reranker>) -> Self {
+        self.reranker = Some(v);
+        self
+    }
 
     pub fn build(self) -> Result<Daemon, CoreError> {
-        Daemon::from_services(
+        let mut daemon = Daemon::from_services(
             self.conn
                 .ok_or_else(|| CoreError::Config("DaemonBuilder: conn required".into()))?,
             self.content_store
@@ -824,7 +856,11 @@ impl DaemonBuilder {
             // Default to the production cap when the builder omitted it; this
             // mirrors Daemon::new (config.data.attachment_max_bytes default).
             self.attachment_max_bytes.unwrap_or(10 * 1024 * 1024),
-        )
+        )?;
+        if let Some(reranker) = self.reranker {
+            daemon.reranker = reranker;
+        }
+        Ok(daemon)
     }
 }
 

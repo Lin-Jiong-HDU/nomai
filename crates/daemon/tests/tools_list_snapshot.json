@@ -773,6 +773,59 @@
       "name": "provider.list"
     },
     {
+      "description": "Rerank candidate documents against a query using the configured reranker. Candidates are scored for relevance and returned sorted best-first. Use after search to refine results, or independently with any document set.",
+      "inputSchema": {
+        "$defs": {
+          "RerankCandidateWire": {
+            "description": "Wire-level candidate (mirrors providers::RerankCandidate but with\nschemars JsonSchema derive — the providers type is intentionally\nschema-free because it's a trait-level type).",
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "score": {
+                "format": "float",
+                "type": "number"
+              }
+            },
+            "required": [
+              "id",
+              "content",
+              "score"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "candidates": {
+            "items": {
+              "$ref": "#/$defs/RerankCandidateWire"
+            },
+            "type": "array"
+          },
+          "query": {
+            "type": "string"
+          },
+          "top_n": {
+            "default": 10,
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query",
+          "candidates"
+        ],
+        "title": "RerankParams",
+        "type": "object"
+      },
+      "name": "rerank.rerank"
+    },
+    {
       "description": "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Score is relative relevance (not a boolean hit marker): higher means stronger match; near-zero means weak match. Optional `tag` restricts results to entries whose `tags` array contains that value. Each call is cached per (query, limit, block_type, tag).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -793,6 +846,22 @@
           },
           "query": {
             "type": "string"
+          },
+          "rewrite": {
+            "default": null,
+            "description": "Optional query rewriting strategy. Currently only `\"expand\"` is\nsupported — resolves pronouns and expands abbreviations using\nthe configured LLM. Omit to skip rewriting.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rewrite_context": {
+            "default": null,
+            "description": "Conversation context for query rewriting. Helps the LLM resolve\npronouns and implicit references. Only used when `rewrite` is set.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "tag": {
             "default": null,
@@ -837,6 +906,22 @@
           "query": {
             "type": "string"
           },
+          "rewrite": {
+            "default": null,
+            "description": "Optional query rewriting strategy. Currently only `\"expand\"` is\nsupported — resolves pronouns and expands abbreviations using\nthe configured LLM. Omit to skip rewriting.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rewrite_context": {
+            "default": null,
+            "description": "Conversation context for query rewriting. Helps the LLM resolve\npronouns and implicit references. Only used when `rewrite` is set.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "semantic_weight": {
             "default": 1.0,
             "format": "float",
@@ -879,6 +964,22 @@
           },
           "query": {
             "type": "string"
+          },
+          "rewrite": {
+            "default": null,
+            "description": "Optional query rewriting strategy. Currently only `\"expand\"` is\nsupported — resolves pronouns and expands abbreviations using\nthe configured LLM. Omit to skip rewriting.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rewrite_context": {
+            "default": null,
+            "description": "Conversation context for query rewriting. Helps the LLM resolve\npronouns and implicit references. Only used when `rewrite` is set.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "tag": {
             "default": null,

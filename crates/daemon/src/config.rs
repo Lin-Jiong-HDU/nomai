@@ -20,6 +20,8 @@ pub struct Config {
     pub chunking: ChunkingConfig,
     #[serde(default)]
     pub development: DevelopmentConfig,
+    #[serde(default)]
+    pub reranking: RerankingConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -147,6 +149,37 @@ impl Default for ServeConfig {
 
 fn default_idle_timeout_secs() -> u64 {
     30
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RerankingConfig {
+    /// When true, the LLM reranker is active. When false (default), the
+    /// NoopReranker is used regardless of other fields in this section.
+    #[serde(default)]
+    pub enabled: bool,
+    /// LLM model for reranking. Defaults to the value of `[llm].model`
+    /// when empty.
+    #[serde(default)]
+    pub model: String,
+    /// Maximum candidates sent to the LLM per rerank call. Excess
+    /// candidates are truncated by original score before the LLM call.
+    #[serde(default = "default_max_candidates")]
+    pub max_candidates: usize,
+}
+
+impl Default for RerankingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: String::new(),
+            max_candidates: default_max_candidates(),
+        }
+    }
+}
+
+fn default_max_candidates() -> usize {
+    20
 }
 
 #[derive(Debug, Error)]

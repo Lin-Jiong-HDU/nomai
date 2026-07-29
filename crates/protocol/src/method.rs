@@ -146,6 +146,10 @@ pub mod sync {
     pub const RUN: &str = "sync.run";
 }
 
+pub mod rerank {
+    pub const RERANK: &str = "rerank.rerank";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +248,10 @@ mod tests {
     fn sync_namespace_methods() {
         assert_eq!(sync::INIT, "sync.init");
         assert_eq!(sync::RUN, "sync.run");
+    }
+
+    #[test]
+    fn rerank_namespace_methods() {
+        assert_eq!(rerank::RERANK, "rerank.rerank");
     }
 }

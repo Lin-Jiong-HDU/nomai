@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 
 use crate::error::ProviderError;
+use crate::rerank::{RerankCandidate, RerankedCandidate};
 use crate::types::CompletionRequest;
 
 #[async_trait]
@@ -23,5 +24,28 @@ pub trait LlmProvider: Send + Sync {
         &self,
         req: CompletionRequest,
     ) -> Result<crate::types::CompletionResponse, ProviderError>;
+    fn name(&self) -> &str;
+}
+
+/// Rerank candidate documents against a query.
+///
+/// Implementations may use LLM-based scoring, cross-encoder models, or
+/// any other relevance estimation strategy. The trait is intentionally
+/// generic: `id` and `content` are owned `String`s so callers can pass
+/// arbitrary identifiers (ULIDs, URLs, etc.) without coupling to nomai
+/// core types.
+#[async_trait]
+pub trait Reranker: Send + Sync {
+    /// Rerank candidates against `query`. Returns candidates sorted by
+    /// `rerank_score` descending, limited to `top_n`. Input order is
+    /// preserved for equal scores (stable sort).
+    async fn rerank(
+        &self,
+        query: &str,
+        candidates: &[RerankCandidate],
+        top_n: usize,
+    ) -> Result<Vec<RerankedCandidate>, ProviderError>;
+
+    /// Short human-readable identifier (e.g. "llm-gpt-4o-mini", "noop").
     fn name(&self) -> &str;
 }
