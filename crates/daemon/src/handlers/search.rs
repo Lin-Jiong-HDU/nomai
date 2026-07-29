@@ -3,10 +3,13 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use ulid::Ulid;
 
 use nomai_core::CoreError;
-use nomai_providers::EmbeddingProvider;
+use nomai_providers::{
+    ChatMessage, CompletionRequest, EmbeddingProvider, LlmProvider, MessageRole,
+};
 
 use crate::daemon::Daemon;
 use crate::handlers::entry::blocking;
@@ -27,6 +30,48 @@ fn normalize_tag(tag: Option<String>) -> Option<String> {
     })
 }
 
+/// Attempt to expand a vague/context-dependent query into a specific,
+/// self-contained search query using the configured LLM.
+///
+/// On success, returns the rewritten query. On any failure (LLM error,
+/// empty response, timeout), returns the original query — rewrite is a
+/// best-effort optimization, never a hard failure.
+async fn expand_query(llm: &Arc<dyn LlmProvider>, query: &str, context: Option<&str>) -> String {
+    let system = "Rewrite the given search query to be specific, self-contained, \
+                  and suitable for a search engine. Resolve pronouns, expand \
+                  abbreviations, and add missing context. Return ONLY the \
+                  rewritten query text, no explanation, no markdown."
+        .to_string();
+
+    let context_hint = context
+        .map(|c| format!("\n\nContext: {c}"))
+        .unwrap_or_default();
+
+    let user = format!("Query: {query}{context_hint}");
+
+    let req = CompletionRequest {
+        system: Some(system),
+        messages: vec![ChatMessage {
+            role: MessageRole::User,
+            content: user,
+        }],
+        max_tokens: Some(200),
+        temperature: Some(0.0),
+    };
+
+    match llm.complete(req).await {
+        Ok(resp) => {
+            let rewritten = resp.content.trim().to_string();
+            if rewritten.is_empty() {
+                query.to_string()
+            } else {
+                rewritten
+            }
+        }
+        Err(_) => query.to_string(),
+    }
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 struct FulltextParams {
     query: String,
@@ -44,6 +89,17 @@ struct FulltextParams {
     #[serde(default)]
     #[schemars(default)]
     tag: Option<String>,
+    /// Optional query rewriting strategy. Currently only `"expand"` is
+    /// supported — resolves pronouns and expands abbreviations using
+    /// the configured LLM. Omit to skip rewriting.
+    #[serde(default)]
+    #[schemars(default)]
+    rewrite: Option<String>,
+    /// Conversation context for query rewriting. Helps the LLM resolve
+    /// pronouns and implicit references. Only used when `rewrite` is set.
+    #[serde(default)]
+    #[schemars(default)]
+    rewrite_context: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -62,6 +118,17 @@ struct SemanticParams {
     #[serde(default)]
     #[schemars(default)]
     tag: Option<String>,
+    /// Optional query rewriting strategy. Currently only `"expand"` is
+    /// supported — resolves pronouns and expands abbreviations using
+    /// the configured LLM. Omit to skip rewriting.
+    #[serde(default)]
+    #[schemars(default)]
+    rewrite: Option<String>,
+    /// Conversation context for query rewriting. Helps the LLM resolve
+    /// pronouns and implicit references. Only used when `rewrite` is set.
+    #[serde(default)]
+    #[schemars(default)]
+    rewrite_context: Option<String>,
 }
 
 /// Map a `FulltextSearchResult` to the wire JSON object. Extracted so the
@@ -187,7 +254,13 @@ impl RpcHandler for Fulltext {
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
         let entries = daemon.entries.clone();
-        let query = p.query;
+        // Optional query rewrite (before cache lookup — rewritten query is
+        // what gets cached, so the cache key is deterministic per input).
+        let query = if p.rewrite.as_deref() == Some("expand") {
+            expand_query(&daemon.llm, &p.query, p.rewrite_context.as_deref()).await
+        } else {
+            p.query
+        };
         let limit = p.limit;
         let block_type = p.block_type;
         // Trim-normalize tag: empty / whitespace-only → None (no filter).
@@ -271,7 +344,13 @@ impl RpcHandler for Semantic {
         let p: SemanticParams = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
-        let query_str = p.query;
+        // Optional query rewrite (before cache lookup — rewritten query is
+        // what gets cached, so the cache key is deterministic per input).
+        let query_str = if p.rewrite.as_deref() == Some("expand") {
+            expand_query(&daemon.llm, &p.query, p.rewrite_context.as_deref()).await
+        } else {
+            p.query
+        };
         let limit = p.limit;
         let block_type = p.block_type;
         // Trim-normalize tag: empty / whitespace-only → None (no filter).
@@ -357,6 +436,17 @@ struct HybridParams {
     #[serde(default = "default_one")]
     #[schemars(default = "default_one")]
     semantic_weight: f32,
+    /// Optional query rewriting strategy. Currently only `"expand"` is
+    /// supported — resolves pronouns and expands abbreviations using
+    /// the configured LLM. Omit to skip rewriting.
+    #[serde(default)]
+    #[schemars(default)]
+    rewrite: Option<String>,
+    /// Conversation context for query rewriting. Helps the LLM resolve
+    /// pronouns and implicit references. Only used when `rewrite` is set.
+    #[serde(default)]
+    #[schemars(default)]
+    rewrite_context: Option<String>,
 }
 
 fn default_one() -> f32 {
@@ -406,7 +496,13 @@ impl RpcHandler for Hybrid {
         let p: HybridParams = serde_json::from_value(params)
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
 
-        let query = p.query;
+        // Optional query rewrite (before cache lookup — rewritten query is
+        // what gets cached, so the cache key is deterministic per input).
+        let query = if p.rewrite.as_deref() == Some("expand") {
+            expand_query(&daemon.llm, &p.query, p.rewrite_context.as_deref()).await
+        } else {
+            p.query
+        };
         let limit = p.limit;
         let block_type = p.block_type;
         let tag = normalize_tag(p.tag);
@@ -896,5 +992,32 @@ mod descriptor_tests {
             "different weights -> 2 distinct keys -> 2 misses"
         );
         assert_eq!(stats.hybrid_hits, 0, "no hits when weights differ");
+    }
+
+    // --- query rewrite ---
+
+    #[tokio::test]
+    async fn expand_query_returns_original_on_llm_failure() {
+        struct FailingLlm;
+        #[async_trait]
+        impl LlmProvider for FailingLlm {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<nomai_providers::CompletionResponse, nomai_providers::ProviderError>
+            {
+                Err(nomai_providers::ProviderError::new(
+                    nomai_providers::ProviderErrorKind::Network,
+                    "down",
+                    None,
+                ))
+            }
+            fn name(&self) -> &str {
+                "failing"
+            }
+        }
+        let llm: Arc<dyn LlmProvider> = Arc::new(FailingLlm);
+        let result = expand_query(&llm, "那玩意怎么用", Some("讨论 nomai chunking")).await;
+        assert_eq!(result, "那玩意怎么用");
     }
 }

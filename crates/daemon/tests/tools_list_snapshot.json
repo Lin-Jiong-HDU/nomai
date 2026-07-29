@@ -847,6 +847,22 @@
           "query": {
             "type": "string"
           },
+          "rewrite": {
+            "default": null,
+            "description": "Optional query rewriting strategy. Currently only `\"expand\"` is\nsupported — resolves pronouns and expands abbreviations using\nthe configured LLM. Omit to skip rewriting.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rewrite_context": {
+            "default": null,
+            "description": "Conversation context for query rewriting. Helps the LLM resolve\npronouns and implicit references. Only used when `rewrite` is set.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "tag": {
             "default": null,
             "description": "Optional tag filter: restricts matches to entries whose `tags` JSON\narray contains this exact value (same semantics as `entry.list`'s\n`tag`). Whitespace-only / empty values are treated as no filter.",
@@ -890,6 +906,22 @@
           "query": {
             "type": "string"
           },
+          "rewrite": {
+            "default": null,
+            "description": "Optional query rewriting strategy. Currently only `\"expand\"` is\nsupported — resolves pronouns and expands abbreviations using\nthe configured LLM. Omit to skip rewriting.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rewrite_context": {
+            "default": null,
+            "description": "Conversation context for query rewriting. Helps the LLM resolve\npronouns and implicit references. Only used when `rewrite` is set.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "semantic_weight": {
             "default": 1.0,
             "format": "float",
@@ -932,6 +964,22 @@
           },
           "query": {
             "type": "string"
+          },
+          "rewrite": {
+            "default": null,
+            "description": "Optional query rewriting strategy. Currently only `\"expand\"` is\nsupported — resolves pronouns and expands abbreviations using\nthe configured LLM. Omit to skip rewriting.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rewrite_context": {
+            "default": null,
+            "description": "Conversation context for query rewriting. Helps the LLM resolve\npronouns and implicit references. Only used when `rewrite` is set.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "tag": {
             "default": null,
