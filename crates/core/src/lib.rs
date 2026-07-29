@@ -7,6 +7,7 @@ pub mod chunk_service;
 pub mod chunking;
 pub mod content_store;
 pub mod conversation_model;
+pub mod conversation_service;
 pub mod error;
 pub mod event_model;
 pub mod event_service;

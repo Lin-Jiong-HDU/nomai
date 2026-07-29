@@ -37,7 +37,7 @@ CREATE VIRTUAL TABLE fts_turns USING fts5(
 CREATE TRIGGER turns_ai AFTER INSERT ON turns BEGIN
     UPDATE conversations
     SET turn_count = turn_count + 1,
-        updated_at = datetime('now')
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     WHERE id = NEW.conversation_id;
     INSERT INTO fts_turns(rowid, content) VALUES (NEW.rowid, NEW.content);
 END;
@@ -46,7 +46,7 @@ END;
 CREATE TRIGGER turns_ad AFTER DELETE ON turns BEGIN
     UPDATE conversations
     SET turn_count = turn_count - 1,
-        updated_at = datetime('now')
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     WHERE id = OLD.conversation_id;
     INSERT INTO fts_turns(fts_turns, rowid, content) VALUES ('delete', OLD.rowid, OLD.content);
 END;
