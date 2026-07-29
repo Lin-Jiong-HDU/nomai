@@ -1444,7 +1444,7 @@ impl EntryService {
     }
 
     /// Return the subset of `ids` that are marked transient. Used by the
-    /// search demotion policy (Spec transient §5.2) to identify which cached
+    /// search demotion policy to identify which cached
     /// hits to down-rank — without re-running the search and without caching
     /// a possibly-stale transient snapshot.
     pub fn transient_ids_among(
