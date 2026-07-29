@@ -1,6 +1,4 @@
 //! LinkService: directed edges between entries.
-//!
-//! See spec §4-§5 for schema and RPC contract.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -61,7 +59,7 @@ impl LinkService {
     /// `attrs` defaults to `{}` if omitted; non-object values are rejected
     /// with `CoreError::Validation`. FK violations (source/target does not
     /// exist) and UNIQUE conflicts on (source, target, relation) both map
-    /// to `CoreError::Validation` per spec §5. Other SQLite errors map to
+    /// to `CoreError::Validation`. Other SQLite errors map to
     /// `CoreError::Storage`.
     pub fn create(&self, params: CreateLink) -> Result<Link, CoreError> {
         let conn = self.conn.lock().unwrap();
@@ -83,7 +81,7 @@ impl LinkService {
     /// Does NOT lock self.conn (caller already holds the lock).
     /// Does NOT call self.get() or other self methods that lock conn.
     ///
-    /// FK + UNIQUE ConstraintViolation → `CoreError::Validation` per spec §5.
+    /// FK + UNIQUE ConstraintViolation → `CoreError::Validation`.
     pub fn create_in_tx(&self, conn: &Connection, params: CreateLink) -> Result<Link, CoreError> {
         let attrs = params
             .attrs
@@ -116,7 +114,7 @@ impl LinkService {
         ) {
             Ok(_) => {}
             Err(e) => {
-                // Map ConstraintViolation (FK + UNIQUE) to Validation per spec.
+                // Map ConstraintViolation (FK + UNIQUE) to Validation.
                 if let rusqlite::Error::SqliteFailure(ref fe, _) = e {
                     if fe.code == rusqlite::ErrorCode::ConstraintViolation {
                         return Err(CoreError::Validation(format!(
@@ -215,7 +213,7 @@ impl LinkService {
     /// List links filtered by source, target, and/or relation.
     ///
     /// At least one of `from` / `to` must be `Some` — "list all links" is
-    /// rejected with `CoreError::Validation` (spec §5). Results are ordered by
+    /// rejected with `CoreError::Validation`. Results are ordered by
     /// `created_at, id` and paged via `limit` / `offset`. Returns the page
     /// plus the total count of matching rows (ignoring paging).
     pub fn list(&self, query: ListLinkQuery) -> Result<ListLinkResult, CoreError> {
@@ -533,7 +531,7 @@ mod tests {
     #[test]
     fn create_returns_validation_when_source_does_not_exist() {
         // FK violation. With PRAGMA foreign_keys = ON, SQLite returns
-        // SQLITE_CONSTRAINT ForeignKey. Map this to Validation per spec §5.
+        // SQLITE_CONSTRAINT ForeignKey. Map this to Validation.
         let (entries, links) = setup();
         let b = seed_entry(&entries, "b");
         let phantom: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();

@@ -77,7 +77,7 @@ impl BlockService {
     /// Execute create within an existing transaction. Caller controls BEGIN/COMMIT.
     /// Does NOT lock self.conn. Does NOT call self methods that lock conn.
     ///
-    /// FK + UNIQUE ConstraintViolation → `CoreError::Validation` per spec §6.3.
+    /// FK + UNIQUE ConstraintViolation → `CoreError::Validation`.
     pub fn create_in_tx(
         &self,
         conn: &Connection,

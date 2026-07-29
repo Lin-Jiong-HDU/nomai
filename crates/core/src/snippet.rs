@@ -37,7 +37,7 @@ pub fn extract_snippet(text: &str, query: &str) -> String {
 
     let mut out = String::new();
     // Ellipsis only in normal padding mode (left>0 / right>0); when the hit
-    // itself fills the window we emit just the hit per spec §5.
+    // itself fills the window we emit just the hit.
     if ws > 0 && left > 0 {
         out.push('…');
     }

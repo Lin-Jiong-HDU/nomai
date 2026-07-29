@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ulid::Ulid;
 
-/// A typed block belonging to an entry. Blocks are immutable per spec §6.1
+/// A typed block belonging to an entry. Blocks are immutable
 /// (`block.update` is a delete + create at the RPC layer).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Block {

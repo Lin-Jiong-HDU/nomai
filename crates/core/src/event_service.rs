@@ -1,7 +1,7 @@
 //! EventService: query/cleanup for the append-only events log.
 //!
 //! Emission is NOT here — EntryService and LinkService append events directly
-//! via SQL INSERT inside their mutation transactions (spec §5). EventService
+//! via SQL INSERT inside their mutation transactions. EventService
 //! only reads and purges, to avoid circular dependencies.
 
 use std::sync::{Arc, Mutex};

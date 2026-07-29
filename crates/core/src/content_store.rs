@@ -24,7 +24,7 @@ pub struct ContentStore {
 }
 
 /// Metadata for one sibling attachment file. Returned by `list_attachments`.
-/// Not stored in SQLite — derived from FS on each call (spec §11.1: no
+/// Not stored in SQLite — derived from FS on each call (no
 /// attachment manifest table).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AttachmentMeta {

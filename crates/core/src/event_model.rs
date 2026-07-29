@@ -6,8 +6,6 @@ use serde_json::Value;
 use ulid::Ulid;
 
 /// An event in the append-only mutation log.
-///
-/// See spec §4-§6 for schema and RPC contract.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub id: Ulid,

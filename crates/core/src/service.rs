@@ -66,7 +66,7 @@ pub struct VerifyResult {
 
 /// Result of `EntryService::export_to_fs`: walks every entry row and
 /// generates the `.nomai` file on disk for those that lack one. Migration
-/// utility — post-Plan-3 entries created via `EntryService::create` already
+/// utility — entries created via `EntryService::create` already
 /// have their `.nomai` and are skipped; this is for legacy rows or entries
 /// created via direct DB manipulation. `exported` counts entries that got a
 /// fresh `.nomai` (and had their `fs_path`/`fs_mtime` populated); `skipped`
@@ -557,7 +557,7 @@ impl EntryService {
 
         // ── NEW: write sibling attachments + validate src refs (FS-before-BEGIN). ──
         // Done before the INSERT so a failure leaves no DB row; on error we remove
-        // the entry directory we just created (spec §9.1).
+        // the entry directory we just created.
         let attachments = params.attachments.unwrap_or_default();
         let block_sources: Vec<(String, Option<String>)> = params
             .blocks
@@ -1226,7 +1226,7 @@ impl EntryService {
     }
 
     /// Walk every entry row and render the `.nomai` file for any that lacks
-    /// one. Migration utility: post-Plan-3 entries created via
+    /// one. Migration utility: entries created via
     /// `EntryService::create` already have their `.nomai` and are skipped;
     /// this is for legacy rows or entries created via direct DB manipulation
     /// (e.g. an import path that bypasses the service layer).
@@ -4019,7 +4019,7 @@ mod tests {
     #[test]
     fn validate_accepts_pre_existing_sibling_not_in_attachments() {
         // A src that resolves to a file already on disk (not passed via attachments)
-        // must pass — supports the "declare an existing file" case from spec §11.2.
+        // must pass — supports the "declare an existing file" case.
         let svc = EntryService::for_test().unwrap();
         let entry = svc.create(seed_create_entry()).unwrap();
         // Pre-place a sibling file directly via content_store

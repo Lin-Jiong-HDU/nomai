@@ -7,8 +7,8 @@ use ulid::Ulid;
 
 /// A directed link between two entries.
 ///
-/// See spec §4 for schema rationale (directed edges, free-form relation,
-/// UNIQUE constraint, FK CASCADE).
+/// Schema notes: directed edges, free-form relation,
+/// UNIQUE constraint, FK CASCADE.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Link {
     pub id: Ulid,
@@ -34,7 +34,7 @@ fn default_limit() -> u32 {
 }
 
 /// Input for `LinkService::list`. At least one of `from` / `to` must be
-/// `Some` — "list all links" is rejected (spec §5).
+/// `Some` — "list all links" is rejected.
 #[derive(Debug, Default, Deserialize)]
 pub struct ListLinkQuery {
     #[serde(default)]

@@ -1305,7 +1305,7 @@ Body.
 
     #[test]
     fn image_block_parser_does_not_require_src() {
-        // spec §5: src required-ness is enforced at the service write path,
+        // src required-ness is enforced at the service write path,
         // NOT at the parser. Parser accepts @image with no src (like @note).
         let original = "\
 #format_version 1
