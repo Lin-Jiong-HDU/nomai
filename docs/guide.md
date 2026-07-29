@@ -212,7 +212,7 @@ A block can be split into N chunks, each embedded independently. This unlocks fi
 }
 ```
 
-- Chunks are **auto-derived** from block text (Spec 6 §10). You don't create them directly — call `block.append` / `update` and the daemon handles chunking.
+- Chunks are **auto-derived** from block text. You don't create them directly — call `block.append` / `update` and the daemon handles chunking.
 - `ordinal` is the chunk's position within its block (0-based).
 - Chunks have their own vector space (`vec_chunk_embeddings`), independent from any entry-level vectors. Same dimension (uses the same embedding model).
 
@@ -249,9 +249,6 @@ summary:
 - **RPC consumers**: no breaking changes (all 0.2.0 RPC additions are additive).
 - **lib consumers**: rename `ListOrder` imports (see CHANGELOG §"Changed").
 - **Daemon lib-mode users**: optional switch to `DaemonBuilder` (see [lib.md](lib.md#daemonbuilder)).
-
-See also Spec 8 (`docs/superpowers/specs/2026-06-25-pre-1-0-api-freeze-pass-design.md`)
-for the full freeze-pass audit.
 
 ---
 
@@ -316,16 +313,16 @@ for the `sync.init` / `sync.run` RPC contracts.
 
 ## What's next
 
-nomai's kernel roadmap (Spec 1-7) is complete:
+nomai's kernel roadmap is complete:
 
-- **Spec 1** — Plugin Registry + MCP compatibility (done)
-- **Spec 2** — Batch RPC with $ref + atomic transactions (done)
-- **Spec 3** — Lib API + Daemon accessors + from_services (done)
-- **Spec 4** — Application-layer examples (done)
-- **Spec 5** — Embedding cache (`emb_cache` + `CachedEmbedder` + `cache.stats` / `cache.clear`) (done)
-- **Spec 6** — Content storage (block-addressed chunks, FTS5 per block) (done)
-- **Spec 7** — Search results cache (`search.semantic` / `search.fulltext` in-memory cache + generation-based invalidation) (done)
-- **Spec 8** — Pre-1.0 API freeze pass (done; released as 0.2.0)
+- Plugin Registry + MCP compatibility (done)
+- Batch RPC with $ref + atomic transactions (done)
+- Lib API + Daemon accessors + from_services (done)
+- Application-layer examples (done)
+- Embedding cache (`emb_cache` + `CachedEmbedder` + `cache.stats` / `cache.clear`) (done)
+- Content storage (block-addressed chunks, FTS5 per block) (done)
+- Search results cache (`search.semantic` / `search.fulltext` in-memory cache + generation-based invalidation) (done)
+- Pre-1.0 API freeze pass (done; released as 0.2.0)
 
 Future work (not yet started):
 

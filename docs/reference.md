@@ -39,8 +39,8 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 | `entry.create` | `title`, `blocks: [{type, text, attrs?}]`, `tags?`, `attrs?`, `source?`, `attachments?` | `Entry` | Auto-embeds block texts if non-empty. `attachments: {filename: base64}` writes sibling files under the entry dir; `@image`/`@source` `src` validated against disk |
 | `entry.get`    | `id`                                                  | `Entry`             | 1001 if not found                                                                 |
 | `entry.update` | `id`, `title?`, `blocks?`, `tags?`, `attrs?`, `source?` | `Entry`           | Re-embeds if blocks change; clears embedding if blocks become empty               |
-| `entry.delete` | `id`                                                  | `{"deleted": true, "id": "<ulid>"}` | Cascades to links + chunks + chunk embeddings. `id` added in 0.2.0 (Spec 8 Plan 1 / F-entry-1) for consistency with `block.delete` |
-| `entry.list`   | `tag?`, `limit?`(50), `offset?`(0), `order?`, `transient?`          | `{items, total, has_more}`    | `order`: `created_desc`(default) / `created_asc` / `updated_desc` / `updated_asc`. `has_more` (added in 0.2.0, Spec 8 Plan 1 / F-entry-4) is true when `total > offset + items.len()`. `transient` (added in 0.4.1): `true` → only short-term entries, `false` → only long-term, omit → all |
+| `entry.delete` | `id`                                                  | `{"deleted": true, "id": "<ulid>"}` | Cascades to links + chunks + chunk embeddings. `id` added in 0.2.0 for consistency with `block.delete` |
+| `entry.list`   | `tag?`, `limit?`(50), `offset?`(0), `order?`, `transient?`          | `{items, total, has_more}`    | `order`: `created_desc`(default) / `created_asc` / `updated_desc` / `updated_asc`. `has_more` (added in 0.2.0) is true when `total > offset + items.len()`. `transient` (added in 0.4.1): `true` → only short-term entries, `false` → only long-term, omit → all |
 
 **Block input shape**: `BlockInput` is `{ type: String, text: String, attrs?: Value }`. Valid types: `claim`, `evidence`, `question`, `source`, `note`, `connection`, `image` (the `@connection` type requires `target` and `relation` attrs; `@image` requires `src` attr — see below).
 
@@ -58,7 +58,7 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 | `block.update` | `id`, `type?`, `text?`, `attrs?`, `attachments?`        | `Block`             | Re-chunks if text changed. Optional `attachments: {filename: base64}` writes sibling files |
 | `block.delete` | `id`                                    | `{"deleted": true, "id": "<ulid>"}` | 1001 if not found              |
 | `block.get`    | `id`                                    | `Block`             | 1001 if not found                             |
-| `block.list`   | `entry_id`                              | `{items, total}`    | Sorted by `ordinal` ascending. Added in 0.2.0 (Spec 8 Plan 1 / F-block-1) for namespace completeness |
+| `block.list`   | `entry_id`                              | `{items, total}`    | Sorted by `ordinal` ascending. Added in 0.2.0 for namespace completeness |
 
 Each mutation rewrites the parent entry's `.nomai` file automatically (no separate RPC needed). Chunk re-derivation is automatic on `text` change. Chunks are split at `config.chunking.target_size` characters (default 1024) via paragraph → sentence → hard-cut fallback.
 
@@ -101,7 +101,7 @@ Daemon runs `index.sync` automatically at boot. If FS differs from the index (e.
 
 | Method         | Params                                                                                                           | Returns             | Notes               |
 | -------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------- | ------------------- |
-| `events.list`  | `since?`(ULID, exclusive), `type?`, `target_type?`, `target_id?`, `limit?`(100), `order?`("asc"=default\|"desc") | `{items, has_more, total}` | Client-cursor model. `total` (added in 0.2.0, Spec 8 Plan 1 / F-events-1) is the total event count matching the filters |
+| `events.list`  | `since?`(ULID, exclusive), `type?`, `target_type?`, `target_id?`, `limit?`(100), `order?`("asc"=default\|"desc") | `{items, has_more, total}` | Client-cursor model. `total` (added in 0.2.0) is the total event count matching the filters |
 | `events.get`   | `id`                                                                                                             | `Event`             | 1001 if not found   |
 | `events.purge` | `before`(ULID, exclusive), `type?`                                                                               | `{deleted: N}`      | For retention       |
 
@@ -114,7 +114,7 @@ Daemon runs `index.sync` automatically at boot. If FS differs from the index (e.
 | `chunk.delete` | `id`                                    | `{"deleted": true}` | Also removes chunk embedding                  |
 | `chunk.list`   | `entry_id`, `limit?`(100), `offset?`(0) | `{items, total}`    | Sorted by `ordinal` ascending                 |
 
-Note: `chunk.create` / `chunk.delete` constants exist in `protocol::method::chunk` but return `METHOD_NOT_FOUND` (-32601) — chunks are auto-derived from blocks (Spec 6 §10).
+Note: `chunk.create` / `chunk.delete` constants exist in `protocol::method::chunk` but return `METHOD_NOT_FOUND` (-32601) — chunks are auto-derived from blocks.
 
 ### search.{#search-methods}
 

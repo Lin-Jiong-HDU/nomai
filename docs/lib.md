@@ -48,11 +48,11 @@ let entry = entries.create(nomai_core::CreateEntry {
 })?;
 ```
 
-**Re-exported types** (Spec 8 Plan 2):
+**Re-exported types**:
 
 - `EntryListOrder` (replaces the old `ListOrder`) — order enum for `entry.list`: `CreatedDesc` (default) / `CreatedAsc` / `UpdatedDesc` / `UpdatedAsc`.
 - `EventListOrder` (replaces the old `ListOrder`) — order enum for `events.list`: `Asc` (default) / `Desc`.
-- `NomaiBlock` — alias for the parser's `Block` type (Spec 8 Plan 2 / F-lib-1), re-exported from `nomai_core` so lib-mode callers don't have to depend on the parser crate directly. Use it when reading or constructing blocks outside the service layer.
+- `NomaiBlock` — alias for the parser's `Block` type, re-exported from `nomai_core` so lib-mode callers don't have to depend on the parser crate directly. Use it when reading or constructing blocks outside the service layer.
 
 ---
 
@@ -94,7 +94,7 @@ All four services share the same `Arc<Mutex<Connection>>`. Emission (events) sti
 
 ## `DaemonBuilder`
 
-(Spec 8 Plan 2 / F-lib-2) — fluent alternative to `from_services`'s 8 positional arguments:
+fluent alternative to `from_services`'s 8 positional arguments:
 
 ```rust
 use nomai_daemon::DaemonBuilder;
@@ -113,7 +113,7 @@ let mut daemon = DaemonBuilder::new()
 
 All eight fields are required; `build()` returns `Err(CoreError::Config)` if any field is unset, with a field-specific message (e.g. `"DaemonBuilder: conn required"`). `Daemon::from_services` is kept for backward compatibility.
 
-**RPC method constants** (Spec 8 Plan 2 / F-cache-1): `nomai_protocol::method` exposes named constants for every RPC method string, including `cache::STATS` and `cache::CLEAR`. Use them in dispatch match-arms instead of string literals to avoid typos.
+**RPC method constants**: `nomai_protocol::method` exposes named constants for every RPC method string, including `cache::STATS` and `cache::CLEAR`. Use them in dispatch match-arms instead of string literals to avoid typos.
 
 See `crates/daemon/examples/` for complete working examples:
 

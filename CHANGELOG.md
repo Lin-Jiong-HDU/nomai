@@ -207,7 +207,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (trigram returns empty for them) transparently fall back to an escaped
   `LIKE '%q%'` scan. Same RPC, same params — clients need no changes.
 - MCP `tools/list` now exposes `description` + real `inputSchema` for all
-  internal handlers (F-mcp-2). `RpcHandler` trait gains two default methods
+  internal handlers. `RpcHandler` trait gains two default methods
   `description()` and `input_schema()` for plugin authors to opt in.
   External plugins continue to work unchanged.
 
@@ -257,30 +257,30 @@ still land in 0.x (per semver 0.y.z allowance). See "Migration from
 
 ### Added (RPC additive)
 
-- `entry.delete` ack now includes `id` field (Spec 8 Plan 1 / F-entry-1)
-- `entry.list` response now includes `has_more` field (Spec 8 Plan 1 / F-entry-4)
-- `events.list` response now includes `total` field (Spec 8 Plan 1 / F-events-1)
-- `block.list` RPC: list blocks by `entry_id` (Spec 8 Plan 1 / F-block-1)
-- `nomai_core::NomaiBlock` alias for `nomai_format::Block` (Spec 8 Plan 2 / F-lib-1)
-- `nomai_daemon::DaemonBuilder` fluent constructor (Spec 8 Plan 2 / F-lib-2)
-- `nomai_protocol::method::cache::{STATS, CLEAR}` constants (Spec 8 Plan 2 / F-cache-1)
+- `entry.delete` ack now includes `id` field
+- `entry.list` response now includes `has_more` field
+- `events.list` response now includes `total` field
+- `block.list` RPC: list blocks by `entry_id`
+- `nomai_core::NomaiBlock` alias for `nomai_format::Block`
+- `nomai_daemon::DaemonBuilder` fluent constructor
+- `nomai_protocol::method::cache::{STATS, CLEAR}` constants
 - Batch per-op error objects in the `results` array now include a `data` field
-  when the underlying CoreError carries context (Spec 8 Plan 2 / F-batch-4).
+  when the underlying CoreError carries context.
   Previously omitted.
 
 ### Changed (lib-side breaking)
 
-- `nomai_core::ListOrder` (event_model layer) renamed to `EventListOrder` (Spec 8 Plan 2 / F-events-2)
-- `nomai_core::service::ListOrder` renamed to `EntryListOrder`; now re-exported at crate root (Spec 8 Plan 2 / F-events-2)
-- `nomai_daemon::handlers::registry()` moved to `handlers::registry::registry()` (Spec 8 Plan 2 / F-lib-3); short path `handlers::registry()` preserved via re-export
-- `batch::error_to_rpc` removed; use `rpc::core_error_to_rpc_ref` (Spec 8 Plan 2 / F-batch-4)
+- `nomai_core::ListOrder` (event_model layer) renamed to `EventListOrder`
+- `nomai_core::service::ListOrder` renamed to `EntryListOrder`; now re-exported at crate root
+- `nomai_daemon::handlers::registry()` moved to `handlers::registry::registry()`; short path `handlers::registry()` preserved via re-export
+- `batch::error_to_rpc` removed; use `rpc::core_error_to_rpc_ref`
 
 ### Documentation
 
-- `chunk.{CREATE, DELETE}` constants marked as reserved in `protocol::method` (Spec 8 Plan 3 / F-chunk-1)
-- `protocol::error` tests now cover all 6 business codes (Spec 8 Plan 3 / F-err-1)
-- `docs/guide.md` and `README.md` synced with 0.2.0 API surface (Spec 8 Plan 3 / F-doc-2)
-- Stale `#[allow(dead_code)]` on `Daemon::search_cache` removed (Spec 8 Plan 3 / F-doc-3)
+- `chunk.{CREATE, DELETE}` constants marked as reserved in `protocol::method`
+- `protocol::error` tests now cover all 6 business codes
+- `docs/guide.md` and `README.md` synced with 0.2.0 API surface
+- Stale `#[allow(dead_code)]` on `Daemon::search_cache` removed
 
 ### Migration from 0.1.0
 
@@ -299,7 +299,7 @@ methods). Old clients ignore new fields.
 
 ### Non-goals (deferred to future releases)
 
-The following were considered for 0.2.0 but deferred (see Spec 8 §7).
+The following were considered for 0.2.0 but deferred.
 They remain candidates for 1.0 (true API freeze) or later 0.x releases:
 
 - `entry.list include_blocks: Option<bool>` → `bool` (RPC breaking)
