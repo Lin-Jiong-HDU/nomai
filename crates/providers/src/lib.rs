@@ -10,6 +10,6 @@ pub mod types;
 pub use cached::{CacheStats, CachedEmbedder, ClearOptions, ClearResult};
 pub use error::{ProviderError, ProviderErrorKind};
 pub use openai::{OpenAiCompatibleEmbed, OpenAiCompatibleLlm};
-pub use rerank::{NoopReranker, RerankCandidate, RerankedCandidate};
+pub use rerank::{LLMReranker, NoopReranker, RerankCandidate, RerankedCandidate};
 pub use traits::{EmbeddingProvider, LlmProvider, Reranker};
 pub use types::{ChatMessage, CompletionRequest, CompletionResponse, MessageRole};
