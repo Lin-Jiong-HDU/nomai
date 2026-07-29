@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::handlers::{
     attachment, batch, benchmark, block, cache, chunk, entry, events, index, link, mcp, provider,
-    search, sync, system,
+    rerank, search, sync, system,
 };
 use crate::rpc::RpcHandler;
 
@@ -103,6 +103,10 @@ pub fn registry_with_benchmark(enabled: bool) -> HashMap<&'static str, Arc<dyn R
     let h = search::Semantic;
     m.insert(h.method(), Arc::new(h));
     let h = search::Hybrid;
+    m.insert(h.method(), Arc::new(h));
+
+    // rerank.*
+    let h = rerank::Rerank;
     m.insert(h.method(), Arc::new(h));
 
     // provider.*
