@@ -8,8 +8,6 @@
 //!   3. Collect misses, call `inner.embed(misses)` (await — no lock held).
 //!   4. Persist new embeddings via `INSERT OR IGNORE` (sync, short lock).
 //!   5. Assemble result preserving input order.
-//!
-//! See `docs/superpowers/specs/2026-06-22-embedding-cache-design.md`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
