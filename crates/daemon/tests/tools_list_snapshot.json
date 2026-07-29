@@ -102,7 +102,7 @@
               "type": "string"
             },
             "default": null,
-            "description": "`{filename: base64_string}` — decoded to bytes and written as sibling\nfiles before the block is appended. Plan 3 multimodal-image.",
+            "description": "`{filename: base64_string}` — decoded to bytes and written as sibling\nfiles before the block is appended.",
             "type": [
               "object",
               "null"
@@ -193,7 +193,7 @@
               "type": "string"
             },
             "default": null,
-            "description": "`{filename: base64_string}` — decoded to bytes and written as sibling\nfiles before the block is updated. Plan 3 multimodal-image.",
+            "description": "`{filename: base64_string}` — decoded to bytes and written as sibling\nfiles before the block is updated.",
             "type": [
               "object",
               "null"
