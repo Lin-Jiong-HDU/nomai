@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params};
 
 use nomai_core::{
-    ChunkService, ContentStore, CoreError, EntryService, EventService, LinkService,
-    chunk_model::DimReconciliation,
+    ChunkService, ContentStore, ConversationService, CoreError, EntryService, EventService,
+    LinkService, chunk_model::DimReconciliation,
 };
 use nomai_providers::{
     CachedEmbedder, EmbeddingProvider, LLMReranker, LlmProvider, NoopReranker,
@@ -72,6 +72,7 @@ pub struct Daemon {
     pub(crate) links: Arc<LinkService>,
     pub(crate) events: Arc<EventService>,
     pub(crate) chunks: Arc<ChunkService>,
+    pub(crate) conversations: Arc<ConversationService>,
     /// Cached embedding provider. Transparent wrapper around the configured
     /// `OpenAiCompatibleEmbed` (or any `EmbeddingProvider` in lib mode) that
     /// persists embeddings in the `emb_cache` table. Accessed as both the
@@ -173,6 +174,7 @@ impl Daemon {
         let links = Arc::new(LinkService::new(conn.clone())?);
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
+        let conversations = Arc::new(ConversationService::new(conn.clone())?);
         let dim_result = chunks.ensure_vec_chunk_embeddings(config.embedding.dim)?;
         match dim_result {
             DimReconciliation::Created { dim } => {
@@ -259,6 +261,7 @@ impl Daemon {
             links,
             events,
             chunks,
+            conversations,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
             benchmark,
@@ -313,6 +316,8 @@ impl Daemon {
         let events = Arc::new(EventService::new(conn2).unwrap());
         let conn3 = entries.conn_for_test();
         let chunks = Arc::new(ChunkService::new(conn3).unwrap());
+        let conn4 = entries.conn_for_test();
+        let conversations = Arc::new(ConversationService::new(conn4).unwrap());
         // Wrap embedder in CachedEmbedder using the shared connection so
         // tests exercise the same code path as production.
         let cache = Arc::new(CachedEmbedder::new(
@@ -337,6 +342,7 @@ impl Daemon {
             links,
             events,
             chunks,
+            conversations,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
             benchmark: None,
@@ -385,6 +391,10 @@ impl Daemon {
     #[allow(dead_code)]
     pub fn chunks(&self) -> &Arc<ChunkService> {
         &self.chunks
+    }
+    #[allow(dead_code)]
+    pub fn conversations(&self) -> &Arc<ConversationService> {
+        &self.conversations
     }
     /// Access the cached embedding provider. Trait methods (`embed`, `dim`,
     /// `name`) delegate transparently to the inner provider; the concrete
@@ -455,6 +465,7 @@ impl Daemon {
         let links = Arc::new(LinkService::new(conn.clone())?);
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
+        let conversations = Arc::new(ConversationService::new(conn.clone())?);
         chunks.ensure_vec_chunk_embeddings(embedding_dim)?;
         let cache = Arc::new(CachedEmbedder::new(embedder, conn, cache_model, warn_rows));
         let handlers = crate::handlers::registry();
@@ -464,6 +475,7 @@ impl Daemon {
             links,
             events,
             chunks,
+            conversations,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
             benchmark: None,

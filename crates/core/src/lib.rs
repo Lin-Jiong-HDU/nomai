@@ -25,6 +25,12 @@ pub use block_service::BlockService;
 pub use chunk_model::{Chunk, ChunkListResult, ChunkSearchResult, DimReconciliation};
 pub use chunk_service::ChunkService;
 pub use content_store::{AttachmentMeta, ContentStore};
+pub use conversation_model::{
+    AppendTurns, Conversation, ConversationListOrder, ConversationListQuery,
+    ConversationListResult, ConversationSearchResult, ConversationWithTurns, CreateConversation,
+    CreateTurn, Turn, UpdateConversation,
+};
+pub use conversation_service::ConversationService;
 pub use error::CoreError;
 pub use event_model::{Event, EventListOrder, ListEventsQuery, ListEventsResult, PurgeQuery};
 pub use event_service::EventService;
