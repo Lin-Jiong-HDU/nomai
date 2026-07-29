@@ -1,12 +1,9 @@
-//! Filesystem layer for the new content-storage model (Spec 6 §3, §7).
+//! Filesystem layer for the new content-storage model.
 //!
 //! `ContentStore` owns the `knowledge_root` path and provides:
 //! - Path resolution (`entry_dir`, `entry_file`)
 //! - Atomic writes (write `.tmp` → rename)
 //! - Read/delete entry directories
-//!
-//! Plan 2 scope: scaffolding + atomic_write. write_entry / read_entry / delete_entry
-//! come in Tasks 5-7.
 
 use std::path::{Path, PathBuf};
 

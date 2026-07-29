@@ -1,4 +1,4 @@
-//! Pure chunking algorithm (Spec §10). Splits text into pieces ≤ `target`
+//! Pure chunking algorithm. Splits text into pieces ≤ `target`
 //! chars, preferring paragraph boundaries, falling back to sentence
 //! boundaries, then hard cuts. Used by `BlockService::create_in_tx` to
 //! auto-derive chunks from block text.

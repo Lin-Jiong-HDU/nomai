@@ -1,10 +1,8 @@
 //! BlockService: storage and retrieval of typed blocks belonging to entries.
 //!
-//! Plan 2 scope: standalone CRUD on the `blocks` table. Plan 3 will wire
-//! this into EntryService so entry.create auto-creates blocks. Events are
-//! emitted on create/delete (`block.created` / `block.deleted`).
-//!
-//! See Spec 6 §5.1, §6.1, §7.
+//! Standalone CRUD on the `blocks` table. EntryService wires this so
+//! entry.create auto-creates blocks. Events are emitted on create/delete
+//! (`block.created` / `block.deleted`).
 
 use std::sync::{Arc, Mutex};
 
@@ -123,7 +121,7 @@ impl BlockService {
         )
         .map_err(crate::storage::map_constraint_violation)?;
 
-        // Derive chunks from block text (Spec §10). One chunk per output of
+        // Derive chunks from block text. One chunk per output of
         // `chunking::chunk_text`. `attrs` inherits `block.attrs` plus the
         // `parent_block_type` marker used by downstream search filters.
         let chunk_texts = crate::chunking::chunk_text(&block.text, self.chunk_target_size);
@@ -907,7 +905,7 @@ mod tests {
         assert_eq!(event_type, "block.created");
     }
 
-    // ----- update tests (Plan 5 Task 3) -----
+    // ----- update tests -----
 
     #[test]
     fn update_changes_block_text() {
@@ -1017,7 +1015,7 @@ mod tests {
 
     #[test]
     fn list_returns_err_not_panic_on_corrupt_ulid() {
-        // Plan 6 followup (P2-5): corrupted ULID in DB must surface as
+        // corrupted ULID in DB must surface as
         // Err(CoreError::Storage), not panic the daemon.
         //
         // We INSERT a row with a malformed id directly via SQL rather than

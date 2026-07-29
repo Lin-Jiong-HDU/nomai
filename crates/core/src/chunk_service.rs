@@ -1,7 +1,7 @@
 //! ChunkService: read-only access to chunks (auto-derived from blocks).
 //!
-//! Plan 4: chunks are no longer user-managed. `BlockService::create_in_tx`
-//! runs the chunking algorithm (Spec §10) and INSERTs derived chunks.
+//! Chunks are no longer user-managed. `BlockService::create_in_tx`
+//! runs the chunking algorithm and INSERTs derived chunks.
 //! CASCADE on `chunks.block_id` removes them when the parent block is
 //! deleted.
 //!
@@ -119,7 +119,7 @@ impl ChunkService {
     /// - `Recreated { from, to }` if the table existed at a different dim —
     ///   we DROP + CREATE
     ///
-    /// V9 (Plan 5) creates this table with the daemon default dim (1536) so
+    /// V9 creates this table with the daemon default dim (1536) so
     /// the `chunks_ad` DELETE trigger can resolve it at fire time. Users with
     /// a non-default `config.embedding.dim` (e.g. GLM at 2048) would otherwise
     /// hit a vec0 "Dimension mismatch" error on the first embedding write, so
@@ -223,7 +223,7 @@ impl ChunkService {
     }
 
     /// KNN search over chunk embeddings. Returns top-K chunks.
-    /// `block_type` filter (Plan 4): when supplied, JOIN `blocks` to filter.
+    /// `block_type` filter: when supplied, JOIN `blocks` to filter.
     /// `tag` filter: when supplied, restricts to entries whose `tags` JSON
     /// array contains `tag` (single-tag exact match).
     pub fn semantic_search(
@@ -362,7 +362,7 @@ mod tests {
     use ulid::Ulid;
 
     /// Seed an entry with a single note block; return (entry_id, block_id, conn).
-    /// BlockService::create_in_tx auto-derives chunks (Plan 4 Task 5), so the
+    /// BlockService::create_in_tx auto-derives chunks, so the
     /// block will have 1 chunk under it after this.
     fn seed_entry_and_block() -> (Ulid, Ulid, Arc<Mutex<Connection>>) {
         let entries = crate::EntryService::for_test().unwrap();
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn auto_derived_chunk_has_parent_block_type_attr() {
-        // BlockService::create_in_tx (Plan 4 Task 5) should auto-derive
+        // BlockService::create_in_tx should auto-derive
         // chunks with `parent_block_type` in attrs.
         let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn).unwrap();
@@ -1046,7 +1046,7 @@ mod tests {
 
     #[test]
     fn list_returns_err_not_panic_on_corrupt_ulid() {
-        // Plan 6 followup (P2-5): corrupted ULID in DB must surface as
+        // corrupted ULID in DB must surface as
         // Err(CoreError::Storage), not panic the daemon.
         let (_entry_id, block_id, conn) = seed_entry_and_block();
         let chunks = ChunkService::new(conn.clone()).unwrap();

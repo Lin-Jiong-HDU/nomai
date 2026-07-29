@@ -1,5 +1,5 @@
 //! Block data model: typed-block primitive for the new content storage model
-//! (Spec 6 §5.1). One entry → many blocks. Block types are a closed set:
+//! One entry → many blocks. Block types are a closed set:
 //! claim / evidence / question / source / note / connection.
 //!
 //! `r#type` is a String (not the `BlockType` enum from `nomai_format`) because
@@ -13,7 +13,7 @@ use serde_json::Value;
 use ulid::Ulid;
 
 /// A typed block belonging to an entry. Blocks are immutable per spec §6.1
-/// (`block.update` is a delete + create at the RPC layer in Plan 3+).
+/// (`block.update` is a delete + create at the RPC layer).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Block {
     pub id: Ulid,

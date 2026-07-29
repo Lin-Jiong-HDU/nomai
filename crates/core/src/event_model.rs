@@ -62,7 +62,6 @@ pub struct ListEventsResult {
     pub items: Vec<Event>,
     pub has_more: bool,
     /// Total events matching the WHERE filter (ignores LIMIT/OFFSET).
-    /// Spec 8 Plan 1 / F-events-1.
     pub total: u64,
 }
 

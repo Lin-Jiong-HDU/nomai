@@ -26,7 +26,7 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), CoreError> {
 /// Map SQLite ConstraintViolation (FK or UNIQUE) to CoreError::Validation.
 /// Other errors pass through as CoreError::Storage. Used by all services
 /// that do INSERT into tables with FK / UNIQUE constraints. Dedup of the
-/// former per-service local helpers (Plan 4 P2-3).
+/// former per-service local helpers.
 pub fn map_constraint_violation(e: rusqlite::Error) -> crate::error::CoreError {
     use rusqlite::ffi::ErrorCode;
     match e {
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn v9_creates_vec_chunk_embeddings_with_daemon_default_dim() {
-        // Plan 5 final review (C1): V9 must create vec_chunk_embeddings with
+        // V9 must create vec_chunk_embeddings with
         // dim=1536 (matching daemon default config.rs:175) — not 2048. A
         // mismatch breaks the first embedding write at the vec0 layer with
         // "Dimension mismatch for inserted vector".

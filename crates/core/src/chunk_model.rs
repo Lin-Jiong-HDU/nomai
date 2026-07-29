@@ -1,6 +1,6 @@
 //! Chunk data model: a block split into N embeddable pieces.
 //!
-//! Plan 4: chunks are auto-derived from blocks (Spec §10 chunking algorithm).
+//! Chunks are auto-derived from blocks (chunking algorithm).
 //! `CreateChunk` is gone — chunks are not user-created. `entry_id` is gone —
 //! chunks are block-addressed; reach the entry via JOIN chunks→blocks→entries.
 
@@ -35,7 +35,7 @@ pub struct ChunkSearchResult {
     pub score: f32,
     /// The entry this chunk's block belongs to. Exposed so callers (notably
     /// the search demotion policy) can group hits by entry without an extra
-    /// JOIN. `Chunk` itself stays block-addressed (Spec 4 design).
+    /// JOIN. `Chunk` itself stays block-addressed by design.
     pub entry_id: Ulid,
 }
 
@@ -43,7 +43,7 @@ pub struct ChunkSearchResult {
 /// the runtime dim (from config) with the dim baked into the existing
 /// `vec_chunk_embeddings` virtual table.
 ///
-/// V9 (Plan 5) creates this table with the daemon default dim (1536). Users
+/// V9 creates this table with the daemon default dim (1536). Users
 /// with `config.embedding.dim != 1536` (e.g. GLM at 2048) would otherwise
 /// hit a vec0 "Dimension mismatch" error on the first embedding write. The
 /// daemon reconciles at boot: if dims differ, the table is dropped and

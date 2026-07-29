@@ -1,7 +1,7 @@
 //! Conversions between parser-layer `Block` (`nomai_format::Block`, with the
 //! `BlockType` enum) and storage-layer `Block` (`block_model::Block`, with
 //! `String` type + id/timestamps). Centralizes the layer-flip logic so other
-//! modules don't reimplement it (Plan 4 followup X-2).
+//! modules don't reimplement it.
 
 use crate::block_model::Block;
 use crate::nomai_format::{Block as ParserBlock, BlockType};

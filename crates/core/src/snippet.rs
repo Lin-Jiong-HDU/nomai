@@ -1,5 +1,4 @@
 //! Snippet extraction for `search.fulltext` explainability.
-//! Spec: docs/superpowers/specs/2026-07-10-fulltext-explainability-design.md §5.
 //!
 //! `extract_snippet` builds a ~`WINDOW`-character window of `text` centered
 //! on the first occurrence of `query`, wraps the hit in markdown `**...**`,

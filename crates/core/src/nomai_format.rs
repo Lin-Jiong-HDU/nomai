@@ -1,11 +1,8 @@
-//! `.nomai` text format parser and renderer (Spec 6 §4).
+//! `.nomai` text format parser and renderer.
 //!
 //! A `.nomai` file has two sections:
 //! 1. Header (metadata): `#key value` lines
 //! 2. Body (typed blocks): `@type attrs\n\nbody` blocks
-//!
-//! See `docs/superpowers/specs/2026-06-22-content-storage-design.md` §4 for
-//! the format specification.
 //!
 //! # Whitespace note
 //!
@@ -304,7 +301,7 @@ pub fn parse(input: &str) -> Result<NomaiDoc, ParseError> {
             body_lines.push(line_to_push.to_string());
         }
 
-        // Strip trailing blank-line separators (Spec 6 §4.1): the blank
+        // Strip trailing blank-line separators: the blank
         // line(s) before the next @type or EOF are block separators and are
         // not part of the body. Internal paragraph breaks are preserved.
         while body_lines.last().map(|s| s.is_empty()).unwrap_or(false) {

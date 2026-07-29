@@ -11,7 +11,7 @@ use crate::model::Entry;
 use crate::storage;
 
 /// Result of `EntryService::sync_from_fs`: per-bucket counts of what the
-/// sync pass touched. Plan 5 §7.1: FS is source-of-truth; this diff
+/// sync pass touched. FS is source-of-truth; this diff
 /// reconciles the SQLite index against the FS state.
 #[derive(Debug, Default, Serialize)]
 pub struct SyncResult {
@@ -33,7 +33,7 @@ pub struct SyncResult {
 
 /// Result of `EntryService::rebuild_index`: a wholesale wipe + re-populate
 /// of the derived tables (chunks/blocks/links/entries/fts_blocks/
-/// vec_chunk_embeddings). Plan 5 §7.1: used to recover from index
+/// vec_chunk_embeddings). Used to recover from index
 /// corruption. `reindexed` counts entries successfully re-read from the FS;
 /// `errors` collects per-entry failure messages so callers can see which
 /// `.nomai` files failed to parse without aborting the whole rebuild.
@@ -49,7 +49,7 @@ pub struct RebuildResult {
 /// Result of `EntryService::verify_fs`: read-only drift report between the
 /// filesystem and the SQLite index. Mirrors `sync_from_fs`'s scan/diff
 /// logic but does NOT mutate — the caller can inspect drift before deciding
-/// whether to run `sync_from_fs` / `rebuild_index`. Plan 6 Task 4.
+/// whether to run `sync_from_fs` / `rebuild_index`.
 #[derive(Debug, Default, Serialize)]
 pub struct VerifyResult {
     /// `.nomai` files on disk with no index row (would be `added` by sync).
@@ -65,7 +65,7 @@ pub struct VerifyResult {
 }
 
 /// Result of `EntryService::export_to_fs`: walks every entry row and
-/// generates the `.nomai` file on disk for those that lack one. Spec §12
+/// generates the `.nomai` file on disk for those that lack one. Migration
 /// utility — post-Plan-3 entries created via `EntryService::create` already
 /// have their `.nomai` and are skipped; this is for legacy rows or entries
 /// created via direct DB manipulation. `exported` counts entries that got a
@@ -102,7 +102,7 @@ pub struct CreateEntry {
     pub source: Option<String>,
     /// Sibling attachment files (bytes) to write under the entry directory,
     /// keyed by filename. Referenced by `@image`/`@source` block `src` attrs.
-    /// base64 → bytes decoding happens at the daemon layer (Plan 3); core
+    /// base64 → bytes decoding happens at the daemon layer; core
     /// only handles raw bytes.
     #[serde(default)]
     pub attachments: Option<std::collections::HashMap<String, Vec<u8>>>,
@@ -196,7 +196,7 @@ pub struct EntryListResult {
     pub items: Vec<Entry>,
     pub total: u64,
     /// True when `total > offset + items.len()` (more entries remain
-    /// unfetched). Spec 8 Plan 1 / F-entry-4.
+    /// unfetched).
     pub has_more: bool,
 }
 
@@ -507,8 +507,8 @@ impl EntryService {
     /// Does NOT call self.get() or other self methods that lock conn.
     ///
     /// FS write (.nomai render + atomic_write) happens inside this method. If
-    /// the SQLite tx rolls back, the .nomai file is orphaned; Plan 5's
-    /// index.sync reconciles. See Spec §7.1.
+    /// the SQLite tx rolls back, the .nomai file is orphaned;
+    /// index.sync reconciles.
     pub fn create_in_tx(&self, conn: &Connection, params: CreateEntry) -> Result<Entry, CoreError> {
         let attrs = params
             .attrs
@@ -525,8 +525,8 @@ impl EntryService {
 
         // 1. Render .nomai + write FS. FS write happens before the SQLite row
         //    INSERT; if it fails, we bail early without touching SQLite. If the
-        //    SQLite side fails below, the .nomai file is orphaned (Plan 5
-        //    reconciles via index.sync).
+        //    SQLite side fails below, the .nomai file is orphaned
+        //    (index.sync reconciles).
         let parser_blocks: Vec<crate::nomai_format::Block> = params
             .blocks
             .iter()
@@ -585,7 +585,7 @@ impl EntryService {
         //    populated by the `blocks_ai` trigger when blocks are inserted
         //    in the next step, so no direct FTS write here). Record the
         //    FS path + mtime so `sync_from_fs` can detect later mutations
-        //    (Spec §7.1: FS is source-of-truth, index tracks last-seen mtime).
+        //    (FS is source-of-truth, index tracks last-seen mtime).
         let fs_path = format!("entries/{id}/entry.nomai");
         let fs_mtime = self
             .content_store
@@ -714,9 +714,9 @@ impl EntryService {
     /// Execute update within an existing transaction. Caller controls BEGIN/COMMIT.
     /// Does NOT call self.get() — inlines SELECT to avoid re-locking conn.
     ///
-    /// Per Spec §6.1, blocks are immutable at this layer; entry.update only
+    /// Blocks are immutable at this layer; entry.update only
     /// mutates metadata (title/tags/attrs/source). Block updates are a
-    /// separate RPC (block.update is delete + create in Plan 3+).
+    /// separate RPC (block.update is delete + create).
     pub fn update_in_tx(
         &self,
         conn: &Connection,
@@ -833,7 +833,7 @@ impl EntryService {
     /// SELECT before-snapshot, DELETE, INSERT event — all via passed conn.
     ///
     /// Does NOT touch FS — caller controls the transaction; FS cleanup is the
-    /// non-`_in_tx` `delete`'s responsibility. This matches Plan 2's pattern.
+    /// non-`_in_tx` `delete`'s responsibility.
     pub fn delete_in_tx(&self, conn: &Connection, id: Ulid) -> Result<(), CoreError> {
         // SELECT before-snapshot (blocks populated for event payload).
         let mut before_entry = match conn.query_row(
@@ -883,13 +883,13 @@ impl EntryService {
         Ok(())
     }
 
-    /// Reindex a single entry from its `.nomai` file. Spec §7.1 reconciliation
+    /// Reindex a single entry from its `.nomai` file. Reconciliation
     /// primitive: parse the FS document → DELETE the existing index row
     /// (CASCADE removes blocks → chunks → fts_blocks; the V9 `chunks_ad`
     /// trigger cleans `vec_chunk_embeddings`) → INSERT a fresh entry + its
     /// blocks. Does NOT re-embed; the background chunk embedder (or a later
-    /// sync) picks up changed chunks. Used by `sync_from_fs` (Plan 5 Task 6)
-    /// and `rebuild_index` (Plan 5 Task 7).
+    /// sync) picks up changed chunks. Used by `sync_from_fs`
+    /// and `rebuild_index`.
     ///
     /// Lock discipline: takes `self.conn` for the whole tx. Callers that
     /// hold the lock must release it before invoking this.
@@ -962,7 +962,7 @@ impl EntryService {
         }
     }
 
-    /// Diff FS against the index and reconcile. Spec §7.1: FS is the source
+    /// Diff FS against the index and reconcile. FS is the source
     /// of truth. For each FS entry, compare its current `.nomai` mtime against
     /// the indexed `fs_mtime`:
     /// - not in index → `reindex_one` (added)
@@ -1047,7 +1047,7 @@ impl EntryService {
                 }
                 (Some((_, None)), Some(_)) => {
                     // Index row exists but fs_mtime was never populated (legacy
-                    // row from before Plan 5, or a hand-written INSERT). Backfill
+                    // row, or a hand-written INSERT). Backfill
                     // via reindex so future passes can diff correctly. Counts
                     // as updated because the index changed.
                     self.reindex_one(*fs_id)?;
@@ -1085,8 +1085,8 @@ impl EntryService {
         })
     }
 
-    /// Read-only diff between the filesystem and the SQLite index. Plan 6
-    /// Task 4: reports drift categories (`fs_only` / `db_only` /
+    /// Read-only diff between the filesystem and the SQLite index.
+    /// Reports drift categories (`fs_only` / `db_only` /
     /// `stale_mtime` / `consistent`) but does NOT mutate the database or
     /// the filesystem. Use this when you want to surface drift to the user
     /// before deciding whether to call `sync_from_fs` / `rebuild_index`.
@@ -1167,8 +1167,8 @@ impl EntryService {
         })
     }
 
-    /// Wholesale rebuild of the derived index from the filesystem. Plan 5
-    /// §7.1: nuclear option for index corruption. DELETEs every derived
+    /// Wholesale rebuild of the derived index from the filesystem.
+    /// Nuclear option for index corruption. DELETEs every derived
     /// table (chunks → blocks → entries → links; fts_blocks via trigger;
     /// vec_chunk_embeddings via trigger), then re-indexes every FS entry
     /// via `reindex_one`.
@@ -1226,7 +1226,7 @@ impl EntryService {
     }
 
     /// Walk every entry row and render the `.nomai` file for any that lacks
-    /// one. Spec §12 migration utility: post-Plan-3 entries created via
+    /// one. Migration utility: post-Plan-3 entries created via
     /// `EntryService::create` already have their `.nomai` and are skipped;
     /// this is for legacy rows or entries created via direct DB manipulation
     /// (e.g. an import path that bypasses the service layer).
@@ -1513,7 +1513,7 @@ impl EntryService {
         Ok(ids)
     }
 
-    /// Purge transient entries. See Spec §6.2 / §7.
+    /// Purge transient entries.
     ///
     /// `older_than`: when `Some(d)`, only entries created more than `d` ago
     /// (strict `created_at < now - d`). `None` → all transient entries.
@@ -1902,7 +1902,7 @@ impl EntryService {
         self.conn.clone()
     }
 
-    /// Access the owned `BlockService`. Plan 5 surface: block-level RPCs
+    /// Access the owned `BlockService`. Block-level RPCs
     /// (`block.append`, future `block.update`/`block.delete`) live in the
     /// daemon layer and need a handle to call `BlockService::append` /
     /// `create_in_tx` directly. The block service shares the same SQLite
@@ -1911,7 +1911,7 @@ impl EntryService {
         &self.block_service
     }
 
-    /// Access the owned FS-backed `ContentStore`. Plan 5 surface: block-level
+    /// Access the owned FS-backed `ContentStore`. Block-level
     /// mutations need to re-render the entry's `.nomai` file; that requires
     /// the same store that owns the file path layout (`<root>/entries/<id>/`).
     pub fn content_store(&self) -> &Arc<crate::content_store::ContentStore> {
@@ -2611,7 +2611,7 @@ mod tests {
         assert!(set.contains(&short.id.to_string()));
     }
 
-    // ----- has_more tests (Spec 8 Plan 1 / F-entry-4) -----
+    // ----- has_more tests -----
 
     #[test]
     fn list_sets_has_more_true_when_more_entries_exist() {
@@ -3448,7 +3448,7 @@ mod tests {
 
     #[test]
     fn create_writes_nomai_file_to_content_store() {
-        // Plan 3: create() writes .nomai file via ContentStore.
+        // create() writes .nomai file via ContentStore.
         let svc = EntryService::for_test().unwrap();
         let entry = svc
             .create(CreateEntry {
@@ -3486,7 +3486,7 @@ mod tests {
         assert!(svc.content_store.read_entry(entry.id).is_err());
     }
 
-    // ----- sync_from_fs tests (Plan 5 Task 6) -----
+    // ----- sync_from_fs tests -----
 
     #[test]
     fn sync_from_fs_picks_up_newly_dropped_file() {
@@ -3602,7 +3602,7 @@ mod tests {
         assert_eq!(fetched.blocks[0].text, "new");
     }
 
-    // ----- rebuild_index tests (Plan 5 Task 7) -----
+    // ----- rebuild_index tests -----
 
     #[test]
     fn rebuild_index_clears_and_repopulates() {
@@ -3732,7 +3732,7 @@ mod tests {
         assert!(!fetched.blocks.is_empty());
     }
 
-    // ----- export_to_fs tests (Plan 6 Task 3) -----
+    // ----- export_to_fs tests -----
 
     #[test]
     fn export_to_fs_generates_nomai_for_missing_files() {
@@ -3754,7 +3754,7 @@ mod tests {
             .unwrap();
 
         // Manually insert an orphan entry directly in the DB, bypassing the
-        // service so no .nomai file is written. Spec §12 scenario: rows
+        // service so no .nomai file is written. Scenario: rows
         // created via direct DB manipulation (e.g. legacy import path).
         let orphan_id = Ulid::new();
         {
@@ -3803,7 +3803,7 @@ mod tests {
         assert!(!fs_path.is_empty());
     }
 
-    // ----- verify_fs tests (Plan 6 Task 4) -----
+    // ----- verify_fs tests -----
 
     #[test]
     fn verify_fs_reports_drift_without_mutating() {

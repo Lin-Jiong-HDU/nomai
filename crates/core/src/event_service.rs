@@ -98,7 +98,7 @@ impl EventService {
         let rows = stmt.query_map(params_refs.as_slice(), row_to_event)?;
         let mut items: Vec<Event> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
 
-        // Spec 8 Plan 1 / F-events-1: total count of matching events
+        // total count of matching events
         // (same WHERE filter, no LIMIT). Re-prepare with COUNT(*) and
         // the same params minus the limit param. params_vec_with_limit's
         // last element is the limit, so borrow all but the last.
