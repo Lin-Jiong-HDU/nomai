@@ -173,8 +173,11 @@ impl Reranker for LLMReranker {
             }
         };
 
+        // Strip common markdown code fences before JSON parsing.
+        let cleaned = strip_code_fences(&response);
+
         // Parse JSON array of ratings.
-        let ratings: Vec<serde_json::Value> = match serde_json::from_str(&response) {
+        let ratings: Vec<serde_json::Value> = match serde_json::from_str(&cleaned) {
             Ok(v) => v,
             Err(_) => {
                 // Malformed LLM response -> fallback.
@@ -237,6 +240,34 @@ impl Reranker for LLMReranker {
     fn name(&self) -> &str {
         &self.model
     }
+}
+
+/// Strip markdown code fences (```json, ```) from an LLM response.
+///
+/// Some models wrap JSON output in code fences despite being instructed
+/// not to. Stripping them avoids false-positive fallback to the
+/// unparseable handler.
+fn strip_code_fences(s: &str) -> String {
+    let s = s.trim();
+    if s.starts_with("```") {
+        // Remove the opening fence (```json or just ```) and trailing fence.
+        let without_fence = s
+            .lines()
+            .skip_while(|line| line.starts_with("```"))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .skip_while(|line| line.trim().starts_with("```"))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+        return without_fence;
+    }
+    s.to_string()
 }
 
 #[cfg(test)]
@@ -423,5 +454,93 @@ mod tests {
         assert_eq!(llm.calls.load(Ordering::Relaxed), 1);
         // Result limited by top_n (5), not max_candidates.
         assert!(result.len() <= 5);
+    }
+
+    #[tokio::test]
+    async fn llm_reranker_falls_back_on_unparseable_json() {
+        use crate::types::CompletionResponse;
+
+        struct GarbageLlm;
+        #[async_trait]
+        impl crate::traits::LlmProvider for GarbageLlm {
+            async fn complete(
+                &self,
+                _req: crate::types::CompletionRequest,
+            ) -> Result<CompletionResponse, crate::error::ProviderError> {
+                Ok(CompletionResponse {
+                    content: "not json".into(),
+                })
+            }
+            fn name(&self) -> &str {
+                "garbage"
+            }
+        }
+
+        let llm = Arc::new(GarbageLlm);
+        let reranker = LLMReranker::new(llm, "test".into());
+        let candidates = vec![RerankCandidate {
+            id: "a".into(),
+            content: "text".into(),
+            score: 0.7,
+        }];
+        let result = reranker.rerank("q", &candidates, 10).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].rerank_score, 0.7);
+        assert_eq!(result[0].original_score, 0.7);
+        assert_eq!(
+            result[0].reason.as_deref(),
+            Some("LLM response unparseable; original order preserved")
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_reranker_fills_missing_candidates() {
+        use crate::types::CompletionResponse;
+
+        struct PartialLlm;
+        #[async_trait]
+        impl crate::traits::LlmProvider for PartialLlm {
+            async fn complete(
+                &self,
+                _req: crate::types::CompletionRequest,
+            ) -> Result<CompletionResponse, crate::error::ProviderError> {
+                // Only rates doc 1, leaves doc 2 unrated.
+                Ok(CompletionResponse {
+                    content: r#"[{"doc_id":1,"relevance":4,"reason":"good"}]"#.into(),
+                })
+            }
+            fn name(&self) -> &str {
+                "partial"
+            }
+        }
+
+        let llm = Arc::new(PartialLlm);
+        let reranker = LLMReranker::new(llm, "test".into());
+        let candidates = vec![
+            RerankCandidate {
+                id: "a".into(),
+                content: "A".into(),
+                score: 0.9,
+            },
+            RerankCandidate {
+                id: "b".into(),
+                content: "B".into(),
+                score: 0.5,
+            },
+        ];
+        let result = reranker.rerank("q", &candidates, 10).await.unwrap();
+        assert_eq!(result.len(), 2);
+        // Both candidates present in output.
+        let rated = result.iter().find(|r| r.id == "a").unwrap();
+        let unrated = result.iter().find(|r| r.id == "b").unwrap();
+        // Rated doc: relevance=4 -> (4-1)/4 = 0.75.
+        assert!((rated.rerank_score - 0.75).abs() < 0.01);
+        assert_eq!(rated.reason.as_deref(), Some("good"));
+        // Unrated doc: original score preserved.
+        assert!((unrated.rerank_score - 0.5).abs() < 0.01);
+        assert_eq!(
+            unrated.reason.as_deref(),
+            Some("Not rated by LLM; original score preserved")
+        );
     }
 }
