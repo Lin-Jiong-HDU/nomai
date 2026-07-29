@@ -82,7 +82,9 @@ pub fn init_sqlite_extensions() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use rusqlite::Connection;
+    use ulid::Ulid;
 
     #[test]
     fn init_registers_vec0_virtual_table_module() {
@@ -494,5 +496,104 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM fts_blocks", [], |r| r.get(0))
             .unwrap();
         assert_eq!(after, 1, "backfill copies every blocks row");
+    }
+
+    #[test]
+    fn v10_migration_creates_conversations_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        // conversations table exists
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+
+        // turns table exists
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turns", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+
+        // fts_turns virtual table exists
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fts_turns", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn v10_turns_triggers_update_turn_count() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        let conv_id = Ulid::new().to_string();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO conversations (id, created_at, updated_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![conv_id, now, now],
+        )
+        .unwrap();
+
+        // Insert a turn => turn_count should become 1.
+        conn.execute(
+            "INSERT INTO turns (id, conversation_id, ordinal, role, content, created_at)
+             VALUES (?1, ?2, 0, 'user', 'hello', ?3)",
+            rusqlite::params![Ulid::new().to_string(), conv_id, now],
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT turn_count FROM conversations WHERE id = ?1",
+                rusqlite::params![conv_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // FTS should have the content.
+        let fts_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fts_turns WHERE fts_turns MATCH ?1",
+                rusqlite::params!["hello"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 1);
+    }
+
+    #[test]
+    fn v10_turns_cascade_on_conversation_delete() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        let conv_id = Ulid::new().to_string();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO conversations (id, created_at, updated_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![conv_id, now, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO turns (id, conversation_id, ordinal, role, content, created_at)
+             VALUES (?1, ?2, 0, 'user', 'msg', ?3)",
+            rusqlite::params![Ulid::new().to_string(), conv_id, now],
+        )
+        .unwrap();
+
+        // Delete conversation => turns CASCADE.
+        conn.execute(
+            "DELETE FROM conversations WHERE id = ?1",
+            rusqlite::params![conv_id],
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM turns WHERE conversation_id = ?1",
+                rusqlite::params![conv_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }
