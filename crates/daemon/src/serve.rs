@@ -82,7 +82,7 @@ mod tests {
     fn detach_session_does_not_panic_in_test_process() {
         // A test process may already be a session leader (setsid → EPERM) or
         // succeed; either is acceptable. Full serve::run arbitration is
-        // covered by Task 6's e2e smoke + socket tests' AlreadyRunning case.
+        // covered by e2e smoke + socket tests' AlreadyRunning case.
         let _ = unsafe { libc::setsid() };
     }
 

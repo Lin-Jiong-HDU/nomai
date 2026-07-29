@@ -138,8 +138,8 @@ pub fn socket_paths(db_path: &Path) -> io::Result<(PathBuf, PathBuf)> {
 pub enum BindOutcome {
     /// We own the socket; ready to accept.
     ///
-    /// The listener is consumed by `serve` (Task 2); until then the field is
-    /// unread here, so we silence the dead-code lint at the variant level.
+    /// The listener is consumed by `serve`; the field is otherwise unread
+    /// here, so we silence the dead-code lint at the variant level.
     #[allow(dead_code)]
     Bound(DaemonListener),
     /// A live daemon already holds it. Caller MUST exit (do NOT fall back to

@@ -16,7 +16,7 @@ use crate::service;
 use crate::storage;
 
 pub struct LinkService {
-    // Used by business methods in Tasks 5-6 (create/get/delete).
+    // Used by business methods (create/get/delete).
     conn: Arc<Mutex<Connection>>,
 }
 
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn create_persists_link_retrievable_via_direct_query() {
-        // Direct SQL query as a stand-in until get() is implemented in Task 6.
+        // Direct SQL query as a stand-in until get() is implemented.
         let (entries, links) = setup();
         let a = seed_entry(&entries, "a");
         let b = seed_entry(&entries, "b");

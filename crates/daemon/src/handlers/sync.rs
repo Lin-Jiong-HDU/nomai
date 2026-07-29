@@ -43,7 +43,7 @@ pub(crate) struct GitOutput {
 /// Run `git -C <root> <args>`; return trimmed stdout on success.
 /// `git` binary missing → `Validation`. Non-zero exit → `Validation` with
 /// a stderr snippet (caller that needs conflict detection uses `git_allow_fail`).
-#[allow(dead_code)] // consumed by Task 4/5 sync.* handlers
+#[allow(dead_code)] // consumed by sync.* handlers
 pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String, CoreError> {
     let out = git_allow_fail(root, args).await?;
     if out.success {
@@ -61,7 +61,7 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String, CoreError>
 /// Spawn-time failures (binary not found, etc.) still map to `CoreError`:
 /// `NotFound` → `Validation` (missing git is a user-fixable environment
 /// problem, not an internal I/O fault); any other `io::Error` → `Io`.
-#[allow(dead_code)] // consumed by Task 4/5 sync.* handlers
+#[allow(dead_code)] // consumed by sync.* handlers
 pub(crate) async fn git_allow_fail(root: &Path, args: &[&str]) -> Result<GitOutput, CoreError> {
     spawn("git", root, args).await
 }
@@ -133,7 +133,7 @@ async fn git_allow_fail_with_identity(root: &Path, args: &[&str]) -> Result<GitO
 
 /// Whether `git lfs` is installed and callable. Best-effort: any spawn or
 /// status failure collapses to `false` (sync degrades to plain git).
-#[allow(dead_code)] // consumed by Task 4/5 sync.* handlers
+#[allow(dead_code)] // consumed by sync.* handlers
 pub(crate) async fn probe_lfs() -> bool {
     Command::new("git")
         .arg("lfs")
@@ -151,7 +151,7 @@ pub(crate) async fn probe_lfs() -> bool {
 /// Checks both `<root>/.git/rebase-merge` (interactive/merge-based rebases) and
 /// `<root>/.git/rebase-apply` (am-based / non-interactive rebases such as
 /// `git pull --rebase` in some configurations), per `git`'s own resume logic.
-#[allow(dead_code)] // consumed by Task 4/5 sync.* handlers
+#[allow(dead_code)] // consumed by sync.* handlers
 pub(crate) fn has_rebase_in_progress(root: &Path) -> bool {
     root.join(".git").join("rebase-merge").exists()
         || root.join(".git").join("rebase-apply").exists()
@@ -160,7 +160,7 @@ pub(crate) fn has_rebase_in_progress(root: &Path) -> bool {
 /// List unmerged (conflicting) file paths, relative to `<root>`. Returns an
 /// empty vec if git itself fails to run — sync callers treat that as "no
 /// auto-detectable conflicts" and surface the underlying git error elsewhere.
-#[allow(dead_code)] // consumed by Task 4/5 sync.* handlers
+#[allow(dead_code)] // consumed by sync.* handlers
 pub(crate) async fn conflicted_files(root: &Path) -> Vec<String> {
     match git_allow_fail(root, &["diff", "--name-only", "--diff-filter=U"]).await {
         Ok(out) => out
@@ -499,8 +499,8 @@ mod tests {
         }
 
         /// Build a Daemon whose `content_store.root()` points at
-        /// `self.knowledge_root`. Mirrors the Task 2 test
-        /// (`daemon_exposes_content_store_root_and_sync_lock`): use
+        /// `self.knowledge_root`. Mirrors the
+        /// `daemon_exposes_content_store_root_and_sync_lock` test: use
         /// `EntryService::for_test` for an in-memory SQLite with migrations
         /// and sqlite-vec, then re-route the content store at our tempdir
         /// via `DaemonBuilder`. Null providers — no HTTP.
@@ -640,7 +640,7 @@ mod tests {
         assert!(has_rebase_in_progress(td2.path()));
     }
 
-    // ----- sync.init e2e (Task 4) -----
+    // ----- sync.init e2e -----
 
     #[tokio::test]
     async fn init_creates_git_repo_and_attributes() {
@@ -683,7 +683,7 @@ mod tests {
         assert!(err.message.contains("already a git repository"));
     }
 
-    // ----- sync.run e2e (Task 5) -----
+    // ----- sync.run e2e -----
 
     #[tokio::test]
     async fn run_commits_and_pushes_local_changes() {

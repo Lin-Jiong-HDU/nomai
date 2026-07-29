@@ -85,7 +85,7 @@ impl RpcHandler for Restart {
         let slot = daemon.restart_slot().ok_or_else(|| {
             CoreError::Config("system.restart unavailable: daemon not running in a slot".into())
         })?;
-        // Rebuild from the same config. Task 1 made `config: Option<Arc<Config>>`
+        // Rebuild from the same config. `config: Option<Arc<Config>>`
         // (lib-mode from_services/builder daemons are None — they have no
         // Config to rebuild from). Reject those: restart only applies to a
         // config-backed daemon.
@@ -153,7 +153,7 @@ mod restart_tests {
     /// Minimal config for restart tests. `base_url` is unreachable on purpose:
     /// `Daemon::from_arc` on an empty DB constructs the providers but does NOT
     /// call them, so rebuild succeeds without a live embedding server.
-    /// (Task 5 overrides `embedding.base_url` to a wiremock URI.) Sets
+    /// (The test overrides `embedding.base_url` to a wiremock URI.) Sets
     /// NOMAI_TEST_KEY so `api_key_env` resolves.
     fn restart_test_config(tmp: &tempfile::TempDir) -> Config {
         // SAFETY: each test in this module acquires `RESTART_LOCK` before
@@ -170,7 +170,7 @@ mod restart_tests {
                 // ~/Library/Application Support/dev.nomai.nomai/store and runs
                 // run_startup_sync against it when this is None. Pin the store
                 // inside the tempdir so rebuilds (Restart::call → Daemon::from_arc)
-                // stay off disk the test doesn't own. (Task 5 fix.)
+                // stay off disk the test doesn't own.
                 knowledge_root: Some(tmp.path().join("store")),
                 attachment_max_bytes: 10 * 1024 * 1024,
             },
@@ -227,7 +227,7 @@ mod restart_tests {
         let _ = cfg_arc;
     }
 
-    /// Behavior (Task 5): the rebuilt Daemon reaches the embedding provider
+    /// Behavior: the rebuilt Daemon reaches the embedding provider
     /// through a fresh reqwest Client. A wiremock server records requests;
     /// after `system.restart` the count must grow, proving the post-restart
     /// Daemon's embedder + Client are wired end-to-end (not a dead handle).
@@ -266,8 +266,8 @@ mod restart_tests {
 
         // Pre-restart embedding call via the OLD reqwest Client. Clone the
         // Arc<Daemon> out and drop the read guard BEFORE the .await — holding
-        // a read guard across .await is the anti-pattern Task 4 self-deadlocked
-        // on, and even in this sequential test we keep the discipline.
+        // a read guard across .await is the anti-pattern that once caused a
+        // self-deadlock, and even in this sequential test we keep the discipline.
         let pre = slot.read().unwrap().clone();
         pre.cache.embed(&["pre"]).await.unwrap();
         let n_before = server.received_requests().await.unwrap().len();
@@ -289,7 +289,7 @@ mod restart_tests {
         assert!(n_after > n_before, "rebuilt Client reached the provider");
     }
 
-    /// Behavior (Task 5): a Daemon never wrapped in a slot (e.g. pure lib
+    /// Behavior: a Daemon never wrapped in a slot (e.g. pure lib
     /// mode, or a unit test that builds a Daemon directly) cannot be swapped
     /// — `system.restart` must return a clean error naming the slot, not
     /// panic. (The "rebuild itself fails" path needs no test: `Daemon::from_arc`
@@ -315,7 +315,7 @@ mod restart_tests {
         );
     }
 
-    /// Behavior (Task 5): an in-flight RPC that already cloned the old
+    /// Behavior: an in-flight RPC that already cloned the old
     /// `Arc<Daemon>` is NOT cancelled by `system.restart` — the swap only
     /// replaces what future RPCs see; the slow call finishes against the
     /// old daemon. A delayed wiremock response keeps the embed() in flight

@@ -102,7 +102,7 @@ pub mod system {
     /// rows created via direct DB manipulation. Returns
     /// `{ exported, skipped, errors }`.
     pub const EXPORT_TO_FS: &str = "system.export_to_fs";
-    /// Task 4: rebuild the resident daemon's internal state (sqlite/embedder/
+    /// Rebuild the resident daemon's internal state (sqlite/embedder/
     /// llm/cache) in-process without dropping client connections. Use when
     /// embedding calls (search.semantic / ingest) start failing due to long-
     /// uptime state decay. Returns `{ ok: true }`. No params, no events.
@@ -141,7 +141,7 @@ pub mod sync {
     /// sync: `git init` + remote + LFS install + `.gitignore` / `.gitattributes`
     /// + initial commit. Idempotent-rejects if `.git` already exists.
     pub const INIT: &str = "sync.init";
-    /// Reserved for Task 5: pull/push the sync remote, rebasing local entry
+    /// Pull/push the sync remote, rebasing local entry
     /// mutations on top of incoming commits.
     pub const RUN: &str = "sync.run";
 }

@@ -63,7 +63,7 @@ pub struct Daemon {
     /// daemon was constructed via `Daemon::new` / `from_arc` (i.e. from a
     /// real `Config`); `None` for lib-mode (`from_services` / builder),
     /// which don't receive a `Config` and cannot fabricate one.
-    // Reader lands in the system.restart handler (Task 4); keep despite no
+    // Reader lands in the system.restart handler; keep despite no
     // current production reader, mirroring `embedding_dim` / `content_store`.
     #[allow(dead_code)]
     pub(crate) config: Option<Arc<Config>>,
@@ -84,7 +84,7 @@ pub struct Daemon {
     pub(crate) llm: Arc<dyn LlmProvider>,
     pub(crate) embedding_model: String,
     pub(crate) llm_model: String,
-    // Used by search.semantic (Task 7); keep despite no current reader.
+    // Used by search.semantic; keep despite no current reader.
     #[allow(dead_code)]
     pub(crate) embedding_dim: usize,
     /// Configured chunk target size (characters). Stored for symmetry with
@@ -112,7 +112,7 @@ pub struct Daemon {
     /// `run_stdio` after wrapping. `None` until then (e.g. in lib mode
     /// without serve). `Weak` breaks the Daemon↔slot cycle so dropping the
     /// slot also releases the Daemon. Reader lands in the system.restart
-    /// handler (Task 4); keep despite no current production reader.
+    /// handler; keep despite no current production reader.
     ///
     /// Type note: the field is `Weak<RwLock<Arc<Daemon>>>`, not
     /// `Weak<DaemonSlot>` (= `Weak<Arc<RwLock<Arc<Daemon>>>>`). The latter
@@ -387,7 +387,7 @@ impl Daemon {
     /// The argument is `Weak<RwLock<Arc<Daemon>>>` (the peeled form of
     /// `Weak<DaemonSlot>`); `Arc::downgrade(&slot)` for a `slot: DaemonSlot`
     /// yields exactly this type. See the `restart_slot` field doc for why.
-    #[allow(dead_code)] // caller lands in Task 3 (run_serve/run_stdio wiring)
+    #[allow(dead_code)] // caller lands in run_serve/run_stdio wiring
     pub(crate) fn set_restart_slot(&self, weak: std::sync::Weak<std::sync::RwLock<Arc<Daemon>>>) {
         let _ = self.restart_slot.set(weak);
     }
@@ -395,7 +395,7 @@ impl Daemon {
     /// The slot holding this Daemon, if any. `system.restart` upgrades this
     /// to swap in a rebuilt Daemon. Returns `None` before `set_restart_slot`
     /// has been called, or if the slot has already been dropped.
-    #[allow(dead_code)] // caller lands in Task 4 (system.restart handler)
+    #[allow(dead_code)] // caller lands in system.restart handler
     pub(crate) fn restart_slot(&self) -> Option<DaemonSlot> {
         self.restart_slot.get().and_then(|w| w.upgrade())
     }
@@ -529,7 +529,7 @@ impl Daemon {
         }
     }
 
-    /// Run the NDJSON-over-stdio JSON-RPC loop. Stub in Task 4; full impl in Task 5.
+    /// Run the NDJSON-over-stdio JSON-RPC loop.
     pub async fn run_stdio(self) -> Result<(), CoreError> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -1426,7 +1426,7 @@ mod tests {
         drop(_g);
     }
 
-    /// Task 1 (system.restart prerequisite): a Daemon built from a real
+    /// system.restart prerequisite: a Daemon built from a real
     /// `Config` via `from_arc` must retain `Some(Arc<Config>)` so the restart
     /// handler (later task) can rebuild an equivalent Daemon in-process.
     /// Conversely, lib-mode daemons (`from_services` / `DaemonBuilder`) have
@@ -1669,7 +1669,7 @@ model = "test-llm"
         }
     }
 
-    /// Task 2 (system.restart prerequisite): the Daemon carries a `Weak` back-
+    /// system.restart prerequisite: the Daemon carries a `Weak` back-
     /// reference to the slot that holds it. Before the slot links the Daemon,
     /// `restart_slot()` is `None`; after `set_restart_slot`, upgrading the
     /// stored `Weak` must yield the same slot Arc the handler would use to
@@ -1763,7 +1763,7 @@ model = "test-llm"
         }
     }
 
-    /// Task 3 (system.restart prerequisite): a long-lived connection served by
+    /// system.restart prerequisite: a long-lived connection served by
     /// `handle_conn_halves` must observe a slot swap on the *next* RPC, without
     /// the connection being torn down or re-accepted. This is the core
     /// invariant `system.restart` relies on: existing connections keep working

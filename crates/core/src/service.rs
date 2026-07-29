@@ -2765,7 +2765,7 @@ mod tests {
 
     #[test]
     fn delete_removes_entry_and_cascades_fts() {
-        // Deferred from Task 4 — requires fulltext_search to verify FTS cleanup.
+        // Deferred — requires fulltext_search to verify FTS cleanup.
         let svc = EntryService::for_test().unwrap();
         let e = seed(&svc, "t", vec![]);
         svc.create(CreateEntry {

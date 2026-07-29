@@ -14,7 +14,7 @@ use crate::event_model::{Event, EventListOrder, ListEventsQuery, ListEventsResul
 use crate::storage;
 
 pub struct EventService {
-    // list/get/purge (Tasks 2-3) consume this.
+    // list/get/purge consume this.
     conn: Arc<Mutex<Connection>>,
 }
 
@@ -213,7 +213,7 @@ mod tests {
     }
 
     // Direct-insert helper for EventService-level unit tests (independent of
-    // EntryService emission which lands in Task 4).
+    // EntryService emission).
     fn insert_event(
         svc: &EventService,
         id: &str,

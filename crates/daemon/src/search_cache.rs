@@ -146,7 +146,7 @@ impl SearchCache {
     // the full stats snapshot. `stats()` casts `self.map.len()` directly
     // rather than going through this method, so it has no in-tree caller.
     #[allow(dead_code)]
-    #[allow(clippy::len_without_is_empty)] // surfaced via cache.stats in Task 7
+    #[allow(clippy::len_without_is_empty)] // surfaced via cache.stats
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -176,7 +176,7 @@ impl SearchCache {
     /// don't share the same cache entry.
     ///
     /// Generic bounds (`F: FnOnce() -> Fut, Fut: Future`) let call sites
-    /// pass `|| async move { ... }` async closures; verified by Task 2 tests.
+    /// pass `|| async move { ... }` async closures; verified by tests.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn lookup_or_compute<F, Fut>(
         &self,

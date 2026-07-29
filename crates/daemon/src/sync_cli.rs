@@ -1,6 +1,6 @@
 //! `nomai-daemon --sync` / `--sync-init <url>`: thin client that connects to
 //! the resident daemon over its socket transport and dispatches a single
-//! sync RPC. All git work happens in the daemon's sync handlers (Tasks 4/5);
+//! sync RPC. All git work happens in the daemon's sync handlers;
 //! this module only ferries one NDJSON request and reads one NDJSON response.
 //!
 //! Transparent wrapper: reuses `shim::ensure_daemon` (which spawns `--serve`

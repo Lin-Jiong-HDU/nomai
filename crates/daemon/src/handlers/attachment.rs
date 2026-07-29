@@ -23,7 +23,7 @@ use crate::rpc::RpcHandler;
 /// `Validation("attachment too large: <name> (<N> bytes > <max>)")`.
 ///
 /// Shared by `entry.create` / `block.append` / `block.update` wiring
-/// (Task 2/3) — those handlers accept base64 over the wire (MCP tools/call
+/// — those handlers accept base64 over the wire (MCP tools/call
 /// is text-only) and call this to recover the raw bytes core expects.
 /// Size enforcement lives here at the daemon boundary (policy); core stays
 /// pure mechanism and only sees the resulting bytes.

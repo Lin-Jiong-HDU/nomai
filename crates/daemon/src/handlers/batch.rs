@@ -33,7 +33,7 @@ pub struct BatchOp {
 pub struct BatchRequest {
     pub ops: Vec<BatchOp>,
     /// When true (default), any op failure rolls back the whole transaction.
-    /// Task 1 always treats the batch as atomic; non-atomic mode is a future
+    /// The batch is always treated as atomic; non-atomic mode is a future
     /// addition and the field is parsed but not yet branched on.
     #[serde(default = "default_atomic")]
     #[allow(dead_code)]
