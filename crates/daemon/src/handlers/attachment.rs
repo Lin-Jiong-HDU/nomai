@@ -1,8 +1,7 @@
 //! attachment.read / attachment.list RPC handlers.
 //!
-//! Binary attachments are sibling files under the entry directory (Spec 6 §11,
-//! multimodal-image Plan 1-3). base64 ↔ bytes conversion happens here at the
-//! daemon boundary; core handles only raw bytes.
+//! Binary attachments are sibling files under the entry directory. base64 ↔ bytes
+//! conversion happens here at the daemon boundary; core handles only raw bytes.
 
 use std::collections::HashMap;
 

@@ -1,6 +1,6 @@
-//! system.* handlers. Plan 6 Task 3 introduces `system.export_to_fs`, a Spec
-//! §12 migration utility that walks every entry row and renders the `.nomai`
-//! file for any that lack one. Post-Plan-3 entries created via `entry.create`
+//! system.* handlers. `system.export_to_fs` is a
+//! migration utility that walks every entry row and renders the `.nomai`
+//! file for any that lack one. Entries created via `entry.create`
 //! already have `.nomai` and are skipped; this is for rows created via direct
 //! DB manipulation (e.g. an import path that bypasses the service layer).
 //!
@@ -35,7 +35,7 @@ impl RpcHandler for ExportToFs {
     }
     fn is_mutating(&self) -> bool {
         // Renders .nomai files into knowledge_root; must serialize against
-        // sync.run's rebase (same race class as entry/block writes, spec §8).
+        // sync.run's rebase (same race class as entry/block writes).
         true
     }
     async fn call(&self, daemon: &Daemon, _params: Value) -> Result<Value, CoreError> {

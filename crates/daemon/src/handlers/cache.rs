@@ -62,7 +62,7 @@ pub enum Namespace {
 
 impl Default for Namespace {
     /// Default = `Embeddings` so omitting `namespace` clears only `emb_cache`
-    /// (Spec §7.2: kernel-style fail-safe default + explicit user intent).
+    /// (Kernel-style fail-safe default + explicit user intent).
     /// Note: the *clearing behavior* is backward compatible; the *response
     /// shape* changed to nest under `embeddings`/`searches` (see docs).
     fn default() -> Self {

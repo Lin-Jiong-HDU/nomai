@@ -143,11 +143,11 @@ pub enum BindOutcome {
     #[allow(dead_code)]
     Bound(DaemonListener),
     /// A live daemon already holds it. Caller MUST exit (do NOT fall back to
-    /// stdio — that reintroduces multi-process conflict; spec §6).
+    /// stdio — that reintroduces multi-process conflict).
     AlreadyRunning,
 }
 
-/// Bind with bind/connect double-probe arbitration (spec §6).
+/// Bind with bind/connect double-probe arbitration.
 ///
 /// - bind succeeds → own it.
 /// - bind fails `EADDRINUSE` → `connect` to probe: success means a live

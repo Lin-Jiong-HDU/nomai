@@ -1,7 +1,7 @@
-//! sync.* handlers + git CLI wrapper. Multi-device sync via a git remote
-//! (spec 2026-07-16-git-sync). This module owns ALL git subprocess invocation;
-//! core stays git-agnostic. Task 3 ships only the wrapper layer + helpers;
-//! `sync.init` / `sync.run` `RpcHandler` impls arrive in Tasks 4/5.
+//! sync.* handlers + git CLI wrapper. Multi-device sync via a git remote.
+//! This module owns ALL git subprocess invocation; core stays git-agnostic.
+//! The wrapper layer, helpers, and `sync.init` / `sync.run` `RpcHandler`
+//! impls all live here.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -345,7 +345,7 @@ impl crate::rpc::RpcHandler for Run {
                 // `git commit -m` prints `[main <hash>] <summary>` on stdout;
                 // capture the short hash explicitly via `rev-parse` instead so
                 // `result["commit"]` is a 7-12 char string, not a 3-line blob
-                // (spec §4.1 / docs/reference.md).
+                // (see docs/reference.md).
                 git_with_identity(&root, &["commit", "-q", "-m", "nomai sync"]).await?;
                 let hash = git(&root, &["rev-parse", "--short", "HEAD"]).await?;
                 committed = true;
@@ -882,7 +882,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("registry has {name}"));
             assert!(
                 h.is_mutating(),
-                "{name} should be is_mutating() == true (spec §8)"
+                "{name} should be is_mutating() == true"
             );
         }
 

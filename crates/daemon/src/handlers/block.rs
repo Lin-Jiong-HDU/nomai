@@ -1,5 +1,5 @@
-//! block.* handlers. Plan 5 introduces block-level RPCs on top of the
-//! Plan 3 blocks storage. `block.append` adds a block to an existing entry
+//! block.* handlers: block-level RPCs on top of the
+//! blocks storage. `block.append` adds a block to an existing entry
 //! (computing the next ordinal) and re-renders the entry's `.nomai` file.
 //!
 //! The daemon accesses `BlockService` and `ContentStore` through the
@@ -34,7 +34,7 @@ pub struct AppendParams {
     #[schemars(default)]
     pub attrs: Option<serde_json::Value>,
     /// `{filename: base64_string}` — decoded to bytes and written as sibling
-    /// files before the block is appended. Plan 3 multimodal-image.
+    /// files before the block is appended.
     #[serde(default)]
     #[schemars(default)]
     pub attachments: Option<std::collections::HashMap<String, String>>,
@@ -63,8 +63,8 @@ impl RpcHandler for Append {
         let entries: Arc<EntryService> = daemon.entries.clone();
         let entry_id = p.entry_id;
 
-        // Pre-validate attachments + src BEFORE appending the block. Plan 3
-        // Task 3: `BlockService::append` commits its own transaction, so the
+        // Pre-validate attachments + src BEFORE appending the block.
+        // `BlockService::append` commits its own transaction, so the
         // only way to keep `block.append` atomic (no block row left on a src-
         // validation failure) is to validate before the append. Order:
         // decode → write_attachments_and_validate → append → rerender → embed.
@@ -108,7 +108,7 @@ impl RpcHandler for Append {
         // 0.2.3: embed the new block's chunk(s) so search.semantic works.
         crate::handlers::embed::embed_entry_chunks(daemon, entry_id, false).await?;
 
-        // Spec 7: invalidate search cache.
+        // Invalidate search cache.
         daemon.search_cache.bump_generation();
 
         serde_json::to_value(&block).map_err(|e| CoreError::Config(format!("serialize: {e}")))
@@ -129,7 +129,7 @@ pub struct UpdateParams {
     #[schemars(default)]
     pub attrs: Option<serde_json::Value>,
     /// `{filename: base64_string}` — decoded to bytes and written as sibling
-    /// files before the block is updated. Plan 3 multimodal-image.
+    /// files before the block is updated.
     #[serde(default)]
     #[schemars(default)]
     pub attachments: Option<std::collections::HashMap<String, String>>,
@@ -206,7 +206,7 @@ impl RpcHandler for Update {
         // chunks_ad cleaned old embeddings, new ones need embedding).
         crate::handlers::embed::embed_entry_chunks(daemon, block.entry_id, false).await?;
 
-        // Spec 7: invalidate search cache.
+        // Invalidate search cache.
         daemon.search_cache.bump_generation();
 
         serde_json::to_value(&block).map_err(|e| CoreError::Config(format!("serialize: {e}")))
@@ -250,7 +250,7 @@ impl RpcHandler for Delete {
         // chunks; no manual loop needed here.
         rerender_entry_nomai(&entries, block.entry_id).await?;
 
-        // Spec 7: invalidate search cache.
+        // Invalidate search cache.
         daemon.search_cache.bump_generation();
 
         Ok(json!({"deleted": true, "id": id.to_string()}))
@@ -359,7 +359,7 @@ impl RpcHandler for Get {
 /// FS representation stays in sync with SQLite. Uses `EntryService::get`,
 /// which already populates `entry.blocks`.
 ///
-/// Plan 5 final review (I1): also refreshes `entries.fs_mtime` to match the
+/// Also refreshes `entries.fs_mtime` to match the
 /// newly-written file. Without this, the next `sync_from_fs` would see a
 /// stale mtime and trigger a full reindex of the entry on every boot.
 pub(crate) async fn rerender_entry_nomai(
@@ -394,11 +394,11 @@ pub(crate) async fn rerender_entry_nomai(
             blocks: parser_blocks,
         };
         entries.content_store().write_entry(entry_id, &doc)?;
-        // Plan 5 final review (I1): refresh entries.fs_mtime to match the
+        // Refresh entries.fs_mtime to match the
         // newly-written .nomai file. Without this, the next sync_from_fs
         // sees a stale mtime and triggers a full reindex of the entry on
-        // every daemon boot, undermining the trigger-based cleanup shipped
-        // in Plan 5 Task 1. We also bump entries.updated_at so the row
+        // every daemon boot, undermining the trigger-based cleanup shipped.
+        // We also bump entries.updated_at so the row
         // reflects the latest mutation.
         let new_mtime = entries
             .content_store()

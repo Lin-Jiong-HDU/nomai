@@ -77,7 +77,7 @@ pub struct Daemon {
     /// typed `cache` (for `cache.stats` / `cache.clear` RPCs) and via the
     /// `EmbeddingProvider` trait (transparent delegation to inner).
     pub(crate) cache: Arc<CachedEmbedder>,
-    /// In-memory search-results cache (Spec 7). Bumped on every mutation
+    /// In-memory search-results cache. Bumped on every mutation
     /// that affects search results; see `search_cache::SearchCache`.
     pub(crate) search_cache: Arc<crate::search_cache::SearchCache>,
     pub(crate) benchmark: Option<Arc<crate::benchmark::BenchmarkRuntime>>,
@@ -97,7 +97,7 @@ pub struct Daemon {
     pub(crate) attachment_max_bytes: usize,
     /// FS-backed content store. Shared with EntryService; also used by sync.*
     /// handlers to resolve the `knowledge_root` path (the git work-tree).
-    // Readers land in Plan 5 Task 4/5 (sync.* handlers); keep despite no
+    // Readers land in sync.* handlers; keep despite no
     // current production reader, mirroring `embedding_dim` / `chunk_target_size`.
     #[allow(dead_code)]
     pub(crate) content_store: Arc<ContentStore>,
@@ -138,13 +138,13 @@ impl Daemon {
         let conn = Connection::open(&db_path)?;
         // Defensive: single-daemon model won't hit SQLITE_BUSY in-process, but
         // if an external `sqlite3` CLI ever opens the db concurrently, wait up
-        // to 5s rather than failing immediately. Spec §5.
+        // to 5s rather than failing immediately.
         conn.pragma_update(None, "busy_timeout", 5000_u32)?;
         let conn = Arc::new(Mutex::new(conn));
 
         // Construct FS-backed ContentStore from config.data.knowledge_root
         // (or the default <data_dir>/store/). Created here so it can be
-        // shared across EntryService + future Plan 5 index.sync.
+        // shared across EntryService and index.sync.
         let default_root = crate::config::default_knowledge_root();
         let knowledge_root = expand_knowledge_root(
             config
@@ -155,9 +155,9 @@ impl Daemon {
         )?;
         let content_store = Arc::new(ContentStore::new(knowledge_root));
 
-        // Run migrations + ensure vec_chunk_embeddings exist (Plan 4:
-        // entry-level vec_embeddings was dropped in V8; chunk-level is the
-        // sole embedding surface).
+        // Run migrations + ensure vec_chunk_embeddings exist — entry-level
+        // vec_embeddings was dropped in V8; chunk-level is the sole embedding
+        // surface.
         let chunk_target_size = config.chunking.target_size;
         eprintln!("info: chunk_target_size={chunk_target_size} chars");
         let attachment_max_bytes = config.data.attachment_max_bytes;
@@ -264,7 +264,7 @@ impl Daemon {
             }
         }
 
-        // Spec §9.1: sync FS → index at startup AND re-embed chunks of changed
+        // Sync FS → index at startup AND re-embed chunks of changed
         // entries so `search.semantic` returns hits without a manual
         // `index.rebuild` after a `git clone` + restart. Best-effort; failures
         // log a warning to stderr and do not abort the boot (single-user tool;
@@ -501,7 +501,7 @@ impl Daemon {
         Ok(daemon)
     }
 
-    /// Spec §9.1: sync FS → index at startup AND re-embed chunks of changed
+    /// Sync FS → index at startup AND re-embed chunks of changed
     /// entries so `search.semantic` returns hits immediately after boot —
     /// including the `git clone` + restart case where the FS has entries the
     /// index/embeddings have never seen. Runs two phases:
@@ -595,7 +595,7 @@ impl Daemon {
     /// dispatch their NDJSON JSON-RPC lines via the same `dispatch` as
     /// `run_stdio`, writing responses back to **each connection**. Exits when
     /// either (a) `idle_timeout` elapses with zero active connections, or
-    /// (b) SIGTERM / SIGINT arrives. Spec §5.
+    /// (b) SIGTERM / SIGINT arrives.
     pub async fn run_serve<L: Accept>(
         self,
         mut listener: L,
@@ -683,7 +683,7 @@ impl Daemon {
         let params = req.params.unwrap_or(serde_json::Value::Null);
         let result = match self.handlers.get(req.method.as_str()) {
             Some(handler) => {
-                // Spec §8 chokepoint: mutating handlers (entry/block writes,
+                // Chokepoint: mutating handlers (entry/block writes,
                 // batch) run under `sync_lock` so a concurrent `sync.run`
                 // cannot pull --rebase the work-tree out from under them.
                 // `sync.run` itself returns `is_mutating() == false` here —
@@ -727,7 +727,7 @@ impl Daemon {
     }
 }
 
-/// Builder for `Daemon`. Spec 8 Plan 2 / F-lib-2: provides a fluent
+/// Builder for `Daemon`. Provides a fluent
 /// alternative to `Daemon::from_services`'s 8 positional arguments.
 /// `Daemon::from_services` is kept for backward compatibility.
 ///
@@ -871,7 +871,7 @@ fn expand_knowledge_root(path: &std::path::Path) -> Result<std::path::PathBuf, C
     Ok(expanded)
 }
 
-/// Spec §9.1: best-effort FS→index reconciliation step at daemon startup.
+/// Best-effort FS→index reconciliation step at daemon startup.
 /// Runs `entries.sync_from_fs()`, logs counts to stderr when it changed
 /// something, and emits an `index.synced` event into the events log so
 /// `events.list` consumers can observe boot reconciliations. Returns the
@@ -882,7 +882,7 @@ fn expand_knowledge_root(path: &std::path::Path) -> Result<std::path::PathBuf, C
 /// RPCs, and a later `index.sync` / `index.rebuild` call can recover. Shared
 /// between `Daemon::startup_sync` (production) and `for_test` (tests).
 ///
-/// Plan 6 Task 5: the `index.synced` event is emitted only when the boot
+/// The `index.synced` event is emitted only when the boot
 /// scan actually changed something (`added + updated + removed > 0`). A
 /// quiet boot — empty FS, or an FS already matching the index — produces
 /// no event so the audit log does not grow on every restart.
@@ -1352,7 +1352,7 @@ mod tests {
         }
     }
 
-    /// Plan 5 / Task 2: Daemon must expose the shared `content_store` (so
+    /// Daemon must expose the shared `content_store` (so
     /// sync.* handlers can resolve `knowledge_root` — the git work-tree) and
     /// a process-wide `sync_lock` serializing sync.run against write RPCs.
     ///

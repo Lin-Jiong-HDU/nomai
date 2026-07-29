@@ -1,6 +1,4 @@
 //! batch RPC handler: single-request multi-op with atomic transaction.
-//!
-//! See spec 2026-06-22-batch-rpc-design.md §3-§6.
 
 use std::collections::HashMap;
 
@@ -46,8 +44,8 @@ fn default_atomic() -> bool {
     true
 }
 
-/// Allowed methods in batch (mutation only). Plan 4: chunk.create/delete
-/// removed (chunks are auto-derived).
+/// Allowed methods in batch (mutation only). chunk.create/delete removed
+/// (chunks are auto-derived).
 const ALLOWED_METHODS: &[&str] = &[
     "entry.create",
     "entry.update",
@@ -428,7 +426,7 @@ fn dispatch_in_tx(
 
 /// Convert CoreError to a JSON-RPC error Value (for results array entries).
 ///
-/// Spec 8 Plan 2 / F-batch-4: delegate to `rpc::core_error_to_rpc_ref`
+/// Delegate to `rpc::core_error_to_rpc_ref`
 /// instead of duplicating the CoreError → RPC mapping (which previously
 /// drifted from the top-level mapping in `rpc.rs`). Wraps the resulting
 /// `RpcError` as a Value for direct insertion into the per-op results array.

@@ -140,7 +140,7 @@ impl RpcHandler for ToolsCall {
             return Err(CoreError::Validation(format!("not a tool: {}", p.name)));
         }
 
-        // Spec §8 chokepoint: `mcp.tools/call` routes to a nested handler via
+        // Chokepoint: `mcp.tools/call` routes to a nested handler via
         // `handler.call(...)` DIRECTLY, bypassing `Daemon::dispatch` (which
         // would otherwise hold `sync_lock` for mutating calls). To keep the
         // lock invariant uniform across both JSON-RPC entry points, acquire
@@ -291,7 +291,7 @@ mod tests {
         use std::sync::Arc;
 
         let entries = Arc::new(nomai_core::EntryService::for_test().unwrap());
-        // Plan 4: entry-level embeddings retired; only chunk-level vec0 table
+        // Entry-level embeddings retired; only chunk-level vec0 table
         // remains. Daemon::for_test creates the ChunkService; ensure the
         // virtual table exists before any test path touches it.
 

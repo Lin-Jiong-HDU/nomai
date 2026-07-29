@@ -110,7 +110,7 @@ impl RpcHandler for Create {
         // returns provider error (1002) without rolling back the entry.
         crate::handlers::embed::embed_entry_chunks(daemon, entry.id, false).await?;
 
-        // Spec 7: invalidate search cache (new entry affects both search RPCs).
+        // Invalidate search cache (new entry affects both search RPCs).
         daemon.search_cache.bump_generation();
 
         serde_json::to_value(&entry).map_err(|e| CoreError::Config(format!("serialize: {e}")))
@@ -202,11 +202,11 @@ impl RpcHandler for Update {
         let fields = p.fields;
         let updated = blocking(move || entries.update(id_for_update, fields)).await??;
 
-        // Plan 4: entry.update touches metadata only; FTS is per-block and
+        // entry.update touches metadata only; FTS is per-block and
         // updated automatically when blocks change. No embedding re-trigger
         // is needed at this layer.
 
-        // Spec 7: invalidate search cache (fulltext returns entry snapshot).
+        // Invalidate search cache (fulltext returns entry snapshot).
         daemon.search_cache.bump_generation();
 
         serde_json::to_value(&updated).map_err(|e| CoreError::Config(format!("serialize: {e}")))
@@ -237,16 +237,16 @@ impl RpcHandler for Delete {
             .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
         let id_for_ack = p.id;
 
-        // Plan 5: deleting the entry CASCADEs blocks → chunks; the V9
+        // Deleting the entry CASCADEs blocks → chunks; the V9
         // chunks_ad AFTER DELETE trigger cleans vec_chunk_embeddings when
         // each chunk row goes away. No manual N+1 walk needed here.
         let entries = daemon.entries.clone();
         blocking(move || entries.delete(p.id)).await??;
 
-        // Spec 7: invalidate search cache.
+        // Invalidate search cache.
         daemon.search_cache.bump_generation();
 
-        // F-entry-1: mirror block.delete ack shape — include the id.
+        // Mirror block.delete ack shape — include the id.
         Ok(json!({ "deleted": true, "id": id_for_ack.to_string() }))
     }
 }

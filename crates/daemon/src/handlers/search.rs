@@ -80,12 +80,12 @@ fn serialize_fulltext_result(r: &nomai_core::FulltextSearchResult) -> serde_json
     })
 }
 
-/// Search demotion penalty for transient entries (Spec §5). Hardcoded for
+/// Search demotion penalty for transient entries. Hardcoded for
 /// now; promote to config only if a real need appears (YAGNI).
 const TRANSIENT_PENALTY: f64 = 0.5;
 
 /// Collect the transient subset among `entry_ids` via a single IN query
-/// (policy applied live — never a stale snapshot, Spec §5.2).
+/// (policy applied live — never a stale snapshot).
 async fn transient_set(
     entries: &nomai_core::EntryService,
     entry_ids: Vec<String>,

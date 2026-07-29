@@ -69,7 +69,7 @@ pub trait RpcHandler: Send + Sync {
 /// Reference version of `core_error_to_rpc`. Used by callers that need
 /// to keep the original CoreError (e.g. batch.rs inserts per-op errors
 /// into the results array AND returns the last error as the top-level
-/// RPC error). Spec 8 Plan 2 / F-batch-4.
+/// RPC error).
 pub fn core_error_to_rpc_ref(err: &CoreError) -> RpcError {
     match err {
         CoreError::NotFound(id) => RpcError {
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn core_error_to_rpc_ref_matches_by_value() {
-        // Spec 8 Plan 2 / F-batch-4: ref version produces same code/data as
+        // Ref version produces same code/data as
         // the by-value version. CoreError isn't Clone, so reconstruct the
         // owned path's expectations by hand.
         let id: ulid::Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();

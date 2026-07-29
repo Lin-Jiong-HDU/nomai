@@ -1,4 +1,4 @@
-//! chunk.* handlers. Plan 4: chunks are auto-derived from blocks.
+//! chunk.* handlers. Chunks are auto-derived from blocks.
 //! `chunk.create` / `chunk.update` / `chunk.delete` return -32601
 //! METHOD_NOT_FOUND (chunks are not user-managed). Only `chunk.list`
 //! (block-scoped) and `chunk.get` remain.

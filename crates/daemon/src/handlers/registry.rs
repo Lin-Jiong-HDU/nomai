@@ -1,6 +1,6 @@
 //! Handler registry: maps RPC method names to handler instances.
 //!
-//! Extracted from mod.rs in Spec 8 Plan 2 / F-lib-3 to keep mod.rs
+//! Extracted from mod.rs to keep mod.rs
 //! focused on test infrastructure.
 
 use std::collections::HashMap;
@@ -50,14 +50,14 @@ pub fn registry_with_benchmark(enabled: bool) -> HashMap<&'static str, Arc<dyn R
     let h = link::Neighbors;
     m.insert(h.method(), Arc::new(h));
 
-    // chunk.* (Plan 4: only Get + List; Create/Update/Delete removed because
+    // chunk.* (only Get + List; Create/Update/Delete removed because
     // chunks are auto-derived from blocks.)
     let h = chunk::Get;
     m.insert(h.method(), Arc::new(h));
     let h = chunk::List;
     m.insert(h.method(), Arc::new(h));
 
-    // block.* (Plan 5: block-level RPCs on top of Plan 3 blocks storage.)
+    // block.* (block-level RPCs on top of blocks storage.)
     let h = block::Append;
     m.insert(h.method(), Arc::new(h));
     let h = block::Update;
@@ -69,13 +69,13 @@ pub fn registry_with_benchmark(enabled: bool) -> HashMap<&'static str, Arc<dyn R
     let h = block::Get;
     m.insert(h.method(), Arc::new(h));
 
-    // attachment.* (multimodal-image Plan 3: sibling file read/list)
+    // attachment.* (sibling file read/list)
     let h = attachment::Read;
     m.insert(h.method(), Arc::new(h));
     let h = attachment::List;
     m.insert(h.method(), Arc::new(h));
 
-    // index.* (Plan 5: FS↔SQLite reconciliation. Plan 6: read-only verify.)
+    // index.* (FS↔SQLite reconciliation. Read-only verify.)
     let h = index::Sync;
     m.insert(h.method(), Arc::new(h));
     let h = index::Rebuild;
@@ -83,7 +83,7 @@ pub fn registry_with_benchmark(enabled: bool) -> HashMap<&'static str, Arc<dyn R
     let h = index::Verify;
     m.insert(h.method(), Arc::new(h));
 
-    // system.* (Plan 6: Spec §12 migration utilities. Task 4: restart.)
+    // system.* (migration utilities. Restart.)
     let h = system::ExportToFs;
     m.insert(h.method(), Arc::new(h));
     let h = system::Restart;

@@ -1,5 +1,5 @@
-//! index.* handlers. Plan 5 introduces index-reconciliation RPCs that treat
-//! the filesystem as source-of-truth (Spec §7.1) and bring the SQLite index
+//! index.* handlers: index-reconciliation RPCs that treat
+//! the filesystem as source-of-truth and bring the SQLite index
 //! into agreement with it.
 //!
 //! `index.sync` walks the content store, diffs each entry's `.nomai` mtime
@@ -9,7 +9,7 @@
 //! `index.rebuild` is the nuclear option: wipes every derived table, then
 //! re-indexes every FS entry. Used to recover from index corruption.
 //!
-//! `index.verify` (Plan 6 Task 4) is a read-only drift report: same scan/diff
+//! `index.verify` is a read-only drift report: same scan/diff
 //! as `index.sync` but never mutates. Useful for surfacing drift to the user
 //! before deciding whether to run sync/rebuild.
 
@@ -47,7 +47,7 @@ impl RpcHandler for Sync {
         let entries: Arc<EntryService> = daemon.entries.clone();
         let result: SyncResult = { blocking(move || entries.sync_from_fs()).await?? };
 
-        // Spec 7: only bump if FS drift was reconciled; no-op syncs are
+        // Only bump if FS drift was reconciled; no-op syncs are
         // common and bumping them wastes the cache.
         if result.added + result.updated + result.removed > 0 {
             daemon.search_cache.bump_generation();
@@ -87,7 +87,7 @@ impl RpcHandler for Rebuild {
         let entries: Arc<EntryService> = daemon.entries.clone();
         let mut result: RebuildResult = { blocking(move || entries.rebuild_index()).await?? };
 
-        // Spec 7: rebuild always invalidates — even an empty FS rebuild
+        // Rebuild always invalidates — even an empty FS rebuild
         // wipes the derived index, so cached results are stale by definition.
         daemon.search_cache.bump_generation();
 

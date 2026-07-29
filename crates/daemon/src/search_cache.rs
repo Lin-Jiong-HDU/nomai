@@ -1,6 +1,6 @@
 //! SearchCache: in-memory cache for search.semantic / search.fulltext
-//! results. Spec 7. Generation-based invalidation; bump on every mutation
-//! that affects search results. See `docs/superpowers/specs/2026-06-24-search-cache-design.md`.
+//! results. Generation-based invalidation; bump on every mutation
+//! that affects search results.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +21,7 @@ pub(crate) enum SearchRpc {
 
 /// Cache key. `generation` is the snapshot of the daemon-wide counter at
 /// lookup time; bumping the counter invalidates every prior key without
-/// iterating the map. See spec §4.1.
+/// iterating the map.
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
 pub(crate) struct Key {
     pub(crate) generation: u64,
@@ -81,7 +81,7 @@ pub struct SearchCache {
     hybrid_misses: AtomicU64,
 }
 
-/// Snapshot of cache statistics returned by `SearchCache::stats`. Spec §7.1.
+/// Snapshot of cache statistics returned by `SearchCache::stats`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchCacheStats {
     pub generation: u64,
@@ -124,7 +124,7 @@ impl SearchCache {
         }
     }
 
-    /// Current generation counter value. Spec §6 hook points call
+    /// Current generation counter value. Hook points call
     /// `bump_generation` to invalidate the cache.
     // Public API for lib-mode users / future RPCs that want raw generation
     // without the full stats snapshot. `stats()` reads the atomic directly
