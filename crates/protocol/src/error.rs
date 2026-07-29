@@ -1,6 +1,6 @@
 //! JSON-RPC error-code constants and canonical messages.
 //!
-//! Code ranges (per spec §9 and JSON-RPC 2.0):
+//! Code ranges (per JSON-RPC 2.0):
 //!   -32700..=-32603  protocol errors (reserved by JSON-RPC)
 //!   1001             entry not found
 //!   1002             provider error (error.data contains `kind`)
@@ -17,7 +17,7 @@ pub const METHOD_NOT_FOUND: i32 = -32601;
 pub const INVALID_PARAMS: i32 = -32602;
 pub const INTERNAL_ERROR: i32 = -32603;
 
-// nomai business errors (spec §9).
+// nomai business errors.
 pub const ENTRY_NOT_FOUND: i32 = 1001;
 pub const PROVIDER_ERROR: i32 = 1002;
 pub const VALIDATION_ERROR: i32 = 1003;

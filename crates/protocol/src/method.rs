@@ -1,8 +1,8 @@
 //! JSON-RPC method-name constants, grouped by namespace.
 //!
-//! See spec §6 for the full method table. Reserved method names
-//! (`search.hybrid`, `provider.set`) are present so the daemon can match
-//! them and return `METHOD_NOT_FOUND` (`-32601`) cleanly.
+//! Reserved method names (`search.hybrid`, `provider.set`) are present so
+//! the daemon can match them and return `METHOD_NOT_FOUND` (`-32601`)
+//! cleanly.
 
 pub mod entry {
     pub const CREATE: &str = "entry.create";
@@ -13,7 +13,7 @@ pub mod entry {
 }
 
 pub mod entries {
-    /// Purge transient (short-term) entries (Spec transient §6.2).
+    /// Purge transient (short-term) entries.
     pub const PURGE_TRANSIENT: &str = "entries.purge_transient";
 }
 
@@ -35,7 +35,7 @@ pub mod link {
     pub const DELETE: &str = "link.delete";
     pub const LIST: &str = "link.list";
     pub const NEIGHBORS: &str = "link.neighbors";
-    /// Reserved for Phase 2 (spec §5): returns `METHOD_NOT_FOUND` (-32601).
+    /// Reserved for Phase 2: returns `METHOD_NOT_FOUND` (-32601).
     pub const TRAVERSE: &str = "link.traverse";
 }
 
@@ -46,7 +46,7 @@ pub mod events {
 }
 
 pub mod chunk {
-    /// Reserved: chunks are auto-derived from blocks (Spec 6 §10).
+    /// Reserved: chunks are auto-derived from blocks.
     /// Returns `METHOD_NOT_FOUND` (-32601) if dispatched. Constant
     /// retained for symmetry with GET/LIST and future re-enable.
     pub const CREATE: &str = "chunk.create";
@@ -58,37 +58,37 @@ pub mod chunk {
 }
 
 pub mod block {
-    /// Plan 5: append a block to an entry. Computes ordinal = max(existing)+1
+    /// Append a block to an entry. Computes ordinal = max(existing)+1
     /// and re-renders the entry's `.nomai` file.
     pub const APPEND: &str = "block.append";
     /// 0.2.2: fetch a single block by ULID. Namespace completeness —
     /// entry/link/chunk/events all have `get`. Returns 1001 if not found.
     pub const GET: &str = "block.get";
-    /// Plan 5: update a block's type/text/attrs. Re-chunks when text changes
+    /// Update a block's type/text/attrs. Re-chunks when text changes
     /// (chunks_ad trigger cleans vec_chunk_embeddings) and re-renders the
     /// entry's `.nomai` file.
     pub const UPDATE: &str = "block.update";
-    /// Plan 5: delete a block. The chunks_ad trigger cleans vec_chunk_embeddings
+    /// Delete a block. The chunks_ad trigger cleans vec_chunk_embeddings
     /// and re-renders the entry's `.nomai` file.
     pub const DELETE: &str = "block.delete";
-    /// Spec 8 Plan 1 / F-block-1: list blocks for an entry by entry_id.
+    /// List blocks for an entry by entry_id.
     /// Fills the namespace gap (entry/link/chunk/events all have list).
     pub const LIST: &str = "block.list";
 }
 
 pub mod index {
-    /// Plan 5: reconcile the SQLite index against the filesystem. Adds
+    /// Reconcile the SQLite index against the filesystem. Adds
     /// new entries discovered on disk, re-indexes those whose `.nomai`
     /// mtime changed, and removes index rows whose `.nomai` is gone.
     /// Returns `{ added, updated, removed, unchanged }` counts.
     pub const SYNC: &str = "index.sync";
-    /// Plan 5: wholesale rebuild. DELETEs every derived table (chunks,
+    /// Wholesale rebuild. DELETEs every derived table (chunks,
     /// blocks, links, entries, fts_blocks, vec_chunk_embeddings) then
     /// re-indexes every FS entry. Does NOT touch events (daemon history)
     /// or emb_cache (deterministic, reusable). Returns
     /// `{ reindexed, errors }` where `errors` collects per-entry failures.
     pub const REBUILD: &str = "index.rebuild";
-    /// Plan 6: read-only drift report between FS and the SQLite index.
+    /// Read-only drift report between FS and the SQLite index.
     /// Mirrors `index.sync`'s scan/diff but does NOT mutate. Returns
     /// `{ fs_only, db_only, stale_mtime, consistent }` so callers can
     /// surface drift before deciding whether to run `sync` / `rebuild`.
@@ -96,8 +96,8 @@ pub mod index {
 }
 
 pub mod system {
-    /// Plan 6: walk every entry row and render `.nomai` for any that lacks
-    /// one. Spec §12 migration utility — post-Plan-3 entries created via
+    /// Walk every entry row and render `.nomai` for any that lacks
+    /// one. Migration utility — entries created via
     /// `entry.create` already have `.nomai` and are skipped; this is for
     /// rows created via direct DB manipulation. Returns
     /// `{ exported, skipped, errors }`.
@@ -119,11 +119,11 @@ pub mod benchmark {
 }
 
 pub mod cache {
-    /// Spec 5: emb_cache introspection (model, rows, hits/misses, warning).
+    /// emb_cache introspection (model, rows, hits/misses, warning).
     pub const STATS: &str = "cache.stats";
-    /// Spec 5 + Spec 7: clear cache by namespace. Default namespace
+    /// Clear cache by namespace. Default namespace
     /// `"embeddings"` for backward compat; `"searches"` / `"all"` opts
-    /// into the Spec 7 search cache.
+    /// into the search cache.
     pub const CLEAR: &str = "cache.clear";
 }
 
