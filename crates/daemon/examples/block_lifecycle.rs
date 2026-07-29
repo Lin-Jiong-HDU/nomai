@@ -1,6 +1,6 @@
 //! Block lifecycle demo: create entry -> append blocks -> update one -> delete one.
 //!
-//! Shows the typed-blocks primitive from Spec 6:
+//! Shows the typed-blocks primitive:
 //! - Each entry holds ordered blocks (claim / evidence / question / source / note / connection)
 //! - `BlockService::append` adds at the end (auto-assigns ordinal)
 //! - `BlockService::update` changes text (auto re-chunks; chunks_ad cleans embeddings)
@@ -10,7 +10,7 @@
 //! chunks/embeddings but does NOT touch the `.nomai` file. The production
 //! `block.*` RPC handlers (see `crates/daemon/src/handlers/block.rs`) wrap each
 //! primitive with a `rerender_entry_nomai` step that re-renders the file from
-//! the post-mutation entry state, keeping the FS (Spec §7.1 source-of-truth)
+//! the post-mutation entry state, keeping the FS (source-of-truth)
 //! in sync with the index. This example inlines that same re-render so the
 //! final `.nomai` dump reflects every mutation shown above it.
 //!

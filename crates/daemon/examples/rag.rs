@@ -5,7 +5,7 @@
 //! build a RAG flow *without* any daemon-level RAG support: no qa.ask RPC,
 //! no subprocess.
 //!
-//! Plan 4: semantic search runs over chunks (block-derived); each hit's
+//! Semantic search runs over chunks (block-derived); each hit's
 //! parent block/entry is reachable via JOIN.
 //!
 //! Usage:
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&knowledge_root)?;
     let content_store = Arc::new(nomai_core::ContentStore::new(knowledge_root));
     // EntryService is constructed to run migrations + share the connection;
-    // not called directly in this example (Plan 4: chunks drive search).
+    // not called directly in this example (chunks drive search).
     let _entries = EntryService::new(conn.clone(), content_store, 1024)?;
     let chunks = nomai_core::ChunkService::new(conn.clone())?;
     chunks.ensure_vec_chunk_embeddings(config.embedding.dim)?;
@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .next()
         .ok_or("empty embedding response")?;
 
-    // 4. KNN top-K semantic search over chunks (Plan 4). Each hit includes
+    // 4. KNN top-K semantic search over chunks. Each hit includes
     //    the chunk text; we resolve its parent block/entry via the daemon's
     //    block→entry JOIN when needed.
     let chunk_hits = chunks.semantic_search(&qvec, TOP_K, None, None)?;

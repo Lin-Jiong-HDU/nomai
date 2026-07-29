@@ -109,7 +109,7 @@ fn main() {
     }
 
     // Seed chunk embeddings (deterministic vectors) so semantic_search runs
-    // end-to-end. Plan 4: semantic search is chunk-level via ChunkService.
+    // end-to-end. Semantic search is chunk-level via ChunkService.
     let chunks = Arc::new(nomai_core::ChunkService::new(conn.clone()).unwrap());
     chunks.ensure_vec_chunk_embeddings(8).unwrap();
     for (i, id) in ids.iter().enumerate() {

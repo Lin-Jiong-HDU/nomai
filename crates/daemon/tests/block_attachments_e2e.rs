@@ -1,5 +1,4 @@
-//! e2e dispatch tests for `block.append` / `block.update` `attachments`
-//! (Plan 3 Task 3).
+//! e2e dispatch tests for `block.append` / `block.update` `attachments`.
 //!
 //! These exercise the full RPC path: client sends base64 strings in
 //! `attachments`, daemon decodes via `decode_attachments`, pre-validates via

@@ -5,11 +5,11 @@
 //! the daemon's public `dispatch` surface, exactly as a resident daemon
 //! would. All data lives in `TempDir`s; nothing touches
 //! `~/.local/share/nomai`. Requires `git` + `git-lfs` on PATH (same as the
-//! Task 4/5 unit tests in `handlers/sync.rs`).
+//! unit tests in `handlers/sync.rs`).
 //!
-//! Coverage maps to spec §11 scenarios 1 (clean init), 3 (one-way pull),
-//! 4 (two-way converge), 6 (conflict surfaces `SyncConflict`), and 9
-//! (conflict resolved → `rebase --continue` resumes and converges).
+//! Coverage spans core scenarios: clean init, one-way pull, two-way converge,
+//! conflict surfaces `SyncConflict`, and conflict resolved →
+//! `rebase --continue` resumes and converges.
 
 mod common;
 
@@ -115,7 +115,7 @@ async fn conflict_then_resolve_recovers() {
     b.edit_entry_body(ID, "from-b", "version from B");
     let err = b.dispatch_run_err().await;
 
-    // Spec §10 / error.rs: rebase conflict maps to SYNC_ERROR (1007) with
+    // error.rs: rebase conflict maps to SYNC_ERROR (1007) with
     // the conflicted file paths in `data.conflicted_files`.
     assert_eq!(
         err.code, SYNC_ERROR,

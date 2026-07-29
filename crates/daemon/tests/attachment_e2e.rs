@@ -1,10 +1,10 @@
-//! e2e dispatch tests for attachment.read / attachment.list (Plan 3 Task 1).
+//! e2e dispatch tests for attachment.read / attachment.list.
 //!
-//! Task 1 ships the read/list RPCs only; the base64 `attachments` param on
-//! entry.create / block.append / block.update is Task 2/3. So this test seeds
-//! an attachment via the core ContentStore directly, then exercises the new
-//! RPCs end-to-end through `Daemon::dispatch` (same construction pattern as
-//! snapshot_test.rs).
+//! These cover the read/list RPCs; the base64 `attachments` param on
+//! entry.create / block.append / block.update is covered separately. So this
+//! test seeds an attachment via the core ContentStore directly, then exercises
+//! the read/list RPCs end-to-end through `Daemon::dispatch` (same construction
+//! pattern as snapshot_test.rs).
 
 use std::sync::Arc;
 
@@ -65,7 +65,7 @@ async fn build_test_daemon() -> Daemon {
 }
 
 /// Same as `build_test_daemon` but with a tiny per-file attachment cap, for
-/// exercising the `attachment too large` rejection (Plan 4 Task 1). The
+/// exercising the `attachment too large` rejection. The
 /// default 10 MiB cap would require a multi-megabyte fixture.
 async fn build_test_daemon_with_cap(attachment_max_bytes: usize) -> Daemon {
     let entries = Arc::new(nomai_core::EntryService::for_test().unwrap());
@@ -133,7 +133,7 @@ async fn attachment_list_and_read_round_trip() {
 
     let daemon = build_test_daemon().await;
 
-    // 1. Create an entry via RPC (no attachments param yet — that's Task 2).
+    // 1. Create an entry via RPC (no attachments param on this call).
     //    We then seed the attachment directly via core's ContentStore, which
     //    is the same FS path entry.create's `attachments` will write through.
     let create = daemon
@@ -261,7 +261,7 @@ async fn attachment_read_mime_for_other_extensions() {
     assert_eq!(result["mime"], "application/pdf");
 }
 
-// ---- Plan 3 Task 2: entry.create `attachments` (base64 → bytes) ----
+// ---- entry.create `attachments` (base64 → bytes) ----
 //
 // These tests exercise the full RPC path: client sends base64 strings in
 // `attachments`, daemon decodes via decode_attachments, core writes the
@@ -375,7 +375,7 @@ async fn entry_create_rejects_invalid_base64_attachment_via_rpc() {
     );
 }
 
-// ---- Plan 4 Task 1: attachment_max_bytes enforcement ----
+// ---- attachment_max_bytes enforcement ----
 
 #[tokio::test]
 async fn entry_create_rejects_attachment_exceeding_max_bytes() {

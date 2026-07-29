@@ -1,6 +1,6 @@
 //! Index management demo: verify -> drift -> sync -> rebuild -> export_to_fs.
 //!
-//! Shows the FS-as-truth invariant from Spec 6:
+//! Shows the FS-as-truth invariant:
 //! - `index.verify` reports drift categories without mutating
 //! - external FS edits (dropping a `.nomai` in) are detected on next verify/sync
 //! - `index.sync` reconciles FS <-> index (add/update/remove)
