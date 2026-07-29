@@ -44,7 +44,7 @@ mod tests {
 
     async fn setup_daemon(server: &MockServer) -> Daemon {
         let entries = Arc::new(EntryService::for_test().unwrap());
-        // Plan 4: entry-level embeddings retired; only chunk-level vec0
+        // entry-level embeddings retired; only chunk-level vec0
         // table remains, created via ensure_vec_chunk_embeddings below.
         let embedder: Arc<dyn nomai_providers::EmbeddingProvider> =
             Arc::new(nomai_providers::OpenAiCompatibleEmbed::new(
@@ -368,7 +368,7 @@ mod tests {
         let server = MockServer::start().await;
 
         // Seed two entries with known chunk embeddings, then answer the query
-        // embedding deterministically. Plan 4: semantic search runs over
+        // embedding deterministically. Semantic search runs over
         // chunk embeddings (auto-derived from block text).
         let daemon = setup_daemon(&server).await;
 
@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(result["llm"]["model"], "test-model");
     }
 
-    // ----- link.* e2e tests (Plan 3 Task 3) -----
+    // ----- link.* e2e tests -----
 
     async fn mount_embedding_mock(server: &MockServer) {
         // Non-zero embeddings: cosine similarity in sqlite-vec treats the
@@ -575,7 +575,7 @@ mod tests {
             ))
             .await;
         let err = resp.error.unwrap();
-        assert_eq!(err.code, 1003); // Validation per spec §5
+        assert_eq!(err.code, 1003); // Validation
     }
 
     #[tokio::test]
@@ -712,7 +712,7 @@ mod tests {
 
     #[tokio::test]
     async fn link_traverse_returns_method_not_found() {
-        // Phase 2 deferred per spec §5.
+        // Phase 2 deferred.
         let server = MockServer::start().await;
         let daemon = setup_daemon(&server).await;
         let resp = daemon
@@ -732,7 +732,7 @@ mod tests {
         assert_eq!(err.code, 1003);
     }
 
-    // ----- events.* e2e tests (Plan 2 Task 3) -----
+    // ----- events.* e2e tests -----
 
     #[tokio::test]
     async fn events_list_returns_entry_created_after_create() {
@@ -925,10 +925,10 @@ mod tests {
 
         // Create 3 entries → 3 entry.created events total. After P3-M7,
         // entry.create suppresses block.created emission (the entry.created
-        // payload already embeds the full blocks vector). Plan 6 Task 5:
-        // daemon startup emits `index.synced` only when the boot scan
-        // changes something; setup_daemon's empty FS means no boot event,
-        // so the total is 3 before any entry.create call.
+        // payload already embeds the full blocks vector). Daemon startup
+        // emits `index.synced` only when the boot scan changes something;
+        // setup_daemon's empty FS means no boot event, so the total is 3
+        // before any entry.create call.
         daemon
             .dispatch(req(
                 "entry.create",
@@ -975,8 +975,8 @@ mod tests {
         let daemon = setup_daemon(&server).await;
 
         // Create 3 entries → 3 entry events total. After P3-M7, entry.create
-        // suppresses block.created emission. Plan 6 Task 5: daemon startup
-        // emits `index.synced` only when the boot scan changes something;
+        // suppresses block.created emission. Daemon startup emits
+        // `index.synced` only when the boot scan changes something;
         // setup_daemon's empty FS means no boot event, so total = 3.
         for i in 0..3 {
             daemon
@@ -1043,9 +1043,9 @@ mod tests {
         assert_eq!(items[0]["payload"]["relation"], "r");
     }
 
-    // ----- chunk.* + search.semantic + entry.delete cleanup e2e (Plan 4) -----
+    // ----- chunk.* + search.semantic + entry.delete cleanup e2e -----
     //
-    // Plan 4 changes:
+    // Changes:
     //   - chunk.create / chunk.delete RPCs removed (return -32601); chunks
     //     are auto-derived from block text via BlockService::create_in_tx.
     //   - chunk.list takes `block_id` (was `entry_id`); chunk.get unchanged.
@@ -1055,7 +1055,7 @@ mod tests {
 
     #[tokio::test]
     async fn chunk_create_returns_method_not_found() {
-        // Plan 4: chunk.create is gone — chunks are auto-derived from blocks.
+        // chunk.create is gone — chunks are auto-derived from blocks.
         let server = MockServer::start().await;
         let daemon = setup_daemon(&server).await;
 
@@ -1086,7 +1086,7 @@ mod tests {
 
     #[tokio::test]
     async fn chunk_list_returns_auto_derived_chunks_for_block() {
-        // Plan 4: chunks are auto-derived from block text on entry.create.
+        // chunks are auto-derived from block text on entry.create.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -1146,7 +1146,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_semantic_returns_chunks() {
-        // Plan 4: search.semantic always returns chunks (entry-level retired).
+        // search.semantic always returns chunks (entry-level retired).
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -1160,7 +1160,7 @@ mod tests {
         let entry_json = entry_resp.result.unwrap();
         let block_id = entry_json["blocks"][0]["id"].as_str().unwrap().to_string();
 
-        // Write a chunk embedding so semantic search has a hit (Plan 4: no
+        // Write a chunk embedding so semantic search has a hit (no
         // background embedder yet; tests must populate embeddings directly).
         let chunks = daemon.chunks.clone();
         let chunk_id = chunks
@@ -1185,9 +1185,9 @@ mod tests {
 
     #[tokio::test]
     async fn entry_delete_cleans_chunk_embeddings_via_trigger() {
-        // Plan 5 Task 4: the V9 chunks_ad trigger now cleans
-        // vec_chunk_embeddings when chunks are CASCADE-deleted; the entry.delete
-        // handler no longer walks chunks and calls delete_embedding.
+        // The V9 chunks_ad trigger now cleans vec_chunk_embeddings when
+        // chunks are CASCADE-deleted; the entry.delete handler no longer
+        // walks chunks and calls delete_embedding.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -1236,7 +1236,7 @@ mod tests {
         let del_resp = daemon
             .dispatch(req("entry.delete", json!({"id": entry_id})))
             .await;
-        // F-entry-1: entry.delete ack carries the id (mirrors block.delete).
+        // entry.delete ack carries the id (mirrors block.delete).
         let del_result = del_resp.result.unwrap();
         assert_eq!(del_result["deleted"], true);
         assert_eq!(del_result["id"], entry_id);
@@ -1270,8 +1270,8 @@ mod tests {
 
     #[tokio::test]
     async fn entry_list_returns_has_more_when_paginated() {
-        // Spec 8 Plan 1 / F-entry-4: entry.list now returns has_more so
-        // consumers can tell whether more entries exist beyond offset+limit.
+        // entry.list now returns has_more so consumers can tell whether more
+        // entries exist beyond offset+limit.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -1302,7 +1302,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_semantic_with_block_type_filter() {
-        // Plan 4: block_type filter is the successor to the old granularity.
+        // block_type filter is the successor to the old granularity.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -1389,7 +1389,7 @@ mod tests {
         assert!(names.contains(&"entry.create"));
         assert!(names.contains(&"link.neighbors"));
         assert!(names.contains(&"events.list"));
-        // Plan 4: chunk.create / chunk.delete are gone.
+        // chunk.create / chunk.delete are gone.
         assert!(!names.contains(&"chunk.create"));
         assert!(!names.contains(&"chunk.delete"));
         assert!(names.contains(&"chunk.get"));
@@ -1458,7 +1458,7 @@ mod tests {
             ))
             .await;
         let err = resp.error.expect("expected validation error");
-        assert_eq!(err.code, 1003); // Validation per spec §5
+        assert_eq!(err.code, 1003); // Validation
     }
 
     #[tokio::test]
@@ -1515,11 +1515,11 @@ mod tests {
         assert_eq!(tools.len(), 38); // 37 built-in + custom.echo
     }
 
-    // ----- batch RPC e2e (Plan 2 Task 3) -----
+    // ----- batch RPC e2e -----
 
     #[tokio::test]
     async fn batch_all_success_creates_entries_and_link() {
-        // Plan 4: chunk.create is gone from batch; entries auto-derive chunks.
+        // chunk.create is gone from batch; entries auto-derive chunks.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -1559,7 +1559,7 @@ mod tests {
             "link target_id should match $ref"
         );
 
-        // Plan 4 bonus: chunks auto-derived for each entry.
+        // chunks auto-derived for each entry.
         let e1_block: ulid::Ulid = results[0]["result"]["blocks"][0]["id"]
             .as_str()
             .unwrap()
@@ -1616,7 +1616,7 @@ mod tests {
 
     #[tokio::test]
     async fn batch_op_error_includes_data_field_for_not_found() {
-        // Spec 8 Plan 2 / F-batch-4 (final-review I2): wire-format guard.
+        // Wire-format guard.
         // When a batch op fails with a CoreError variant that carries context
         // (here: NotFound(id)), the resulting RPC error must include a `data`
         // object on the per-op error. The batch handler routes the failing op's
@@ -1648,9 +1648,9 @@ mod tests {
             "NotFound code from entry.delete on phantom id"
         );
 
-        // The wire-format change introduced in F-batch-4: `data` is present and
-        // carries the NotFound id. Old consumers ignore this field; new ones can
-        // read the offending id without scraping the message string.
+        // The wire-format change: `data` is present and carries the NotFound
+        // id. Old consumers ignore this field; new ones can read the offending
+        // id without scraping the message string.
         let data = err
             .data
             .expect("per-op NotFound error must include `data` field");
@@ -1696,7 +1696,7 @@ mod tests {
 
     #[tokio::test]
     async fn batch_rejects_chunk_create() {
-        // Plan 4: chunk.create is no longer an allowed batch method.
+        // chunk.create is no longer an allowed batch method.
         let server = MockServer::start().await;
         let daemon = setup_daemon(&server).await;
 
@@ -1829,7 +1829,7 @@ mod tests {
         );
     }
 
-    // ----- cache.* e2e tests (Spec 5 enhancement) -----
+    // ----- cache.* e2e tests -----
 
     #[tokio::test]
     async fn cache_stats_returns_initial_state_with_warn_fields() {
@@ -1847,7 +1847,7 @@ mod tests {
         assert_eq!(emb["misses"], 0);
         assert!(emb["warn_rows"].as_u64().is_some());
         assert_eq!(emb["warning"], false);
-        // Spec 7: searches namespace present.
+        // searches namespace present.
         let s = &result["searches"];
         assert_eq!(s["generation"], 0);
         assert_eq!(s["entries"], 0);
@@ -1860,7 +1860,7 @@ mod tests {
         let server = MockServer::start().await;
         let daemon = setup_daemon(&server).await;
 
-        // Plan 4: entry.create no longer auto-populates emb_cache; inject
+        // entry.create no longer auto-populates emb_cache; inject
         // rows directly. Two distinct body hashes under "test-model" plus
         // one under "other-model" so by_model has two keys.
         {
@@ -2085,7 +2085,7 @@ mod tests {
         assert_eq!(err.code, 1003); // Validation
     }
 
-    // ----- block.append e2e test (Plan 5 Task 2) -----
+    // ----- block.append e2e test -----
 
     #[tokio::test]
     async fn block_append_adds_block_and_rerenders_nomai() {
@@ -2149,10 +2149,9 @@ mod tests {
 
     #[tokio::test]
     async fn block_append_updates_fs_mtime_so_sync_skips_reindex() {
-        // Plan 5 final review (I1): rerender_entry_nomai must refresh
-        // entries.fs_mtime so the next sync_from_fs treats the entry as
-        // unchanged. Without the refresh, sync sees a stale mtime and
-        // triggers a full reindex on every boot.
+        // rerender_entry_nomai must refresh entries.fs_mtime so the next
+        // sync_from_fs treats the entry as unchanged. Without the refresh,
+        // sync sees a stale mtime and triggers a full reindex on every boot.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -2263,7 +2262,7 @@ mod tests {
         assert_eq!(err.code, 1001); // NotFound
     }
 
-    // ----- block.update e2e tests (Plan 5 Task 3) -----
+    // ----- block.update e2e tests -----
 
     #[tokio::test]
     async fn block_update_changes_text_and_rerenders_nomai() {
@@ -2371,7 +2370,7 @@ mod tests {
         assert_eq!(err.code, 1001); // NotFound
     }
 
-    // ----- block.delete e2e tests (Plan 5 Task 4) -----
+    // ----- block.delete e2e tests -----
 
     #[tokio::test]
     async fn block_delete_removes_block_and_rerenders_nomai() {
@@ -2429,8 +2428,8 @@ mod tests {
 
     #[tokio::test]
     async fn block_delete_cleans_chunk_embeddings_via_trigger() {
-        // Plan 5 Task 4: the V9 chunks_ad trigger must clean
-        // vec_chunk_embeddings when block.delete CASCADE-removes chunks.
+        // The V9 chunks_ad trigger must clean vec_chunk_embeddings when
+        // block.delete CASCADE-removes chunks.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -2498,7 +2497,7 @@ mod tests {
         assert_eq!(err.code, 1001); // NotFound
     }
 
-    // ----- block.list e2e tests (Spec 8 Plan 1 / F-block-1) -----
+    // ----- block.list e2e tests -----
 
     #[tokio::test]
     async fn block_list_returns_blocks_for_entry() {
@@ -2549,13 +2548,13 @@ mod tests {
         assert_eq!(result["total"].as_u64().unwrap(), 0);
     }
 
-    // ----- system.export_to_fs e2e test (Plan 6 Task 3) -----
+    // ----- system.export_to_fs e2e test -----
 
     #[tokio::test]
     async fn system_export_to_fs_rpc_generates_missing_nomai() {
-        // Spec §12: walk every entry row and render .nomai for any that lack
-        // one. Entries created via entry.create already have .nomai; orphan
-        // rows (created via direct DB manipulation) do not.
+        // walk every entry row and render .nomai for any that lack one.
+        // Entries created via entry.create already have .nomai; orphan rows
+        // (created via direct DB manipulation) do not.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -2632,7 +2631,7 @@ mod tests {
         assert_eq!(doc.blocks[0].text, "orphan content\n");
     }
 
-    // ----- index.verify e2e test (Plan 6 Task 4) -----
+    // ----- index.verify e2e test -----
 
     #[tokio::test]
     async fn index_verify_reports_drift_without_mutating() {
@@ -2691,12 +2690,12 @@ mod tests {
         assert!(get_resp.error.is_some(), "verify must not index the orphan");
     }
 
-    // ----- index.sync e2e test (Plan 5 Task 6) -----
+    // ----- index.sync e2e test -----
     #[tokio::test]
     async fn index_sync_picks_up_external_file_and_reports_counts() {
-        // Spec §7.1: FS is source-of-truth; index.sync reconciles. Drop a
-        // .nomai file directly into the content store, then call index.sync
-        // and verify the new entry appears + counts are reported.
+        // FS is source-of-truth; index.sync reconciles. Drop a .nomai file
+        // directly into the content store, then call index.sync and verify
+        // the new entry appears + counts are reported.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -2758,13 +2757,12 @@ mod tests {
         let _ = indexed_id;
     }
 
-    // ----- index.rebuild e2e test (Plan 5 Task 7) -----
+    // ----- index.rebuild e2e test -----
 
     #[tokio::test]
     async fn index_rebuild_restores_blocks_and_preserves_events() {
-        // Spec §7.1: rebuild wipes derived tables + reindexes every FS
-        // entry. events (audit history) and emb_cache (deterministic) are
-        // untouched.
+        // rebuild wipes derived tables + reindexes every FS entry. events
+        // (audit history) and emb_cache (deterministic) are untouched.
         let server = MockServer::start().await;
         mount_embedding_mock(&server).await;
         let daemon = setup_daemon(&server).await;
@@ -2853,12 +2851,12 @@ mod tests {
         );
     }
 
-    // ----- daemon startup scan e2e test (Plan 5 Task 8) -----
+    // ----- daemon startup scan e2e test -----
 
     #[tokio::test]
     async fn daemon_startup_syncs_pre_populated_fs_to_index() {
-        // Spec §9.1: daemon startup runs `EntryService::sync_from_fs` once
-        // before serving RPCs. Pre-populate the FS with a .nomai file (via
+        // daemon startup runs `EntryService::sync_from_fs` once before
+        // serving RPCs. Pre-populate the FS with a .nomai file (via
         // ContentStore directly, bypassing EntryService so the index starts
         // empty), then construct a daemon and verify the entry is indexed.
         let server = MockServer::start().await;
@@ -2970,9 +2968,9 @@ mod tests {
         assert_eq!(payload["unchanged"], 0);
     }
 
-    // ----- Plan 6 Task 5: quiet boot emits no index.synced event -----
+    // ----- quiet boot emits no index.synced event -----
 
-    // ----- Plan 7 Task 3: full content storage lifecycle e2e regression -----
+    // ----- full content storage lifecycle e2e regression -----
 
     #[tokio::test]
     async fn content_storage_full_lifecycle_e2e() {
@@ -3139,7 +3137,7 @@ mod tests {
         );
     }
 
-    // ----- Spec 7: search cache e2e -----
+    // ----- search cache e2e -----
 
     #[tokio::test]
     async fn search_fulltext_caches_on_repeat() {
