@@ -322,6 +322,219 @@
       "name": "chunk.list"
     },
     {
+      "description": "Append one or more turns to an existing conversation. The turns array specifies role and content for each turn. Returns the created turns with their generated ULIDs.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation_id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "turns": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "attrs": {
+                  "type": "object"
+                },
+                "content": {
+                  "description": "Turn content in markdown",
+                  "type": "string"
+                },
+                "role": {
+                  "description": "\"user\", \"assistant\", \"system\", or \"tool\"",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "role",
+                "content"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "conversation_id",
+          "turns"
+        ],
+        "type": "object"
+      },
+      "name": "conversation.append"
+    },
+    {
+      "description": "Create a new conversation session with optional title, tags, attrs, and initial turns. Returns the created conversation with its generated ULID and any turns.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "attrs": {
+            "type": "object"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": {
+            "description": "Conversation title (optional)",
+            "type": "string"
+          },
+          "turns": {
+            "description": "Optional initial turns, created atomically with the conversation",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "attrs": {
+                  "type": "object"
+                },
+                "content": {
+                  "description": "Turn content in markdown",
+                  "type": "string"
+                },
+                "role": {
+                  "description": "\"user\", \"assistant\", \"system\", or \"tool\"",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "role",
+                "content"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "name": "conversation.create"
+    },
+    {
+      "description": "Delete a conversation by ULID. CASCADE removes its turns and FTS entries. Returns {deleted: true, id}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "conversation.delete"
+    },
+    {
+      "description": "Fetch a single conversation by ULID, including all its turns in ordinal order. Returns error 1001 if not found.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "conversation.get"
+    },
+    {
+      "description": "List conversations with optional tag filter, pagination, and ordering. Default limit 50, offset 0, order created_desc. Returns {items, total, has_more}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 50,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "order": {
+            "default": "created_desc",
+            "enum": [
+              "created_desc",
+              "created_asc",
+              "updated_desc",
+              "updated_asc"
+            ],
+            "type": "string"
+          },
+          "tag": {
+            "type": "string"
+          },
+          "transient": {
+            "description": "Filter by short-term marker: true → only transient conversations, false → only long-term, omit → all.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "conversation.list"
+    },
+    {
+      "description": "Full-text search through conversation turn content. Returns matching turns with their parent conversation, a highlighted snippet, and relevance score. Short queries (< 3 characters) fall back to LIKE-based matching. Default limit 10.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 10,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "query": {
+            "description": "Search query — passed directly to FTS5 MATCH for queries >= 3 characters, otherwise LIKE-based substring match",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "conversation.search"
+    },
+    {
+      "description": "Update a conversation's metadata (title, tags, attrs) by ULID. Cannot change turns; use conversation.append for that. Returns the updated conversation.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "attrs": {
+            "type": "object"
+          },
+          "id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "conversation.update"
+    },
+    {
       "description": "Purge transient (short-term) entries — those created with attrs.transient=true. SAFE BY DEFAULT: returns a preview without deleting (dry_run defaults to true). Call again with dry_run=false to actually delete. Only affects transient entries; permanent entries are never touched. Use older_than_secs to limit to entries older than a threshold (e.g. 604800 for 7 days). Returns {dry_run, count, entries:[{id,title,created_at}...max50], truncated} in preview mode, or {dry_run:false, deleted, ids, failed:[{id,error}]} in real mode.",
       "inputSchema": {
         "additionalProperties": false,

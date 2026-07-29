@@ -9,6 +9,7 @@ pub mod benchmark;
 pub mod block;
 pub mod cache;
 pub mod chunk;
+pub mod conversation;
 pub mod entry;
 pub mod events;
 pub mod index;
@@ -1377,10 +1378,10 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 34 built-in non-MCP handlers (entry:5, link:5, chunk:2, block:5,
-        // attachment:2, events:3, search:3, provider:1, cache:2, batch:1,
-        // index:3, system:2) + sync.init + sync.run + rerank.rerank.
-        assert_eq!(tools.len(), 38);
+        // 38 built-in non-MCP handlers (entry:5, entries:1, link:5, chunk:2,
+        // block:5, attachment:2, events:3, search:3, provider:1, cache:2,
+        // batch:1, index:3, system:2, sync:2, rerank:1) + conversation:7.
+        assert_eq!(tools.len(), 45);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1513,7 +1514,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 39); // 38 built-in + custom.echo
+        assert_eq!(tools.len(), 46); // 45 built-in + custom.echo
     }
 
     // ----- batch RPC e2e -----
@@ -2967,6 +2968,378 @@ mod tests {
         assert_eq!(payload["updated"], 0);
         assert_eq!(payload["removed"], 0);
         assert_eq!(payload["unchanged"], 0);
+    }
+
+    // ----- conversation.* e2e tests -----
+
+    #[tokio::test]
+    async fn conversation_create_and_get_round_trips() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let create_resp = daemon
+            .dispatch(req(
+                "conversation.create",
+                json!({
+                    "title": "Test Chat",
+                    "tags": ["test"],
+                    "attrs": {"model": "opus"},
+                    "turns": [
+                        {"role": "user", "content": "hello"},
+                        {"role": "assistant", "content": "hi there"}
+                    ]
+                }),
+            ))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+        let created = create_resp.result.unwrap();
+        assert_eq!(created["title"], "Test Chat");
+        assert_eq!(created["turns"].as_array().unwrap().len(), 2);
+        let conv_id = created["id"].as_str().unwrap().to_string();
+
+        // Get round-trips.
+        let get_resp = daemon
+            .dispatch(req("conversation.get", json!({"id": conv_id})))
+            .await;
+        assert!(get_resp.error.is_none(), "{:?}", get_resp.error);
+        let get_result = get_resp.result.unwrap();
+        assert_eq!(get_result["title"], "Test Chat");
+    }
+
+    #[tokio::test]
+    async fn conversation_create_without_turns() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let create_resp = daemon
+            .dispatch(req("conversation.create", json!({"title": "Empty"})))
+            .await;
+        assert!(create_resp.error.is_none(), "{:?}", create_resp.error);
+        let created = create_resp.result.unwrap();
+        assert_eq!(created["turn_count"], 0);
+        assert!(created["turns"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn conversation_get_unknown_returns_not_found() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req("conversation.get", json!({"id": phantom})))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1001); // NotFound
+    }
+
+    #[tokio::test]
+    async fn conversation_append_turns_adds_in_order() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let create_resp = daemon
+            .dispatch(req(
+                "conversation.create",
+                json!({
+                    "title": "Chat",
+                    "turns": [{"role": "user", "content": "first"}]
+                }),
+            ))
+            .await;
+        let result = create_resp.result.unwrap();
+        let conv_id = result["id"].as_str().unwrap().to_string();
+
+        let append_resp = daemon
+            .dispatch(req(
+                "conversation.append",
+                json!({
+                    "conversation_id": conv_id,
+                    "turns": [
+                        {"role": "assistant", "content": "second"},
+                        {"role": "user", "content": "third"}
+                    ]
+                }),
+            ))
+            .await;
+        assert!(append_resp.error.is_none(), "{:?}", append_resp.error);
+        let appended = append_resp.result.unwrap();
+        assert_eq!(appended.as_array().unwrap().len(), 2);
+        assert_eq!(appended[0]["ordinal"], 1);
+        assert_eq!(appended[1]["ordinal"], 2);
+
+        // Get reflects 3 turns.
+        let get_resp = daemon
+            .dispatch(req("conversation.get", json!({"id": conv_id})))
+            .await;
+        let result = get_resp.result.unwrap();
+        let turns = result["turns"].as_array().unwrap().clone();
+        assert_eq!(turns.len(), 3);
+        assert_eq!(result["turn_count"], 3);
+    }
+
+    #[tokio::test]
+    async fn conversation_append_to_unknown_returns_not_found() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req(
+                "conversation.append",
+                json!({
+                    "conversation_id": phantom,
+                    "turns": [{"role": "user", "content": "hi"}]
+                }),
+            ))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1001); // NotFound
+    }
+
+    #[tokio::test]
+    async fn conversation_list_returns_paginated() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        for i in 0..3 {
+            daemon
+                .dispatch(req(
+                    "conversation.create",
+                    json!({"title": format!("conv{i}")}),
+                ))
+                .await;
+        }
+
+        let resp = daemon
+            .dispatch(req("conversation.list", json!({"limit": 2})))
+            .await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["items"].as_array().unwrap().len(), 2);
+        assert_eq!(result["total"], 3);
+        assert!(result["has_more"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn conversation_update_changes_title() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let create_resp = daemon
+            .dispatch(req("conversation.create", json!({"title": "Old"})))
+            .await;
+        let created = create_resp.result.unwrap();
+        let conv_id = created["id"].as_str().unwrap().to_string();
+
+        let update_resp = daemon
+            .dispatch(req(
+                "conversation.update",
+                json!({"id": conv_id, "title": "New", "tags": ["updated"]}),
+            ))
+            .await;
+        assert!(update_resp.error.is_none(), "{:?}", update_resp.error);
+        assert_eq!(update_resp.result.unwrap()["title"], "New");
+    }
+
+    #[tokio::test]
+    async fn conversation_update_unknown_returns_not_found() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req(
+                "conversation.update",
+                json!({"id": phantom, "title": "x"}),
+            ))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1001); // NotFound
+    }
+
+    #[tokio::test]
+    async fn conversation_delete_removes_and_cascades() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let create_resp = daemon
+            .dispatch(req(
+                "conversation.create",
+                json!({
+                    "title": "ToDelete",
+                    "turns": [{"role": "user", "content": "msg"}]
+                }),
+            ))
+            .await;
+        let created = create_resp.result.unwrap();
+        let conv_id = created["id"].as_str().unwrap().to_string();
+
+        let del_resp = daemon
+            .dispatch(req("conversation.delete", json!({"id": conv_id})))
+            .await;
+        assert!(del_resp.error.is_none(), "{:?}", del_resp.error);
+        let del_result = del_resp.result.unwrap();
+        assert_eq!(del_result["deleted"], true);
+        assert_eq!(del_result["id"], conv_id);
+
+        // Get should fail.
+        let get_resp = daemon
+            .dispatch(req("conversation.get", json!({"id": conv_id})))
+            .await;
+        assert_eq!(get_resp.error.unwrap().code, 1001);
+
+        // Turns should be gone (verify via raw query).
+        let conn = daemon.entries.conn_for_test();
+        let guard = conn.lock().unwrap();
+        let turn_count: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM turns WHERE conversation_id = ?1",
+                rusqlite::params![conv_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(turn_count, 0);
+    }
+
+    #[tokio::test]
+    async fn conversation_search_finds_turn_content() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        daemon
+            .dispatch(req(
+                "conversation.create",
+                json!({
+                    "title": "Chat",
+                    "turns": [{"role": "user", "content": "Rust ownership is unique"}]
+                }),
+            ))
+            .await;
+
+        let search_resp = daemon
+            .dispatch(req(
+                "conversation.search",
+                json!({"query": "ownership", "limit": 10}),
+            ))
+            .await;
+        assert!(search_resp.error.is_none(), "{:?}", search_resp.error);
+        let items = search_resp.result.unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(!items.is_empty());
+        assert!(items[0]["snippet"].as_str().unwrap().contains("ownership"));
+        assert!(items[0]["score"].as_f64().unwrap() >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn conversation_search_short_query_uses_like_fallback() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        daemon
+            .dispatch(req(
+                "conversation.create",
+                json!({
+                    "title": "Chat",
+                    "turns": [{"role": "user", "content": "Rust"}]
+                }),
+            ))
+            .await;
+
+        // 2-char query -> LIKE fallback.
+        let search_resp = daemon
+            .dispatch(req(
+                "conversation.search",
+                json!({"query": "Ru", "limit": 10}),
+            ))
+            .await;
+        assert!(search_resp.error.is_none(), "{:?}", search_resp.error);
+        let items = search_resp.result.unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(!items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn conversation_delete_unknown_returns_not_found() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let phantom = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let resp = daemon
+            .dispatch(req("conversation.delete", json!({"id": phantom})))
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1001); // NotFound
+    }
+
+    #[tokio::test]
+    async fn conversation_search_empty_no_results() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        let search_resp = daemon
+            .dispatch(req(
+                "conversation.search",
+                json!({"query": "nonexistent", "limit": 10}),
+            ))
+            .await;
+        assert!(search_resp.error.is_none(), "{:?}", search_resp.error);
+        let items = search_resp.result.unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn conversation_create_emits_event() {
+        let server = MockServer::start().await;
+        mount_embedding_mock(&server).await;
+        let daemon = setup_daemon(&server).await;
+
+        daemon
+            .dispatch(req("conversation.create", json!({"title": "Event Test"})))
+            .await;
+
+        // Verify conversation.created event was emitted.
+        let list_resp = daemon
+            .dispatch(req("events.list", json!({"type": "conversation.created"})))
+            .await;
+        let result = list_resp.result.unwrap();
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["target_type"], "conversation");
+    }
+
+    #[tokio::test]
+    async fn conversation_mcp_tools_list_includes_all_methods() {
+        let server = MockServer::start().await;
+        let daemon = setup_daemon(&server).await;
+
+        let resp = daemon.dispatch(req("tools/list", json!({}))).await;
+        let tools = resp.result.unwrap();
+        let tools = tools["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"conversation.create"));
+        assert!(names.contains(&"conversation.get"));
+        assert!(names.contains(&"conversation.append"));
+        assert!(names.contains(&"conversation.list"));
+        assert!(names.contains(&"conversation.update"));
+        assert!(names.contains(&"conversation.delete"));
+        assert!(names.contains(&"conversation.search"));
     }
 
     // ----- quiet boot emits no index.synced event -----

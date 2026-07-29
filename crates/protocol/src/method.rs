@@ -150,6 +150,16 @@ pub mod rerank {
     pub const RERANK: &str = "rerank.rerank";
 }
 
+pub mod conversation {
+    pub const CREATE: &str = "conversation.create";
+    pub const GET: &str = "conversation.get";
+    pub const APPEND: &str = "conversation.append";
+    pub const LIST: &str = "conversation.list";
+    pub const UPDATE: &str = "conversation.update";
+    pub const DELETE: &str = "conversation.delete";
+    pub const SEARCH: &str = "conversation.search";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +263,16 @@ mod tests {
     #[test]
     fn rerank_namespace_methods() {
         assert_eq!(rerank::RERANK, "rerank.rerank");
+    }
+
+    #[test]
+    fn conversation_namespace_methods() {
+        assert_eq!(conversation::CREATE, "conversation.create");
+        assert_eq!(conversation::GET, "conversation.get");
+        assert_eq!(conversation::APPEND, "conversation.append");
+        assert_eq!(conversation::LIST, "conversation.list");
+        assert_eq!(conversation::UPDATE, "conversation.update");
+        assert_eq!(conversation::DELETE, "conversation.delete");
+        assert_eq!(conversation::SEARCH, "conversation.search");
     }
 }
