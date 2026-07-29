@@ -29,12 +29,13 @@ RX_VERTRACE = re.compile(r',\s*Spec\s*\d+\s+Plan\s+\d+\s*/\s*F-[a-z]+-\d+')
 RX_SPEC_SEC = re.compile(r'[Ss]pec\s*\d*\s*§\s*[\d.]+')
 RX_SPEC_N   = re.compile(r'\b[Ss]pec\s+\d+\b')
 RX_PLAN     = re.compile(r'\b[Pp]lan[-\s]+\d+(?:\s+Task\s+\d+)?\b')
+RX_TASK     = re.compile(r'\bTasks?\s+\d+(?:\s*[,/]\s*\d+)*')
 RX_FID      = re.compile(r'\bF-[a-z]+-\d+\b')
 RX_ROADMAP  = re.compile(r'^(\s*-\s*)\*\*Spec\s*\d+\*\*\s*—\s*', re.MULTILINE)
 
 STRIP_PATTERNS = [
     ('path', RX_PATH), ('version_trace', RX_VERTRACE), ('spec_section', RX_SPEC_SEC),
-    ('spec_n', RX_SPEC_N), ('plan', RX_PLAN), ('f_id', RX_FID), ('roadmap', RX_ROADMAP),
+    ('spec_n', RX_SPEC_N), ('plan', RX_PLAN), ('task', RX_TASK), ('f_id', RX_FID), ('roadmap', RX_ROADMAP),
 ]
 
 
