@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.4] - 2026-07-31
 
 ### Added
 
@@ -34,9 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   becomes the cache key (deterministic per input pair). Omitting the
   parameter preserves the existing behavior.
 
-- **`conversation.*` — conversation storage primitives.** Seven new RPCs
-  (`conversation.create`, `.get`, `.append`, `.list`, `.update`, `.delete`,
-  `.search`) for storing turn-by-turn agent dialogue. Conversations live in
+- **`conversation.*` — conversation storage primitives.** Seven new RPCs:
+  `conversation.create`, `.get`, `.append`, `.list`, `.update`, `.delete`,
+  `.search` — for storing turn-by-turn agent dialogue. Conversations live in
   two new SQLite tables (`conversations` + `turns`) with FTS5 trigram search;
   turns are append-only with auto-increment ordinals protected by a
   `UNIQUE(conversation_id, ordinal)` constraint. FK CASCADE handles cleanup on
@@ -54,9 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the search cache keys on `tag`, so same-query different-tag results never
   cross-contaminate.
 
-- **Development-gated benchmark workflow.** When
-  `[development].enabled = true`, the daemon exposes benchmark lifecycle
-  tools driven by `benchmark.next_case`, records the model's real search and
+- **Development-gated benchmark workflow.** When the new optional
+  `[development]` config section has `enabled = true`, the daemon exposes six
+  benchmark RPCs — `benchmark.start`, `.next_case`, `.record_answer`,
+  `.finish`, `.abort`, `.status` — driven by `benchmark.next_case`, records the model's real search and
   evidence-tool calls, and reports retrieval metrics including entry recall,
   precision@k, MRR, and nDCG. Git-tracked cases, suites, and read-only
   baselines are loaded from the configured catalog; benchmark fixtures are
@@ -404,7 +405,8 @@ empty `.nomai` files. To regenerate from current state:
 - No built-in sync (the `events` primitive is the substrate; build on top).
 - No CLI subcommands — every operation is an RPC over stdio.
 
-[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.4.0...v0.4.1
