@@ -322,13 +322,17 @@ nomai's kernel roadmap is complete:
 - Application-layer examples (done)
 - Embedding cache (`emb_cache` + `CachedEmbedder` + `cache.stats` / `cache.clear`) (done)
 - Content storage (block-addressed chunks, FTS5 per block) (done)
-- Search results cache (`search.semantic` / `search.fulltext` in-memory cache + generation-based invalidation) (done)
+- Search results cache (generation-based invalidation) (done)
 - Pre-1.0 API freeze pass (done; released as 0.2.0)
+- **Agent memory primitives** (done; released as 0.5.0):
+  - `search.hybrid` — RRF fusion of FTS + vector scores
+  - `conversation.*` — turn-by-turn dialogue storage (7 RPCs)
+  - `rerank.rerank` — LLM-based document reranking
+  - Query rewrite (`expand`) on all `search.*` methods
 
 Future work (not yet started):
 
 - **Phase 4 (Collections)** — multi-project isolation, schema enforcement, ACL
 - **`link.traverse`** — recursive CTE multi-hop graph traversal (use `link.neighbors` in a client-side loop for now)
-- **`search.hybrid`** — RRF fusion of FTS + vector scores (compose your own in client code for now)
 
 For implementation history and design rationale, see the spec docs in `docs/superpowers/specs/` (local-only, not in the public repo).

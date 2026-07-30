@@ -6,7 +6,7 @@
 
 ## What it is
 
-nomai is a single-binary daemon that stores knowledge entries on the file system (one directory per entry, holding a typed-blocks `.nomai` file plus optional attachments). It exposes five **primitives** — Entry, Block, Links, Events, Chunks — through a JSON-RPC 2.0 interface over NDJSON/stdio. Clients (TUI, web UI, CLI tools, sync agents) connect by piping JSON-RPC requests to the daemon's stdin and reading responses from stdout.
+nomai is a single-binary daemon that stores knowledge entries on the file system (one directory per entry, holding a typed-blocks `.nomai` file plus optional attachments). It exposes six **primitives** — Entry, Block, Links, Events, Chunks, Conversation — through a JSON-RPC 2.0 interface over NDJSON/stdio. Clients (TUI, web UI, CLI tools, sync agents) connect by piping JSON-RPC requests to the daemon's stdin and reading responses from stdout.
 
 The core is deliberately mechanism, not policy: it stores, indexes, and emits events. It does not impose a specific RAG strategy, sync target, or schema. You compose those on top.
 
@@ -14,15 +14,18 @@ The core is deliberately mechanism, not policy: it stores, indexes, and emits ev
 
 Early alpha. API surface is stabilizing but may change before 1.0. Currently single-user, single-process, single SQLite file.
 
-## The five primitives
+## The six primitives
 
-| Primitive  | What it does                                    | Typical use                                 |
-| ---------- | ----------------------------------------------- | ------------------------------------------- |
-| **Entry**  | Markdown knowledge note split into typed blocks | The atomic unit of knowledge                |
-| **Block**  | Typed semantic block within an entry            | Structured notes — claim, evidence, source  |
-| **Links**  | Directed edges between entries                  | GraphRAG, backlinks, knowledge graph        |
-| **Events** | Append-only mutation log                        | Async embedding retry, external sync, audit |
-| **Chunks** | Block-derived pieces for embedding              | Long-document RAG, fine-grained retrieval   |
+| Primitive        | What it does                                    | Typical use                                 |
+| ---------------- | ----------------------------------------------- | ------------------------------------------- |
+| **Entry**        | Markdown knowledge note split into typed blocks | The atomic unit of knowledge                |
+| **Block**        | Typed semantic block within an entry            | Structured notes — claim, evidence, source  |
+| **Links**        | Directed edges between entries                  | GraphRAG, backlinks, knowledge graph        |
+| **Events**       | Append-only mutation log                        | Async embedding retry, external sync, audit |
+| **Chunks**       | Block-derived pieces for embedding              | Long-document RAG, fine-grained retrieval   |
+| **Conversation** | Turn-by-turn agent dialogue storage             | Agent session history, chat logs, memory    |
+
+**Retrieval:** `search.hybrid` fuses FTS5 BM25 and vector cosine similarity via Reciprocal Rank Fusion. `search.fulltext` and `search.semantic` are also available individually. An optional `rewrite: "expand"` parameter resolves pronouns before search. `rerank.rerank` provides LLM-based post-retrieval relevance scoring.
 
 ## Quick start
 
@@ -62,7 +65,7 @@ nomai/
 ├── crates/
 │   ├── protocol/    # JSON-RPC types (no logic)
 │   ├── core/        # Services + storage (pure lib)
-│   ├── providers/   # EmbeddingProvider / LlmProvider trait + OpenAI impl
+│   ├── providers/   # EmbeddingProvider / LlmProvider / Reranker trait + OpenAI impl
 │   └── daemon/      # Binary: stdio loop + RPC dispatch
 ├── hooks/           # Git hooks (version-controlled)
 │   └── pre-commit   # Runs `cargo fmt --check` on staged .rs files
