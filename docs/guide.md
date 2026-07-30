@@ -3,6 +3,7 @@
 This guide covers the **concepts** you need to build on top of nomai — the five primitives, the storage model, and how to think about retrieval.
 
 If you're looking for specific API signatures, see:
+
 - [reference.md](reference.md) — full RPC reference, error codes, configuration, cache internals
 - [lib.md](lib.md) — embedding nomai as a Rust library (lib mode, DaemonBuilder, custom RPCs)
 
@@ -274,7 +275,7 @@ nomai-daemon --sync --config ~/.config/nomai/config.toml
 
 What syncs and what doesn't:
 
-- **`entry.nomai` files are plain text.** Two devices editing *different*
+- **`entry.nomai` files are plain text.** Two devices editing _different_
   blocks of the same entry merge cleanly on `pull --rebase`; git's text
   merger handles it without intervention.
 - **Attachments (PDFs, images) go through Git LFS** automatically — the
@@ -292,7 +293,7 @@ What syncs and what doesn't:
   for unchanged bodies; a steady-state boot (FS unchanged since last start)
   embeds nothing.
 
-**Conflicts.** If two devices edit the *same line* of the same `entry.nomai`,
+**Conflicts.** If two devices edit the _same line_ of the same `entry.nomai`,
 the `pull --rebase` inside `--sync` stops with a rebase conflict. The daemon
 returns a `sync.run` error (code `1007`, `data.conflicted_files` lists the
 paths) and leaves the repo mid-rebase. Resolve it the normal git way:

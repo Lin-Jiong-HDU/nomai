@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`search.hybrid` — Reciprocal Rank Fusion retrieval.** Fuses FTS5 BM25
+  and sqlite-vec cosine similarity results via Reciprocal Rank Fusion (k=60).
+  Parallel sub-queries via `tokio::try_join!`; entry-granularity wire format
+  carries per-retriever scores and ranks plus the best-matching chunk/block.
+  Cached per `(query, limit, block_type, tag, weights)` with generation-based
+  invalidation; transient entries receive the same ×0.5 score penalty as the
+  other search RPCs. Optional `fulltext_weight` / `semantic_weight` params
+  bias the fusion.
+
+- **`rerank.rerank` — LLM-based document reranking.** New `Reranker` trait
+  (providers layer, peer to `EmbeddingProvider` / `LlmProvider`) with two
+  built-in implementations: `NoopReranker` (default, preserves original order)
+  and `LLMReranker` (prompts the configured LLM for 1–5 relevance scoring,
+  normalized to 0–1, with fallback to original scores on any failure).
+  Standalone RPC — callable after any search, or independently with arbitrary
+  document sets. Gated by optional `[reranking]` config section; when absent,
+  `NoopReranker` is used at zero cost.
+
+- **Query rewrite (`expand`) on all `search.*` methods.** An optional
+  `rewrite: "expand"` parameter resolves pronouns and expands abbreviations
+  via the configured LLM before the search query executes. Failure silently
+  falls back to the original query. Temperature 0.0; the rewritten query
+  becomes the cache key (deterministic per input pair). Omitting the
+  parameter preserves the existing behavior.
+
+- **`conversation.*` — conversation storage primitives.** Seven new RPCs
+  (`conversation.create`, `.get`, `.append`, `.list`, `.update`, `.delete`,
+  `.search`) for storing turn-by-turn agent dialogue. Conversations live in
+  two new SQLite tables (`conversations` + `turns`) with FTS5 trigram search;
+  turns are append-only with auto-increment ordinals protected by a
+  `UNIQUE(conversation_id, ordinal)` constraint. FK CASCADE handles cleanup on
+  delete. Events (`conversation.created` / `.updated` / `.deleted`,
+  `turn.appended`) are emitted for every mutation. Conversations can link to
+  entries via the existing `link.create` mechanism (`relation: "derived_from"`).
+  No FS persistence (SQLite-only, YAGNI). Transient support via
+  `attrs.transient` (same semantics as entries).
+
 - **`tag` filter on `search.fulltext` / `search.semantic`.** Both search
   RPCs accept an optional `tag` restricting matches to entries whose
   `tags` array contains that exact value (same semantics as `entry.list`'s
@@ -35,6 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `index.sync` / `index.rebuild` RPC handlers), best-effort. `emb_cache`
   keeps this near-zero API cost for unchanged bodies; a steady-state boot
   (FS unchanged since last start) embeds nothing.
+
+### Database migration
+
+- **V11** (automatic on next daemon boot): creates `conversations`, `turns`,
+  and `fts_turns` tables with triggers maintaining `turn_count` and the FTS
+  index. Existing tables are untouched.
 
 ## [0.4.3] - 2026-07-18
 
@@ -64,7 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-device sync via git.** `nomai-daemon --sync-init <url>` turns the
   `knowledge_root` into a git repository (binary attachments route through
   Git LFS), and `nomai-daemon --sync` runs `commit → pull --rebase → push →
-  index.sync` to keep two devices converged. Rebase conflicts surface as a
+index.sync` to keep two devices converged. Rebase conflicts surface as a
   structured `CoreError::SyncConflict` (RPC code 1007, with the conflicted
   file list); resolve in an editor and re-run to auto-continue via
   `git rebase --continue`. A process-wide `sync_lock` serializes the rebase

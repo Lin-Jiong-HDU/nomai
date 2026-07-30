@@ -34,31 +34,31 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 
 ### entry.{#entry-methods}
 
-| Method         | Params                                                | Returns             | Notes                                                                             |
-| -------------- | ----------------------------------------------------- | ------------------- | --------------------------------------------------------------------------------- |
-| `entry.create` | `title`, `blocks: [{type, text, attrs?}]`, `tags?`, `attrs?`, `source?`, `attachments?` | `Entry` | Auto-embeds block texts if non-empty. `attachments: {filename: base64}` writes sibling files under the entry dir; `@image`/`@source` `src` validated against disk |
-| `entry.get`    | `id`                                                  | `Entry`             | 1001 if not found                                                                 |
-| `entry.update` | `id`, `title?`, `blocks?`, `tags?`, `attrs?`, `source?` | `Entry`           | Re-embeds if blocks change; clears embedding if blocks become empty               |
-| `entry.delete` | `id`                                                  | `{"deleted": true, "id": "<ulid>"}` | Cascades to links + chunks + chunk embeddings. `id` added in 0.2.0 for consistency with `block.delete` |
-| `entry.list`   | `tag?`, `limit?`(50), `offset?`(0), `order?`, `transient?`          | `{items, total, has_more}`    | `order`: `created_desc`(default) / `created_asc` / `updated_desc` / `updated_asc`. `has_more` (added in 0.2.0) is true when `total > offset + items.len()`. `transient` (added in 0.4.1): `true` → only short-term entries, `false` → only long-term, omit → all |
+| Method         | Params                                                                                  | Returns                             | Notes                                                                                                                                                                                                                                                            |
+| -------------- | --------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `entry.create` | `title`, `blocks: [{type, text, attrs?}]`, `tags?`, `attrs?`, `source?`, `attachments?` | `Entry`                             | Auto-embeds block texts if non-empty. `attachments: {filename: base64}` writes sibling files under the entry dir; `@image`/`@source` `src` validated against disk                                                                                                |
+| `entry.get`    | `id`                                                                                    | `Entry`                             | 1001 if not found                                                                                                                                                                                                                                                |
+| `entry.update` | `id`, `title?`, `blocks?`, `tags?`, `attrs?`, `source?`                                 | `Entry`                             | Re-embeds if blocks change; clears embedding if blocks become empty                                                                                                                                                                                              |
+| `entry.delete` | `id`                                                                                    | `{"deleted": true, "id": "<ulid>"}` | Cascades to links + chunks + chunk embeddings. `id` added in 0.2.0 for consistency with `block.delete`                                                                                                                                                           |
+| `entry.list`   | `tag?`, `limit?`(50), `offset?`(0), `order?`, `transient?`                              | `{items, total, has_more}`          | `order`: `created_desc`(default) / `created_asc` / `updated_desc` / `updated_asc`. `has_more` (added in 0.2.0) is true when `total > offset + items.len()`. `transient` (added in 0.4.1): `true` → only short-term entries, `false` → only long-term, omit → all |
 
 **Block input shape**: `BlockInput` is `{ type: String, text: String, attrs?: Value }`. Valid types: `claim`, `evidence`, `question`, `source`, `note`, `connection`, `image` (the `@connection` type requires `target` and `relation` attrs; `@image` requires `src` attr — see below).
 
 ### entries.{#entries-methods}
 
-| Method                    | Params                                | Returns                                                                                             | Notes                                                                                                                                                                                                                                                                                                                                              |
-| ------------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Method                    | Params                                | Returns                                                                                                                       | Notes                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `entries.purge_transient` | `older_than_secs?`, `dry_run?`(=true) | preview: `{dry_run, count, entries:[{id,title,created_at}], truncated}`; real: `{dry_run, deleted, ids, failed:[{id,error}]}` | Purge transient entries (those with `attrs.transient=true`). Safe by default: `dry_run=true` returns a capped preview (max 50 in `entries`, `count` is the true total). `dry_run=false` actually deletes — reuses the per-entry delete cascade and bumps the search cache generation. `older_than_secs` limits to entries older than a threshold (strict `<`). Permanent entries are never touched. Added in 0.4.1. |
 
 ### block.{#block-methods}
 
-| Method         | Params                                  | Returns             | Notes                                         |
-| -------------- | --------------------------------------- | ------------------- | --------------------------------------------- |
-| `block.append` | `entry_id`, `type`, `text`, `attrs?`, `attachments?`    | `Block`             | Auto-assigned `ordinal = max(ordinal)+1`. Optional `attachments: {filename: base64}` writes sibling files |
-| `block.update` | `id`, `type?`, `text?`, `attrs?`, `attachments?`        | `Block`             | Re-chunks if text changed. Optional `attachments: {filename: base64}` writes sibling files |
-| `block.delete` | `id`                                    | `{"deleted": true, "id": "<ulid>"}` | 1001 if not found              |
-| `block.get`    | `id`                                    | `Block`             | 1001 if not found                             |
-| `block.list`   | `entry_id`                              | `{items, total}`    | Sorted by `ordinal` ascending. Added in 0.2.0 for namespace completeness |
+| Method         | Params                                               | Returns                             | Notes                                                                                                     |
+| -------------- | ---------------------------------------------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `block.append` | `entry_id`, `type`, `text`, `attrs?`, `attachments?` | `Block`                             | Auto-assigned `ordinal = max(ordinal)+1`. Optional `attachments: {filename: base64}` writes sibling files |
+| `block.update` | `id`, `type?`, `text?`, `attrs?`, `attachments?`     | `Block`                             | Re-chunks if text changed. Optional `attachments: {filename: base64}` writes sibling files                |
+| `block.delete` | `id`                                                 | `{"deleted": true, "id": "<ulid>"}` | 1001 if not found                                                                                         |
+| `block.get`    | `id`                                                 | `Block`                             | 1001 if not found                                                                                         |
+| `block.list`   | `entry_id`                                           | `{items, total}`                    | Sorted by `ordinal` ascending. Added in 0.2.0 for namespace completeness                                  |
 
 Each mutation rewrites the parent entry's `.nomai` file automatically (no separate RPC needed). Chunk re-derivation is automatic on `text` change. Chunks are split at `config.chunking.target_size` characters (default 1024) via paragraph → sentence → hard-cut fallback.
 
@@ -68,20 +68,20 @@ Each mutation rewrites the parent entry's `.nomai` file automatically (no separa
 
 ### attachment.{#attachment-methods}
 
-| Method            | Params                          | Returns                                       | Notes                                                                                       |
-| ----------------- | ------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `attachment.list` | `entry_id`                      | `{items: [{filename, size, modified}]}`       | Sibling files under the entry dir (excludes `entry.nomai`). Empty `items` if none.          |
-| `attachment.read` | `entry_id`, `filename`          | `{filename, mime, base64}`                    | MIME from extension (png/jpeg/gif/webp/pdf/…, else `application/octet-stream`). base64 transport. 1003 if not found. |
+| Method            | Params                 | Returns                                 | Notes                                                                                                                |
+| ----------------- | ---------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `attachment.list` | `entry_id`             | `{items: [{filename, size, modified}]}` | Sibling files under the entry dir (excludes `entry.nomai`). Empty `items` if none.                                   |
+| `attachment.read` | `entry_id`, `filename` | `{filename, mime, base64}`              | MIME from extension (png/jpeg/gif/webp/pdf/…, else `application/octet-stream`). base64 transport. 1003 if not found. |
 
-### index.* / system.*{#index--system}
+### index._ / system._{#index--system}
 
-| Method              | Params | Returns                                           | Notes                                         |
-| ------------------- | ------ | ------------------------------------------------- | --------------------------------------------- |
-| `index.verify`      | `{}`   | `{fs_only, db_only, stale_mtime, consistent}`     | Read-only drift report                        |
-| `index.sync`        | `{}`   | `{added, updated, removed, unchanged}`            | Reconcile FS → index (incremental, mtime-diff) |
-| `index.rebuild`     | `{}`   | `{reindexed, errors}`                             | Wipe derived tables + reindex every FS entry  |
-| `system.export_to_fs` | `{}` | `{exported, skipped, errors}`                   | Generate missing `.nomai` files from DB state |
-| `system.restart`      | `{}` | `{ok: true}`                                     | Connection-continuous in-process rebuild of sqlite / embedder-LLM providers / reqwest `Client` / search cache. In-flight RPCs finish against the old state; subsequent RPCs hit the rebuilt one. Config error if the daemon isn't slot-backed or the rebuild fails. Emits no events. |
+| Method                | Params | Returns                                       | Notes                                                                                                                                                                                                                                                                                |
+| --------------------- | ------ | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `index.verify`        | `{}`   | `{fs_only, db_only, stale_mtime, consistent}` | Read-only drift report                                                                                                                                                                                                                                                               |
+| `index.sync`          | `{}`   | `{added, updated, removed, unchanged}`        | Reconcile FS → index (incremental, mtime-diff)                                                                                                                                                                                                                                       |
+| `index.rebuild`       | `{}`   | `{reindexed, errors}`                         | Wipe derived tables + reindex every FS entry                                                                                                                                                                                                                                         |
+| `system.export_to_fs` | `{}`   | `{exported, skipped, errors}`                 | Generate missing `.nomai` files from DB state                                                                                                                                                                                                                                        |
+| `system.restart`      | `{}`   | `{ok: true}`                                  | Connection-continuous in-process rebuild of sqlite / embedder-LLM providers / reqwest `Client` / search cache. In-flight RPCs finish against the old state; subsequent RPCs hit the rebuilt one. Config error if the daemon isn't slot-backed or the rebuild fails. Emits no events. |
 
 `index.verify` is read-only. `index.sync` is incremental (diffs FS vs DB mtime). `index.rebuild` is destructive but doesn't touch `events` (daemon history) or `emb_cache` (deterministic, reusable).
 
@@ -99,11 +99,11 @@ Daemon runs `index.sync` automatically at boot. If FS differs from the index (e.
 
 ### events.{#events-methods}
 
-| Method         | Params                                                                                                           | Returns             | Notes               |
-| -------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------- | ------------------- |
+| Method         | Params                                                                                                           | Returns                    | Notes                                                                                       |
+| -------------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------- |
 | `events.list`  | `since?`(ULID, exclusive), `type?`, `target_type?`, `target_id?`, `limit?`(100), `order?`("asc"=default\|"desc") | `{items, has_more, total}` | Client-cursor model. `total` (added in 0.2.0) is the total event count matching the filters |
-| `events.get`   | `id`                                                                                                             | `Event`             | 1001 if not found   |
-| `events.purge` | `before`(ULID, exclusive), `type?`                                                                               | `{deleted: N}`      | For retention       |
+| `events.get`   | `id`                                                                                                             | `Event`                    | 1001 if not found                                                                           |
+| `events.purge` | `before`(ULID, exclusive), `type?`                                                                               | `{deleted: N}`             | For retention                                                                               |
 
 ### chunk.{#chunk-methods}
 
@@ -118,11 +118,11 @@ Note: `chunk.create` / `chunk.delete` constants exist in `protocol::method::chun
 
 ### search.{#search-methods}
 
-| Method            | Params                                                          | Returns                     | Notes                                          |
-| ----------------- | --------------------------------------------------------------- | --------------------------- | ---------------------------------------------- |
-| `search.fulltext` | `query`, `limit?`(10), `block_type?`                            | `{items: [{entry, score}]}` | Match against `fts_blocks`; optional `block_type` filter |
-| `search.semantic` | `query`, `limit?`(10), `granularity?`("entry"=default\|"chunk"), `block_type?` | `{items}`        | Chunk-level KNN via `vec_chunk_embeddings`; optional `block_type` filter |
-| `search.hybrid`   | —                                                               | —                           | **Reserved**: returns -32601                   |
+| Method            | Params                                                                         | Returns                     | Notes                                                                    |
+| ----------------- | ------------------------------------------------------------------------------ | --------------------------- | ------------------------------------------------------------------------ |
+| `search.fulltext` | `query`, `limit?`(10), `block_type?`                                           | `{items: [{entry, score}]}` | Match against `fts_blocks`; optional `block_type` filter                 |
+| `search.semantic` | `query`, `limit?`(10), `granularity?`("entry"=default\|"chunk"), `block_type?` | `{items}`                   | Chunk-level KNN via `vec_chunk_embeddings`; optional `block_type` filter |
+| `search.hybrid`   | —                                                                              | —                           | **Reserved**: returns -32601                                             |
 
 **Block type filter**: `block_type` accepts one of `claim` / `evidence` / `question` / `source` / `note` / `connection` / `image`. Omit for all types. Example: `search.fulltext` with `block_type: "claim"` returns only matches in claim blocks.
 
@@ -154,7 +154,10 @@ Each `BatchOp` has `{id?: string, method: string, params: object}`. The `id` fie
     {
       "id": "e1",
       "method": "entry.create",
-      "params": { "title": "doc", "blocks": [{ "type": "note", "text": "..." }] }
+      "params": {
+        "title": "doc",
+        "blocks": [{ "type": "note", "text": "..." }]
+      }
     },
     {
       "method": "chunk.create",
@@ -178,10 +181,10 @@ Each `BatchOp` has `{id?: string, method: string, params: object}`. The `id` fie
 
 Embedding cache and search results cache introspection/management. The embedding cache is a transparent wrapper around the configured embedding provider; it persists `(model, blake3(body)) → embedding` in the `emb_cache` SQLite table so identical bodies never trigger duplicate API calls. The search cache is an in-memory wrapper around `search.semantic` / `search.fulltext` that skips the FTS5/KNN work when the same query is repeated within the current generation.
 
-| Method        | Params                                                                                                                                 | Returns                                                                                                                              |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Method        | Params                                                                                                                                 | Returns                                                                                                                                      |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `cache.stats` | —                                                                                                                                      | `{embeddings: {...}, searches: {generation, entries, hits, misses, hit_rate, by_rpc: {semantic: {hits, misses}, fulltext: {hits, misses}}}}` |
-| `cache.clear` | `{namespace?: "embeddings" \| "searches" \| "all", model?: string, before?: RFC3339, keep_recent?: N}` — all optional, freely combined | `{embeddings: {cleared, by_model} \| null, searches: {cleared} \| null}`                                                             |
+| `cache.clear` | `{namespace?: "embeddings" \| "searches" \| "all", model?: string, before?: RFC3339, keep_recent?: N}` — all optional, freely combined | `{embeddings: {cleared, by_model} \| null, searches: {cleared} \| null}`                                                                     |
 
 **`cache.stats` — `embeddings` block fields**:
 
@@ -202,11 +205,11 @@ Cached search results are keyed by `(generation, rpc, query_hash, limit, block_t
 
 **`cache.clear` — `namespace` parameter** (default `"embeddings"`, for backward compatibility):
 
-| Namespace    | Effect                                                                                                                                                          |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `embeddings` | Default. Clears the `emb_cache` SQLite table subject to the filters below. `searches` is left untouched; `result.searches` is `null`.                            |
+| Namespace    | Effect                                                                                                                                                             |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `embeddings` | Default. Clears the `emb_cache` SQLite table subject to the filters below. `searches` is left untouched; `result.searches` is `null`.                              |
 | `searches`   | Clears the in-memory search cache (drops all `entries`). `model`/`before`/`keep_recent` are ignored. `result.embeddings` is `null`; `result.searches = {cleared}`. |
-| `all`        | Clears both. `result.embeddings` and `result.searches` are both populated.                                                                                       |
+| `all`        | Clears both. `result.embeddings` and `result.searches` are both populated.                                                                                         |
 
 Omitting `namespace` entirely is equivalent to `{"namespace": "embeddings"}` — existing clients see the same `{cleared, by_model}` shape they always did (now nested under `result.embeddings`).
 
@@ -235,10 +238,10 @@ synced against a private remote; `entry.nomai` files sync as plain text
 RPCs to the resident daemon; all git work lives in the daemon, never in
 `nomai-core`. Both `sync.init` and `sync.run` are new in 0.4.2.
 
-| Method      | Params                                  | Returns                                                       | Notes                                                                                                                                                          |
-| ----------- | --------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sync.init` | `remote`(string), `branch`?(="main")    | `{initialized, knowledge_root, remote, branch, lfs_ready}`    | `1003` if `.git` already exists (idempotency), or if `git-lfs` is not on PATH. Writes `.gitignore` + `.gitattributes`, runs `git lfs install`, initial commit. |
-| `sync.run`  | `{}`                                    | `{committed: bool, commit: string\|null, pushed: bool, reindexed: bool}` | `1003` if not a git repo (run `sync.init` first). On rebase conflict: `1007` with `data.conflicted_files` (repo left mid-rebase; resolve + re-run to continue). |
+| Method      | Params                               | Returns                                                                  | Notes                                                                                                                                                           |
+| ----------- | ------------------------------------ | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sync.init` | `remote`(string), `branch`?(="main") | `{initialized, knowledge_root, remote, branch, lfs_ready}`               | `1003` if `.git` already exists (idempotency), or if `git-lfs` is not on PATH. Writes `.gitignore` + `.gitattributes`, runs `git lfs install`, initial commit.  |
+| `sync.run`  | `{}`                                 | `{committed: bool, commit: string\|null, pushed: bool, reindexed: bool}` | `1003` if not a git repo (run `sync.init` first). On rebase conflict: `1007` with `data.conflicted_files` (repo left mid-rebase; resolve + re-run to continue). |
 
 `sync.run` flow (serialized under the daemon's `sync_lock` so it cannot race
 in-process write RPCs): `git add -A` → commit only if dirty →
@@ -249,14 +252,14 @@ resolved), the next `sync.run` skips commit and runs
 `git rebase --continue` instead of `pull --rebase`.
 
 **Conflict recovery.** When `pull --rebase` hits a same-line conflict,
-`sync.run` returns `1007` *without* pushing or reindexing, and leaves
+`sync.run` returns `1007` _without_ pushing or reindexing, and leaves
 `.git/rebase-merge` in place. Edit the conflicted `entry.nomai` to remove
 the `<<<<<<<` / `=======` / `>>>>>>>` markers, `git add` it, then re-run
 `sync.run` — it resumes the rebase, pushes, and reindexes. `db.sqlite` is
 never committed; each device rebuilds its own index at the end of every run.
 
 First push to an empty remote: `pull --rebase` reports "no remote ref" but
-does *not* start a rebase, so `sync.run` falls through to `git push` rather
+does _not_ start a rebase, so `sync.run` falls through to `git push` rather
 than misreporting a conflict.
 
 ---
@@ -269,14 +272,14 @@ tools/list and direct calls return -32601. Benchmark catalog files are loaded
 from the configured case, suite, and baseline directories at daemon startup.
 The catalog and baselines are read-only Git artifacts.
 
-| Method | Params | Returns | Notes |
-| --- | --- | --- | --- |
-| benchmark.start | suite_id | {run_id, suite_id, case_count, provider: {name, embedding_model, llm_model}} | Starts one run, loads and embeds temporary fixtures, and rejects a second active run. |
-| benchmark.next_case | run_id | {run_id, case_id, question} | Advances in suite order. Does not expose the reference answer, relevant IDs, rubric, fixture body, or baseline. Returns 1003 when the run is invalid or exhausted. |
-| benchmark.record_answer | run_id, case_id, answer | {case_id, metrics} | Records the model answer and returns metrics for the current case. If the case enables judging, the configured LLM produces an optional judge_score. |
-| benchmark.finish | run_id | RunReport plus run_id | Scores all cases, compares the matching read-only baseline when available, removes temporary fixtures, and returns the run report. |
-| benchmark.abort | run_id | {run_id, aborted: true, deleted_entry_count} | Aborts the run and removes all temporary fixtures. |
-| benchmark.status | {} | {enabled: true, run_id, case_id, state: "running" or "idle"} | Reports the active run state; run_id and case_id are null while idle. |
+| Method                  | Params                  | Returns                                                                      | Notes                                                                                                                                                              |
+| ----------------------- | ----------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| benchmark.start         | suite_id                | {run_id, suite_id, case_count, provider: {name, embedding_model, llm_model}} | Starts one run, loads and embeds temporary fixtures, and rejects a second active run.                                                                              |
+| benchmark.next_case     | run_id                  | {run_id, case_id, question}                                                  | Advances in suite order. Does not expose the reference answer, relevant IDs, rubric, fixture body, or baseline. Returns 1003 when the run is invalid or exhausted. |
+| benchmark.record_answer | run_id, case_id, answer | {case_id, metrics}                                                           | Records the model answer and returns metrics for the current case. If the case enables judging, the configured LLM produces an optional judge_score.               |
+| benchmark.finish        | run_id                  | RunReport plus run_id                                                        | Scores all cases, compares the matching read-only baseline when available, removes temporary fixtures, and returns the run report.                                 |
+| benchmark.abort         | run_id                  | {run_id, aborted: true, deleted_entry_count}                                 | Aborts the run and removes all temporary fixtures.                                                                                                                 |
+| benchmark.status        | {}                      | {enabled: true, run_id, case_id, state: "running" or "idle"}                 | Reports the active run state; run_id and case_id are null while idle.                                                                                              |
 
 benchmark.next_case is the only model-visible source of benchmark questions.
 The daemon records these calls while a case is active:
@@ -287,18 +290,18 @@ search-tool constraint.
 
 The metrics object contains the following per-case fields:
 
-| Field | Meaning |
-| --- | --- |
-| hit_at_k | 1 when at least one relevant entry/block is in the top k, otherwise 0. |
-| recall_at_k | Relevant entries found in the top k divided by all relevant entries. |
-| precision_at_k | Relevant returned results divided by the number of results actually returned in the top k. |
-| mrr | Reciprocal rank of the first relevant result, or 0. |
-| ndcg | Binary relevance nDCG over the ranked results and case k. |
-| required_tools_success | Whether every tool named by the case completed successfully. |
-| evidence_entry_hit | Whether a successful entry.get/block.get returned a relevant fixture. |
-| search_call_count | Number of recorded search calls. |
-| latency_ms_total, latency_ms_average | Recorded tool-call latency in milliseconds. |
-| judge_score, judge_error | Optional LLM judge result or failure message. |
+| Field                                | Meaning                                                                                    |
+| ------------------------------------ | ------------------------------------------------------------------------------------------ |
+| hit_at_k                             | 1 when at least one relevant entry/block is in the top k, otherwise 0.                     |
+| recall_at_k                          | Relevant entries found in the top k divided by all relevant entries.                       |
+| precision_at_k                       | Relevant returned results divided by the number of results actually returned in the top k. |
+| mrr                                  | Reciprocal rank of the first relevant result, or 0.                                        |
+| ndcg                                 | Binary relevance nDCG over the ranked results and case k.                                  |
+| required_tools_success               | Whether every tool named by the case completed successfully.                               |
+| evidence_entry_hit                   | Whether a successful entry.get/block.get returned a relevant fixture.                      |
+| search_call_count                    | Number of recorded search calls.                                                           |
+| latency_ms_total, latency_ms_average | Recorded tool-call latency in milliseconds.                                                |
+| judge_score, judge_error             | Optional LLM judge result or failure message.                                              |
 
 The run report contains metadata, one cases item per suite case, a summary
 containing averages/aggregates, and an optional baseline_comparison with
@@ -337,20 +340,20 @@ Example MCP handshake:
 
 ## Error codes
 
-| Code     | Meaning          | When                                                                                  |
-| -------- | ---------------- | ------------------------------------------------------------------------------------- |
-| `-32700` | Parse error      | Invalid JSON in request                                                               |
-| `-32600` | Invalid request  | Not a valid JSON-RPC request object                                                   |
-| `-32601` | Method not found | Unknown method, or reserved method (`search.hybrid`, `provider.set`, `link.traverse`) |
-| `-32602` | Invalid params   | Malformed params                                                                      |
-| `-32603` | Internal error   | Unexpected server error                                                               |
-| `1001`   | NotFound         | Entry / link / event / chunk id does not exist                                        |
-| `1002`   | Provider error   | Embedding or LLM HTTP failure (data has `kind` field)                                 |
+| Code     | Meaning          | When                                                                                                                                                                                                                                                                                                                                                           |
+| -------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-32700` | Parse error      | Invalid JSON in request                                                                                                                                                                                                                                                                                                                                        |
+| `-32600` | Invalid request  | Not a valid JSON-RPC request object                                                                                                                                                                                                                                                                                                                            |
+| `-32601` | Method not found | Unknown method, or reserved method (`search.hybrid`, `provider.set`, `link.traverse`)                                                                                                                                                                                                                                                                          |
+| `-32602` | Invalid params   | Malformed params                                                                                                                                                                                                                                                                                                                                               |
+| `-32603` | Internal error   | Unexpected server error                                                                                                                                                                                                                                                                                                                                        |
+| `1001`   | NotFound         | Entry / link / event / chunk id does not exist                                                                                                                                                                                                                                                                                                                 |
+| `1002`   | Provider error   | Embedding or LLM HTTP failure (data has `kind` field)                                                                                                                                                                                                                                                                                                          |
 | `1003`   | Validation error | Bad attrs (non-object), FK violation, UNIQUE conflict, missing required params. Attachment-specific messages: `attachment too large: <name> (<N> bytes > <max>)`, `declared source not found: <name>`, `image block missing required attr: src`, `invalid base64 for attachment: <name>`, `unsafe attachment filename: <name>`, `attachment not found: <name>` |
-| `1004`   | Config error     | Missing env var, malformed config                                                     |
-| `1005`   | FS error         | Filesystem I/O failure (data has `kind` field from `io::ErrorKind`)                   |
-| `1006`   | .nomai format    | Parse error in a `.nomai` file (data has `parse_error` field)                         |
-| `1007`   | Sync error       | Rebase conflict during `sync.run` (data has `conflicted_files` array); resolve in editor + `git add`, then re-run |
+| `1004`   | Config error     | Missing env var, malformed config                                                                                                                                                                                                                                                                                                                              |
+| `1005`   | FS error         | Filesystem I/O failure (data has `kind` field from `io::ErrorKind`)                                                                                                                                                                                                                                                                                            |
+| `1006`   | .nomai format    | Parse error in a `.nomai` file (data has `parse_error` field)                                                                                                                                                                                                                                                                                                  |
+| `1007`   | Sync error       | Rebase conflict during `sync.run` (data has `conflicted_files` array); resolve in editor + `git add`, then re-run                                                                                                                                                                                                                                              |
 
 Error response shape:
 
@@ -427,11 +430,11 @@ those directories.
 
 Three ways to find entries. Pick based on what you're matching.
 
-| Mode                 | Method                              | Matches by                            | Best for                            |
-| -------------------- | ----------------------------------- | ------------------------------------- | ----------------------------------- |
+| Mode                 | Method                              | Matches by                                                          | Best for                                 |
+| -------------------- | ----------------------------------- | ------------------------------------------------------------------- | ---------------------------------------- |
 | **Fulltext**         | `search.fulltext`                   | Trigram substring (FTS5 bm25, ≥3 chars) or LIKE fallback (<3 chars) | Keyword search, exact terms, CJK phrases |
-| **Semantic (entry)** | `search.semantic` (default)         | Cosine similarity of entry embeddings | Concept search, "find similar"      |
-| **Semantic (chunk)** | `search.semantic granularity=chunk` | Cosine similarity of chunk embeddings | Long-doc RAG, sub-passage retrieval |
+| **Semantic (entry)** | `search.semantic` (default)         | Cosine similarity of entry embeddings                               | Concept search, "find similar"           |
+| **Semantic (chunk)** | `search.semantic granularity=chunk` | Cosine similarity of chunk embeddings                               | Long-doc RAG, sub-passage retrieval      |
 
 **Fulltext tokenizer**: `fts_blocks` uses SQLite FTS5's `trigram` tokenizer. CJK (Chinese/Japanese/Korean) text is matched by 3-character substring, so Chinese phrases now return matches. Queries of ≥3 characters go through FTS5 bm25 ranking. Queries of 1–2 characters (e.g. `"Go"`, `"管理"`) fall back to a `LIKE '%q%'` scan automatically — still case-insensitive and deduped to entries, but ordered by recency rather than relevance. For semantic matching on short terms, use `search.semantic`.
 
@@ -488,12 +491,12 @@ Each row is ~8KB at 2048 dims (`dim × 4 bytes + 32B hash + metadata`), so 100K 
 
 **Cache layering**:
 
-| Layer                 | Caches                                       | Owned by                          |
-| --------------------- | -------------------------------------------- | --------------------------------- |
-| SQLite page cache     | B-tree nodes (disk I/O avoidance)            | SQLite (`cache_size`)             |
-| **emb_cache table**   | **`(model, body) → vector`**                 | **nomai (this section)**          |
-| **search cache**      | **`(rpc, query, limit, ...) → results`**     | **nomai ([Search results cache](#search-results-cache))** |
-| In-memory LRU         | measured, declined — see `crates/core/examples/bench_object_cache.rs` | —                                 |
+| Layer               | Caches                                                                | Owned by                                                  |
+| ------------------- | --------------------------------------------------------------------- | --------------------------------------------------------- |
+| SQLite page cache   | B-tree nodes (disk I/O avoidance)                                     | SQLite (`cache_size`)                                     |
+| **emb_cache table** | **`(model, body) → vector`**                                          | **nomai (this section)**                                  |
+| **search cache**    | **`(rpc, query, limit, ...) → results`**                              | **nomai ([Search results cache](#search-results-cache))** |
+| In-memory LRU       | measured, declined — see `crates/core/examples/bench_object_cache.rs` | —                                                         |
 
 ---
 
@@ -512,24 +515,24 @@ Every `search.semantic` and `search.fulltext` call is wrapped in a transparent i
 
 **Invalidation — generation counter**: the daemon holds a monotonically increasing `generation` counter. Every mutation that could change search results bumps it atomically:
 
-| Hook point | When it bumps |
-| ---------- | ------------- |
-| `entry.create` / `entry.update` / `entry.delete` | After the entry write lands |
-| `block.append` / `block.update` / `block.delete` | After the block write lands |
-| `index.sync` / `index.rebuild` | After the index refreshes (`index.sync` only when it actually mutates) |
+| Hook point                                       | When it bumps                                                          |
+| ------------------------------------------------ | ---------------------------------------------------------------------- |
+| `entry.create` / `entry.update` / `entry.delete` | After the entry write lands                                            |
+| `block.append` / `block.update` / `block.delete` | After the block write lands                                            |
+| `index.sync` / `index.rebuild`                   | After the index refreshes (`index.sync` only when it actually mutates) |
 
 Cached entries are keyed by the current `generation`, so a bump effectively drops them all — the next search misses and recomputes from current state. There is no per-entry invalidation logic and no staleness window: a cached result is, by construction, consistent with the most recent mutation the daemon has applied.
 
 **Hit semantics** (mirrored in `cache.stats` → `searches`):
 
-| Field                          | Meaning                                                                |
-| ------------------------------ | ---------------------------------------------------------------------- |
-| `generation`                   | Current generation (bumps on every mutation)                           |
-| `entries`                      | Cached results currently held in memory                                |
-| `hits` / `misses`              | Lifetime counters across both RPCs                                     |
-| `hit_rate`                     | `hits / (hits + misses)`, or 0.0 when both are zero                    |
-| `by_rpc.semantic.{hits,misses}`   | Counters for `search.semantic`                                      |
-| `by_rpc.fulltext.{hits,misses}`   | Counters for `search.fulltext`                                      |
+| Field                           | Meaning                                             |
+| ------------------------------- | --------------------------------------------------- |
+| `generation`                    | Current generation (bumps on every mutation)        |
+| `entries`                       | Cached results currently held in memory             |
+| `hits` / `misses`               | Lifetime counters across both RPCs                  |
+| `hit_rate`                      | `hits / (hits + misses)`, or 0.0 when both are zero |
+| `by_rpc.semantic.{hits,misses}` | Counters for `search.semantic`                      |
+| `by_rpc.fulltext.{hits,misses}` | Counters for `search.fulltext`                      |
 
 **Capacity**: in-memory, unbounded, never auto-evicted (only invalidated by generation bumps). A single cached entry is small (a key + a JSON result array), and a busy read workload produces a bounded working set of distinct queries — typical deployments won't see meaningful growth. If you want to drop everything, run `cache.clear({namespace: "searches"})`.
 
