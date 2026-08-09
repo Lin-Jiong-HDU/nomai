@@ -44,6 +44,8 @@ All methods follow JSON-RPC 2.0. On error, response has `error: {code, message, 
 
 **Block input shape**: `BlockInput` is `{ type: String, text: String, attrs?: Value }`. Valid types: `claim`, `evidence`, `question`, `source`, `note`, `connection`, `image` (the `@connection` type requires `target` and `relation` attrs; `@image` requires `src` attr — see below).
 
+**Source field semantics**: The `source` field on `Entry` records the ingest-time origin (file path, URL, etc.) and is stored verbatim with the entry. It is **not a live symlink** — if block content is later modified via `block.update`, the `source` may diverge from the current block text. Trust the search result snippets over the `source` field for understanding why an entry matched a query.
+
 ### entries.{#entries-methods}
 
 | Method                    | Params                                | Returns                                                                                                                       | Notes                                                                                                                                                                                                                                                                                                                                                                                                               |
