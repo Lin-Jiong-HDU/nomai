@@ -21,6 +21,7 @@ For project overview and install, see the [README](../README.md) first.
   - [Chunks](#chunks)
 - [Storage layer separation (lib-mode users)](#storage-layer-separation-lib-mode-users)
 - [Sync (multi-device)](#sync-multi-device)
+- [Machine-specific content](#machine-specific-content)
 - [Migration from 0.1.0 to 0.2.0](#migration-from-010-to-020)
 - [What's next](#whats-next)
 
@@ -309,6 +310,27 @@ resident daemon (spawning one on the fly if none is listening) and dispatches
 a single `sync.init` or `sync.run` RPC. All git work happens in the daemon;
 the CLI only ferries one request/response. See [reference.md](reference.md)
 for the `sync.init` / `sync.run` RPC contracts.
+
+---
+
+## Machine-specific content
+
+The KB syncs wholesale across devices — nothing is filtered per machine, so an entry written on one machine is read by agents on all of them. Anything tied to a single machine (absolute paths like `/home/alice/...`, hostnames, local config, command output) must be marked as such, or an agent on another device will mistake a stale path for a live one.
+
+The convention has two halves:
+
+**Write side.** When content is machine-specific:
+
+- Prefer portable path forms in block text: `~/dev/foo`, not `/home/alice/dev/foo`.
+- If a path or fact only makes sense on one machine, set `attrs.device` to the writing host's `hostname` and name the machine explicitly in the text ("on linux-box, ..."). Don't phrase machine-local facts as universal knowledge.
+- Ephemeral, this-machine-only working memory belongs in a transient entry (`attrs.transient: true`), not a curated one.
+
+**Read side.** When consuming an entry:
+
+- If `attrs.device` exists and differs from the local `hostname`, treat the entry as a record from another machine: its paths, config, and command output are historical facts, not claims about this machine.
+- Verify any path from an entry before acting on it (`test -e <path>`), regardless of `attrs.device`.
+
+`device` is a convention, not enforced by core — `attrs` is schema-free (see [Entry](#entry)). Nothing stops a writer from omitting it; the read-side verification rule is the backstop that catches that case.
 
 ---
 
