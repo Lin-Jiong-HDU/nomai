@@ -1634,7 +1634,13 @@ impl EntryService {
         // direct FTS5 query (or LIKE for short queries), aggregate per entry
         // in `dedupe_hits`, then fetch entry rows + build snippets.
         let rows = if query.chars().count() >= 3 {
-            Self::fts_match_pairs(&conn, query, block_type, tag, include_benchmark)?
+            // Neutralize FTS5 query syntax (`word:` column filters, `-word`
+            // NOT, operator words) so user queries match as literal text.
+            let escaped = crate::fts_query::escape(query);
+            if escaped.is_empty() {
+                return Ok(Vec::new());
+            }
+            Self::fts_match_pairs(&conn, &escaped, block_type, tag, include_benchmark)?
         } else {
             Self::like_match_pairs(&conn, query, block_type, tag, include_benchmark)?
         };
@@ -2761,6 +2767,44 @@ mod tests {
             .fulltext_search("nonexistentterm12345", 10, None, None)
             .unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn fulltext_treats_fts5_syntax_as_literal_terms() {
+        // Regression: FTS5 parses `word:` as a column filter and `-word` as
+        // NOT, so raw user queries like "agent: memory" used to fail with
+        // "no such column: agent" (a storage error) instead of matching.
+        let svc = EntryService::for_test().unwrap();
+        svc.create(CreateEntry {
+            title: "Agent memory".into(),
+            blocks: vec![note_block("nomai agent memory primitives")],
+            tags: None,
+            attrs: None,
+            source: None,
+            attachments: None,
+        })
+        .unwrap();
+        svc.create(CreateEntry {
+            title: "Rust guide".into(),
+            blocks: vec![note_block("Learn rust programming language")],
+            tags: None,
+            attrs: None,
+            source: None,
+            attachments: None,
+        })
+        .unwrap();
+
+        let hits = svc
+            .fulltext_search("agent: memory", 10, None, None)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry.title, "Agent memory");
+
+        let hits = svc
+            .fulltext_search("rust -language", 10, None, None)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry.title, "Rust guide");
     }
 
     #[test]

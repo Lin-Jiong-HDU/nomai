@@ -496,7 +496,12 @@ impl ConversationService {
             rows.collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(CoreError::Storage)
         } else {
-            // FTS5 path.
+            // FTS5 path. Neutralize FTS5 query syntax the same way
+            // search.fulltext does — see fts_query::escape.
+            let escaped = crate::fts_query::escape(query);
+            if escaped.is_empty() {
+                return Ok(Vec::new());
+            }
             let sql = "SELECT t.id, t.conversation_id, t.ordinal, t.role, t.content, \
                               t.attrs, t.created_at, \
                               c.id, c.title, c.tags, c.attrs, c.turn_count, \
@@ -509,7 +514,7 @@ impl ConversationService {
                        ORDER BY rank \
                        LIMIT ?";
             let mut stmt = conn.prepare(sql)?;
-            let rows = stmt.query_map(params![query, limit as i64], |row| {
+            let rows = stmt.query_map(params![escaped, limit as i64], |row| {
                 let rank: f64 = row.get(14)?;
                 self.row_to_search_result(row, query, rank.abs() as f32)
             })?;
@@ -850,6 +855,23 @@ mod tests {
 
         // 2-char query → LIKE fallback.
         let results = svc.search("Ru", 10).unwrap();
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn search_treats_fts5_syntax_as_literal_terms() {
+        // Regression: same FTS5 column-filter trap as search.fulltext —
+        // `word:` in the query must not become a column filter.
+        let svc = ConversationService::for_test().unwrap();
+        svc.create(CreateConversation {
+            title: Some("Chat".into()),
+            tags: None,
+            attrs: None,
+            turns: Some(vec![note_turn("user", "nomai agent memory primitives")]),
+        })
+        .unwrap();
+
+        let results = svc.search("agent: memory", 10).unwrap();
         assert!(!results.is_empty());
     }
 }

@@ -11,6 +11,7 @@ pub mod conversation_service;
 pub mod error;
 pub mod event_model;
 pub mod event_service;
+pub mod fts_query;
 pub mod link_model;
 pub mod link_service;
 pub mod model;

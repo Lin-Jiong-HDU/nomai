@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **FTS5 query syntax in user queries no longer breaks search.** Queries
+  containing `word:` (column-filter syntax), `-word` (NOT), bare
+  `AND`/`OR`/`NOT`, or unbalanced parentheses used to fail at the storage
+  layer — e.g. searching `agent: memory` returned `storage error: no such
+  column: agent` from `search.fulltext` / `search.hybrid` /
+  `conversation.search`. All three now literalize the query before binding
+  it into `fts_* MATCH ?`: non-alphanumeric characters become token
+  separators (mirroring how the trigram tokenizer indexed the text) and each
+  token is quoted, so syntax characters match as literal text. Queries that
+  reduce to no tokens return empty results instead of erroring.
+
 ## [0.4.4] - 2026-07-31
 
 ### Added
