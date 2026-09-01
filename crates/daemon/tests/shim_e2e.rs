@@ -19,10 +19,14 @@ fn binary() -> std::path::PathBuf {
 fn write_config(dir: &std::path::Path) -> std::path::PathBuf {
     let cfg = dir.join("config.toml");
     let db = dir.join("db.sqlite");
+    // Without this, `knowledge_root` falls back to the real user KB
+    // (~/.local/share/nomai/store) and the test's entries leak into it.
+    let knowledge_root = dir.join("store");
     let toml = format!(
         r#"
 [data]
 db_path = "{db}"
+knowledge_root = "{kr}"
 
 [embedding]
 base_url = "https://example.invalid/v1"
@@ -38,7 +42,8 @@ model = "x"
 [serve]
 idle_timeout_secs = 2
 "#,
-        db = db.display()
+        db = db.display(),
+        kr = knowledge_root.display()
     );
     std::fs::write(&cfg, toml).unwrap();
     cfg
@@ -131,10 +136,14 @@ async fn search_hybrid_returns_entry_granular_results() {
     let dir = tempfile::TempDir::new().unwrap();
     let db = dir.path().join("db.sqlite");
     let cfg = dir.path().join("config.toml");
+    // Without this, `knowledge_root` falls back to the real user KB
+    // (~/.local/share/nomai/store) and the test's entries leak into it.
+    let knowledge_root = dir.path().join("store");
     let toml = format!(
         r#"
 [data]
 db_path = "{db}"
+knowledge_root = "{kr}"
 
 [embedding]
 base_url = "{base}"
@@ -151,6 +160,7 @@ model = "test"
 idle_timeout_secs = 10
 "#,
         db = db.display(),
+        kr = knowledge_root.display(),
         base = mock_server.uri(),
     );
     std::fs::write(&cfg, toml).unwrap();
@@ -260,25 +270,37 @@ idle_timeout_secs = 10
 }
 
 #[tokio::test]
-async fn search_hybrid_propagates_embedding_error() {
+async fn search_fulltext_treats_fts5_syntax_as_literal_terms() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    // Start a mock embedding provider that returns 500.
+    // Regression: `word:` is FTS5 column-filter syntax, so an unescaped
+    // "agent: memory" query used to return `storage error: no such column:
+    // agent` over the wire.
     let mock_server = MockServer::start().await;
     let dim: usize = 8;
+    let embedding: Vec<f64> = (0..dim).map(|i| (i % 4) as f64 / 4.0).collect();
     Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/embeddings"))
-        .respond_with(ResponseTemplate::new(500))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": embedding}],
+            "model": "test",
+            "usage": {"prompt_tokens": 1, "total_tokens": 1}
+        })))
         .mount(&mock_server)
         .await;
 
     let dir = tempfile::TempDir::new().unwrap();
     let db = dir.path().join("db.sqlite");
     let cfg = dir.path().join("config.toml");
+    // Without this, `knowledge_root` falls back to the real user KB
+    // (~/.local/share/nomai/store) and the test's entries leak into it.
+    let knowledge_root = dir.path().join("store");
     let toml = format!(
         r#"
 [data]
 db_path = "{db}"
+knowledge_root = "{kr}"
 
 [embedding]
 base_url = "{base}"
@@ -295,6 +317,124 @@ model = "test"
 idle_timeout_secs = 10
 "#,
         db = db.display(),
+        kr = knowledge_root.display(),
+        base = mock_server.uri(),
+    );
+    std::fs::write(&cfg, toml).unwrap();
+
+    let mut child = Command::new(binary())
+        .arg("--config")
+        .arg(&cfg)
+        .env("NOMAI_E2E_KEY", "k")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn shim");
+
+    let stdin = child.stdin.take().unwrap();
+    let reader = BufReader::new(child.stdout.take().unwrap());
+
+    let sock = dir.path().join("run").join("nomai.sock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match std::os::unix::net::UnixStream::connect(&sock) {
+            Ok(_) => break,
+            Err(_) => {
+                if std::time::Instant::now() > deadline {
+                    panic!("daemon never came up at {sock:?}");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+    }
+
+    let mut stdin = stdin;
+    let mut reader = reader;
+    let mut send = |method: &str, params: serde_json::Value| -> serde_json::Value {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        });
+        writeln!(stdin, "{req}").unwrap();
+        stdin.flush().unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        serde_json::from_str(line.trim()).unwrap()
+    };
+
+    let created = send(
+        "entry.create",
+        json!({
+            "title": "Agent memory",
+            "blocks": [{"type": "note", "text": "nomai agent memory primitives"}]
+        }),
+    );
+    assert!(
+        created.get("result").is_some(),
+        "entry.create must succeed: {created}"
+    );
+
+    let resp = send(
+        "search.fulltext",
+        json!({
+            "query": "agent: memory",
+            "limit": 5
+        }),
+    );
+    let result = resp
+        .get("result")
+        .unwrap_or_else(|| panic!("search.fulltext must succeed: {resp}"));
+    let items = result["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "expected exactly one match: {result}");
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[tokio::test]
+async fn search_hybrid_propagates_embedding_error() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Start a mock embedding provider that returns 500.
+    let mock_server = MockServer::start().await;
+    let dim: usize = 8;
+    Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/embeddings"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&mock_server)
+        .await;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = dir.path().join("db.sqlite");
+    let cfg = dir.path().join("config.toml");
+    // Without this, `knowledge_root` falls back to the real user KB
+    // (~/.local/share/nomai/store) and the test's entries leak into it.
+    let knowledge_root = dir.path().join("store");
+    let toml = format!(
+        r#"
+[data]
+db_path = "{db}"
+knowledge_root = "{kr}"
+
+[embedding]
+base_url = "{base}"
+api_key_env = "NOMAI_E2E_KEY"
+model = "test"
+dim = {dim}
+
+[llm]
+base_url = "{base}"
+api_key_env = "NOMAI_E2E_KEY"
+model = "test"
+
+[serve]
+idle_timeout_secs = 10
+"#,
+        db = db.display(),
+        kr = knowledge_root.display(),
         base = mock_server.uri(),
     );
     std::fs::write(&cfg, toml).unwrap();

@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token is quoted, so syntax characters match as literal text. Queries that
   reduce to no tokens return empty results instead of erroring.
 
+- **`shim_e2e` tests no longer leak entries into the real KB.** The
+  spawned-binary e2e configs omitted `knowledge_root`, which falls back to
+  the real user KB (`~/.local/share/nomai/store`) — every run of the hybrid
+  e2e wrote its two fixture entries there. All four tests now pin
+  `knowledge_root` to a tempdir.
+
 ## [0.4.4] - 2026-07-31
 
 ### Added
