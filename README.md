@@ -14,6 +14,22 @@ The core is deliberately mechanism, not policy: it stores, indexes, and emits ev
 
 Early alpha. API surface is stabilizing but may change before 1.0. Currently single-user, single-process, single SQLite file.
 
+## Download a release
+
+Prebuilt `nomai-daemon` binaries for Linux, macOS, and Windows are attached to the [latest GitHub Release](https://github.com/Lin-Jiong-HDU/nomai/releases/latest). Choose the archive matching your operating system and CPU architecture. Asset names include the Rust target triple, for example `x86_64-unknown-linux-gnu` or `aarch64-apple-darwin`.
+
+On Linux or macOS, extract the archive and put the binary somewhere on your `PATH`:
+
+```bash
+VERSION="v0.4.5"
+TARGET="x86_64-unknown-linux-gnu" # or aarch64-apple-darwin, etc.
+curl -LO "https://github.com/Lin-Jiong-HDU/nomai/releases/download/${VERSION}/nomai-daemon-${VERSION}-${TARGET}.tar.gz"
+tar -xzf "nomai-daemon-${VERSION}-${TARGET}.tar.gz"
+install -Dm755 "nomai-daemon-${VERSION}-${TARGET}" "$HOME/.local/bin/nomai-daemon"
+```
+
+On Windows, download the `x86_64-pc-windows-msvc.zip` archive, extract `nomai-daemon.exe`, and add its directory to `PATH`.
+
 ## The six primitives
 
 | Primitive        | What it does                                    | Typical use                                 |

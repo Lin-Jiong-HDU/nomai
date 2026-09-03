@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Automated release binaries.** GitHub Actions now builds and attaches
+  precompiled `nomai-daemon` archives for Linux x86_64/ARM64, macOS
+  Intel/Apple Silicon, and Windows x86_64, together with a `SHA256SUMS`
+  file, whenever a GitHub Release is published.
+
 ## [0.4.5] - 2026-09-01
 
 ### Fixed

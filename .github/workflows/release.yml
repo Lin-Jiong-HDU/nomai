@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, for example v0.4.5"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            archive: tar.gz
+
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            archive: tar.gz
+
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            archive: tar.gz
+
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            archive: tar.gz
+
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --locked --release --package nomai-daemon --bin nomai-daemon --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euxo pipefail
+
+          mkdir -p dist
+          NAME="nomai-daemon-${RELEASE_TAG}-${TARGET}"
+
+          if [ "$ARCHIVE" = "zip" ]; then
+            cp "target/${TARGET}/release/nomai-daemon.exe" "dist/${NAME}.exe"
+            7z a "dist/${NAME}.zip" "dist/${NAME}.exe"
+            rm "dist/${NAME}.exe"
+          else
+            cp "target/${TARGET}/release/nomai-daemon" "dist/${NAME}"
+            tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
+            rm "dist/${NAME}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          retention-days: 1
+
+  upload:
+    name: Upload release assets
+    needs: build
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: sha256sum dist/* > dist/SHA256SUMS
+
+      - name: Upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber
