@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Intel/Apple Silicon, and Windows x86_64, together with a `SHA256SUMS`
   file, whenever a GitHub Release is published.
 
+### Fixed
+
+- **Release asset upload now works without a checkout.** The final upload
+  step passes the repository explicitly to `gh release upload`, so the
+  artifact-only upload job no longer depends on a local Git worktree.
+
 ## [0.4.5] - 2026-09-01
 
 ### Fixed
