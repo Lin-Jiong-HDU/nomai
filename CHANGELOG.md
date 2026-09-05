@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-09-05
+
 ### Changed
 
 - The minimum supported Rust version is now 1.88.
+
+- The README now focuses on installation, first use, and links to the detailed
+  documentation.
 
 ### Added
 
@@ -460,7 +465,8 @@ empty `.nomai` files. To regenerate from current state:
 - No built-in sync (the `events` primitive is the substrate; build on top).
 - No CLI subcommands — every operation is an RPC over stdio.
 
-[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/Lin-Jiong-HDU/nomai/compare/v0.4.2...v0.4.3
