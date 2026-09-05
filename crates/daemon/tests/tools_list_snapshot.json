@@ -1039,6 +1039,60 @@
       "name": "rerank.rerank"
     },
     {
+      "description": "Record positive feedback for results returned by a prior search. Idempotent per search and entry; returns applied reinforcement records and entries already applied by a retry.",
+      "inputSchema": {
+        "$defs": {
+          "FeedbackTargetParams": {
+            "properties": {
+              "block_id": {
+                "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "chunk_id": {
+                "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "entry_id": {
+                "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "entry_id"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "search_id": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/$defs/FeedbackTargetParams"
+            },
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "search_id",
+          "targets"
+        ],
+        "title": "FeedbackParams",
+        "type": "object"
+      },
+      "name": "search.feedback"
+    },
+    {
       "description": "Fulltext search over block text via SQLite FTS5. Returns entries ranked by relevance. Score is relative relevance (not a boolean hit marker): higher means stronger match; near-zero means weak match. Optional `tag` restricts results to entries whose `tags` array contains that value. Each call is cached per (query, limit, block_type, tag).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

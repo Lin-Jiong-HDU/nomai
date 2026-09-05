@@ -8,6 +8,7 @@
 //! Called after entry.create/update, block.append/update, and batch commit.
 //! Reuses `CachedEmbedder` (emb_cache) so unchanged bodies skip the API call.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ulid::Ulid;
@@ -81,4 +82,65 @@ pub(crate) async fn embed_entry_chunks(
         Ok(())
     })
     .await?
+}
+
+/// Re-embed every retained learned-query example with the daemon's active
+/// provider, then atomically move ordinary affinities and their vector index
+/// to the active model/dimension.
+///
+/// Provider work happens before any affinity mutation. Identical effective
+/// text is embedded once and its vector is fanned back out to each surviving
+/// affinity ID. Consequently a provider error leaves all ordinary affinity
+/// rows untouched for a later rebuild retry.
+pub(crate) async fn reembed_query_affinities(daemon: &Daemon) -> Result<u64, CoreError> {
+    let plan = {
+        let memory = daemon.memory.clone();
+        blocking(move || memory.list_affinities_for_reembedding()).await??
+    };
+    let inputs = &plan.inputs;
+
+    let mut text_indexes = HashMap::<String, usize>::new();
+    let mut unique_texts = Vec::<String>::new();
+    let mut input_text_indexes = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let text_index = if let Some(index) = text_indexes.get(&input.effective_query_text) {
+            *index
+        } else {
+            let index = unique_texts.len();
+            unique_texts.push(input.effective_query_text.clone());
+            text_indexes.insert(input.effective_query_text.clone(), index);
+            index
+        };
+        input_text_indexes.push(text_index);
+    }
+
+    let embeddings = if unique_texts.is_empty() {
+        Vec::new()
+    } else {
+        let texts = unique_texts.iter().map(String::as_str).collect::<Vec<_>>();
+        daemon.cache.embed(&texts).await?
+    };
+    if embeddings.len() != unique_texts.len() {
+        return Err(CoreError::Validation(format!(
+            "affinity provider returned {} vectors for {} texts",
+            embeddings.len(),
+            unique_texts.len()
+        )));
+    }
+
+    let vectors = inputs
+        .iter()
+        .zip(input_text_indexes)
+        .map(|(input, text_index)| (input.affinity_id, embeddings[text_index].clone()))
+        .collect::<Vec<_>>();
+    let count = vectors.len() as u64;
+    let memory = daemon.memory.clone();
+    let embedding_model = daemon.embedding_model.clone();
+    let embedding_dim = daemon.embedding_dim;
+    let fingerprint = plan.fingerprint;
+    blocking(move || {
+        memory.replace_affinity_vectors(&embedding_model, embedding_dim, &fingerprint, &vectors)
+    })
+    .await??;
+    Ok(count)
 }

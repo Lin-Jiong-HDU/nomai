@@ -12,6 +12,7 @@ pub mod chunk;
 pub mod conversation;
 pub mod entry;
 pub mod events;
+pub mod feedback;
 pub mod index;
 pub mod link;
 pub mod mcp;
@@ -1378,10 +1379,10 @@ mod tests {
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().expect("tools is array");
-        // 38 built-in non-MCP handlers (entry:5, entries:1, link:5, chunk:2,
-        // block:5, attachment:2, events:3, search:3, provider:1, cache:2,
+        // 39 built-in non-MCP handlers (entry:5, entries:1, link:5, chunk:2,
+        // block:5, attachment:2, events:3, search:4, provider:1, cache:2,
         // batch:1, index:3, system:2, sync:2, rerank:1) + conversation:7.
-        assert_eq!(tools.len(), 45);
+        assert_eq!(tools.len(), 46);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["inputSchema"].is_object());
@@ -1514,7 +1515,7 @@ mod tests {
         let tools = list.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"custom.echo"));
-        assert_eq!(tools.len(), 46); // 45 built-in + custom.echo
+        assert_eq!(tools.len(), 47); // 46 built-in + custom.echo
     }
 
     // ----- batch RPC e2e -----

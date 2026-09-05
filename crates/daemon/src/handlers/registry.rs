@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::handlers::{
-    attachment, batch, benchmark, block, cache, chunk, conversation, entry, events, index, link,
-    mcp, provider, rerank, search, sync, system,
+    attachment, batch, benchmark, block, cache, chunk, conversation, entry, events, feedback,
+    index, link, mcp, provider, rerank, search, sync, system,
 };
 use crate::rpc::RpcHandler;
 
@@ -103,6 +103,8 @@ pub fn registry_with_benchmark(enabled: bool) -> HashMap<&'static str, Arc<dyn R
     let h = search::Semantic;
     m.insert(h.method(), Arc::new(h));
     let h = search::Hybrid;
+    m.insert(h.method(), Arc::new(h));
+    let h = feedback::Feedback;
     m.insert(h.method(), Arc::new(h));
 
     // rerank.*
@@ -199,5 +201,10 @@ mod tests {
         ] {
             assert!(methods.contains_key(method), "missing {method}");
         }
+    }
+
+    #[test]
+    fn registry_exposes_search_feedback() {
+        assert!(registry().contains_key("search.feedback"));
     }
 }

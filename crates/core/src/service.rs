@@ -1268,11 +1268,12 @@ impl EntryService {
 
         for (entry_id, fs_path) in rows {
             // Skip if fs_path is set AND the .nomai file actually exists.
-            if let Some(p) = &fs_path {
-                if !p.is_empty() && self.content_store.entry_file(entry_id).exists() {
-                    skipped += 1;
-                    continue;
-                }
+            if let Some(p) = &fs_path
+                && !p.is_empty()
+                && self.content_store.entry_file(entry_id).exists()
+            {
+                skipped += 1;
+                continue;
             }
 
             // Need to export — fetch entry + blocks.
@@ -2554,7 +2555,7 @@ mod tests {
     fn purge_transient_emits_entry_deleted_events() {
         let svc = EntryService::for_test().unwrap();
         let events = crate::event_service::EventService::for_test_shared_with_entries(&svc);
-        seed_transient(&svc, "short", true);
+        let transient = seed_transient(&svc, "short", true);
         let before = events.list(Default::default()).unwrap().items.len();
         svc.purge_transient(None, false).unwrap();
         let after = events.list(Default::default()).unwrap();
@@ -2563,8 +2564,7 @@ mod tests {
             after
                 .items
                 .iter()
-                .skip(before)
-                .any(|event| event.type_ == "entry.deleted")
+                .any(|event| { event.type_ == "entry.deleted" && event.target_id == transient.id })
         );
     }
 

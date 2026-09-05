@@ -115,12 +115,12 @@ impl LinkService {
             Ok(_) => {}
             Err(e) => {
                 // Map ConstraintViolation (FK + UNIQUE) to Validation.
-                if let rusqlite::Error::SqliteFailure(ref fe, _) = e {
-                    if fe.code == rusqlite::ErrorCode::ConstraintViolation {
-                        return Err(CoreError::Validation(format!(
-                            "link constraint violation: {e}"
-                        )));
-                    }
+                if let rusqlite::Error::SqliteFailure(ref fe, _) = e
+                    && fe.code == rusqlite::ErrorCode::ConstraintViolation
+                {
+                    return Err(CoreError::Validation(format!(
+                        "link constraint violation: {e}"
+                    )));
                 }
                 return Err(CoreError::Storage(e));
             }

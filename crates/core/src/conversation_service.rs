@@ -379,10 +379,10 @@ impl ConversationService {
     ) -> Result<Conversation, CoreError> {
         let existing = Self::read_conversation(conn, id)?;
 
-        if let Some(ref attrs) = params.attrs {
-            if !attrs.is_object() {
-                return Err(CoreError::Validation("attrs must be a JSON object".into()));
-            }
+        if let Some(ref attrs) = params.attrs
+            && !attrs.is_object()
+        {
+            return Err(CoreError::Validation("attrs must be a JSON object".into()));
         }
 
         let new_title = params.title.unwrap_or_else(|| existing.title.clone());

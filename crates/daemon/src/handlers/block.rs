@@ -172,6 +172,24 @@ impl RpcHandler for Update {
             .and_then(|v| v.as_str())
             .map(String::from);
         let entry_id = existing.entry_id;
+        let text_changed = p
+            .text
+            .as_deref()
+            .is_some_and(|text| text != existing.text.as_str());
+        let old_chunk_ids = if p.text.is_some() {
+            let chunks = daemon.chunks.clone();
+            blocking(move || {
+                Ok(chunks
+                    .list(id)?
+                    .items
+                    .into_iter()
+                    .map(|chunk| chunk.id)
+                    .collect::<Vec<_>>())
+            })
+            .await??
+        } else {
+            Vec::new()
+        };
 
         // Pre-validate (decode → write_attachments_and_validate) BEFORE
         // BlockService::update, so a validation failure leaves the block row
@@ -198,6 +216,24 @@ impl RpcHandler for Update {
             blocking(move || entries.block_service().update(id, ty, text, attrs)).await??
         };
 
+        // The DB mutation is committed. Invalidate immediately so every
+        // subsequent error path leaves prior search results unreachable.
+        daemon.search_cache.bump_generation();
+
+        // A successful text change has replaced the old derived Chunk IDs.
+        // Preserve the still-valid Block target while clearing only those
+        // captured old Chunk references. Save cleanup failure so canonical
+        // file/embedding finalization still runs. Metadata-only updates retain
+        // IDs and have no signal cleanup.
+        let signal_cleanup = if text_changed {
+            let memory = daemon.memory.clone();
+            blocking(move || memory.degrade_chunk_precision(&old_chunk_ids))
+                .await
+                .and_then(|result| result)
+        } else {
+            Ok(())
+        };
+
         // Re-render the entry's .nomai (block text/type/attrs may have
         // changed). Runs in the same spawn_blocking pattern as Append.
         rerender_entry_nomai(&entries, block.entry_id).await?;
@@ -206,8 +242,9 @@ impl RpcHandler for Update {
         // chunks_ad cleaned old embeddings, new ones need embedding).
         crate::handlers::embed::embed_entry_chunks(daemon, block.entry_id, false).await?;
 
-        // Invalidate search cache.
-        daemon.search_cache.bump_generation();
+        // Canonical content is finalized. Surface any saved local-signal
+        // cleanup error only after rerender and embedding succeeded.
+        signal_cleanup?;
 
         serde_json::to_value(&block).map_err(|e| CoreError::Config(format!("serialize: {e}")))
     }
@@ -239,10 +276,34 @@ impl RpcHandler for Delete {
 
         let entries: Arc<EntryService> = daemon.entries.clone();
         let id = p.id;
+        let old_chunk_ids = {
+            let chunks = daemon.chunks.clone();
+            blocking(move || {
+                Ok(chunks
+                    .list(id)?
+                    .items
+                    .into_iter()
+                    .map(|chunk| chunk.id)
+                    .collect::<Vec<_>>())
+            })
+            .await??
+        };
         let block = {
             let entries = entries.clone();
             blocking(move || entries.block_service().delete(id)).await??
         };
+
+        // The DB mutation is committed. Invalidate before any fallible local
+        // cleanup or canonical file finalization.
+        daemon.search_cache.bump_generation();
+
+        // The Block and its derived Chunks are gone, but the learned
+        // association remains useful at Entry precision. Save cleanup failure
+        // until the canonical .nomai file has still been finalized.
+        let memory = daemon.memory.clone();
+        let signal_cleanup = blocking(move || memory.degrade_block_precision(id, &old_chunk_ids))
+            .await
+            .and_then(|result| result);
 
         // Re-render the entry's .nomai (block list changed). Runs in the
         // same spawn_blocking pattern as Append/Update. The chunks_ad trigger
@@ -250,8 +311,7 @@ impl RpcHandler for Delete {
         // chunks; no manual loop needed here.
         rerender_entry_nomai(&entries, block.entry_id).await?;
 
-        // Invalidate search cache.
-        daemon.search_cache.bump_generation();
+        signal_cleanup?;
 
         Ok(json!({"deleted": true, "id": id.to_string()}))
     }
@@ -510,5 +570,355 @@ mod descriptor_tests {
     fn get_schema_rejects_missing_id() {
         let schema = Get.input_schema().unwrap();
         assert!(validate(&schema, &json!({})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use nomai_core::{
+        BlockInput, CreateEntry, CreateSearchSession, EntryService, FeedbackTarget, MemoryPolicy,
+        SearchResultTarget,
+    };
+    use nomai_protocol::{ProviderError, ProviderErrorKind};
+    use nomai_providers::{CompletionRequest, CompletionResponse, EmbeddingProvider, LlmProvider};
+
+    use super::*;
+    use crate::daemon::DaemonBuilder;
+
+    struct FakeEmbed;
+
+    #[async_trait]
+    impl EmbeddingProvider for FakeEmbed {
+        async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, ProviderError> {
+            Ok(vec![vec![1.0, 0.0, 0.0, 0.0]; texts.len()])
+        }
+
+        fn dim(&self) -> usize {
+            4
+        }
+
+        fn name(&self) -> &str {
+            "fake-embed"
+        }
+    }
+
+    struct FakeLlm;
+
+    #[async_trait]
+    impl LlmProvider for FakeLlm {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            Err(ProviderError::new(
+                ProviderErrorKind::Unknown,
+                "fake llm",
+                None,
+            ))
+        }
+
+        fn name(&self) -> &str {
+            "fake-llm"
+        }
+    }
+
+    fn daemon() -> Daemon {
+        let entries = Arc::new(EntryService::for_test().unwrap());
+        DaemonBuilder::new()
+            .conn(entries.conn_for_test())
+            .content_store(entries.content_store().clone())
+            .embedder(Arc::new(FakeEmbed))
+            .llm(Arc::new(FakeLlm))
+            .embedding_dim(4)
+            .chunk_target_size(1024)
+            .cache_model("active-model")
+            .warn_rows(100_000)
+            .memory_policy(MemoryPolicy::default())
+            .build()
+            .unwrap()
+    }
+
+    fn seed_precise_feedback(daemon: &Daemon) -> (ulid::Ulid, ulid::Ulid, ulid::Ulid, ulid::Ulid) {
+        let entry = daemon
+            .entries
+            .create(CreateEntry {
+                title: "block lifecycle target".into(),
+                blocks: vec![BlockInput {
+                    r#type: "note".into(),
+                    text: "old block text".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+                attachments: None,
+            })
+            .unwrap();
+        let block_id = entry.blocks[0].id;
+        let chunk_id = daemon.chunks.list(block_id).unwrap().items[0].id;
+        let search_id = daemon
+            .memory
+            .create_search_session(CreateSearchSession {
+                raw_query_text: "raw block query".into(),
+                effective_query_text: "effective block query".into(),
+                query_embedding: vec![1.0, 0.0, 0.0, 0.0],
+                embedding_model: "active-model".into(),
+                results: vec![SearchResultTarget {
+                    entry_id: entry.id,
+                    matched_block_id: Some(block_id),
+                    matched_chunk_id: Some(chunk_id),
+                    result_rank: 1,
+                }],
+            })
+            .unwrap();
+        daemon
+            .memory
+            .apply_feedback(
+                search_id,
+                &[FeedbackTarget {
+                    entry_id: entry.id,
+                    block_id: Some(block_id),
+                    chunk_id: Some(chunk_id),
+                }],
+            )
+            .unwrap();
+        (entry.id, block_id, chunk_id, search_id)
+    }
+
+    type MaterializedTargets = (
+        (Option<String>, Option<String>),
+        (Option<String>, Option<String>),
+    );
+
+    fn materialized_targets(
+        daemon: &Daemon,
+        entry_id: ulid::Ulid,
+        search_id: ulid::Ulid,
+    ) -> MaterializedTargets {
+        let conn = daemon.entries.conn_for_test();
+        let conn = conn.lock().unwrap();
+        let affinity = conn
+            .query_row(
+                "SELECT block_id, chunk_id FROM query_affinities WHERE entry_id = ?1",
+                [entry_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let session = conn
+            .query_row(
+                "SELECT matched_block_id, matched_chunk_id
+                 FROM search_session_results WHERE search_id = ?1 AND entry_id = ?2",
+                rusqlite::params![search_id.to_string(), entry_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        (affinity, session)
+    }
+
+    #[tokio::test]
+    async fn delete_degrades_block_and_chunk_precision_to_entry() {
+        let daemon = daemon();
+        let (entry_id, block_id, _chunk_id, search_id) = seed_precise_feedback(&daemon);
+
+        Delete.call(&daemon, json!({"id": block_id})).await.unwrap();
+
+        assert_eq!(
+            materialized_targets(&daemon, entry_id, search_id),
+            ((None, None), (None, None))
+        );
+        let conn = daemon.entries.conn_for_test();
+        assert_eq!(
+            conn.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT reinforcement_count FROM query_affinities WHERE entry_id = ?1",
+                    [entry_id.to_string()],
+                    |row| row.get::<_, u8>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_clears_semantic_only_session_chunk_precision() {
+        let daemon = daemon();
+        let (entry_id, block_id, chunk_id, search_id) = seed_precise_feedback(&daemon);
+        daemon
+            .entries
+            .conn_for_test()
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE search_session_results SET matched_block_id = NULL
+                 WHERE search_id = ?1 AND entry_id = ?2",
+                rusqlite::params![search_id.to_string(), entry_id.to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            materialized_targets(&daemon, entry_id, search_id).1,
+            (None, Some(chunk_id.to_string()))
+        );
+
+        Delete.call(&daemon, json!({"id": block_id})).await.unwrap();
+
+        assert_eq!(
+            materialized_targets(&daemon, entry_id, search_id),
+            ((None, None), (None, None))
+        );
+    }
+
+    #[tokio::test]
+    async fn text_update_degrades_only_old_chunk_precision() {
+        let daemon = daemon();
+        let (entry_id, block_id, old_chunk_id, search_id) = seed_precise_feedback(&daemon);
+
+        Update
+            .call(
+                &daemon,
+                json!({"id": block_id, "text": "new block text with replacement chunk"}),
+            )
+            .await
+            .unwrap();
+
+        let new_chunk_id = daemon.chunks.list(block_id).unwrap().items[0].id;
+        assert_ne!(new_chunk_id, old_chunk_id);
+        let expected_block = Some(block_id.to_string());
+        assert_eq!(
+            materialized_targets(&daemon, entry_id, search_id),
+            ((expected_block.clone(), None), (expected_block, None),)
+        );
+    }
+
+    #[tokio::test]
+    async fn update_cleanup_failure_still_finalizes_nomai_mtime_embedding_and_cache() {
+        let daemon = daemon();
+        let (entry_id, block_id, _old_chunk_id, _search_id) = seed_precise_feedback(&daemon);
+        let conn = daemon.entries.conn_for_test();
+        conn.lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "UPDATE entries SET fs_mtime = '2000-01-01T00:00:00Z'
+                 WHERE id = '{entry_id}';
+                 CREATE TEMP TRIGGER fail_update_signal_cleanup
+                 BEFORE UPDATE OF matched_chunk_id ON search_session_results
+                 WHEN OLD.entry_id = '{entry_id}'
+                 BEGIN SELECT RAISE(ABORT, 'forced update signal cleanup failure'); END;"
+            ))
+            .unwrap();
+        let generation = daemon.search_cache.generation();
+
+        let error = Update
+            .call(
+                &daemon,
+                json!({"id": block_id, "text": "finalized replacement text"}),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, CoreError::Storage(_)));
+        assert_eq!(daemon.search_cache.generation(), generation + 1);
+        let doc = daemon.entries.content_store().read_entry(entry_id).unwrap();
+        assert_eq!(doc.blocks[0].text.trim_end(), "finalized replacement text");
+        let new_chunk_id = daemon.chunks.list(block_id).unwrap().items[0].id;
+        let conn = conn.lock().unwrap();
+        let indexed_mtime = conn
+            .query_row(
+                "SELECT fs_mtime FROM entries WHERE id = ?1",
+                [entry_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_ne!(indexed_mtime, "2000-01-01T00:00:00Z");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM vec_chunk_embeddings WHERE chunk_id = ?1",
+                [new_chunk_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_cleanup_failure_still_finalizes_nomai_mtime_and_cache() {
+        let daemon = daemon();
+        let (entry_id, block_id, _chunk_id, _search_id) = seed_precise_feedback(&daemon);
+        let conn = daemon.entries.conn_for_test();
+        conn.lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "UPDATE entries SET fs_mtime = '2000-01-01T00:00:00Z'
+                 WHERE id = '{entry_id}';
+                 CREATE TEMP TRIGGER fail_delete_signal_cleanup
+                 BEFORE UPDATE ON search_session_results
+                 WHEN OLD.entry_id = '{entry_id}'
+                 BEGIN SELECT RAISE(ABORT, 'forced delete signal cleanup failure'); END;"
+            ))
+            .unwrap();
+        let generation = daemon.search_cache.generation();
+
+        let error = Delete
+            .call(&daemon, json!({"id": block_id}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, CoreError::Storage(_)));
+        assert_eq!(daemon.search_cache.generation(), generation + 1);
+        let doc = daemon.entries.content_store().read_entry(entry_id).unwrap();
+        assert!(doc.blocks.is_empty());
+        let indexed_mtime = conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT fs_mtime FROM entries WHERE id = ?1",
+                [entry_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_ne!(indexed_mtime, "2000-01-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn metadata_only_update_retains_valid_chunk_precision() {
+        let daemon = daemon();
+        let (entry_id, block_id, chunk_id, search_id) = seed_precise_feedback(&daemon);
+
+        Update
+            .call(
+                &daemon,
+                json!({"id": block_id, "attrs": {"reviewed": true}}),
+            )
+            .await
+            .unwrap();
+
+        let expected = (Some(block_id.to_string()), Some(chunk_id.to_string()));
+        assert_eq!(
+            materialized_targets(&daemon, entry_id, search_id),
+            (expected.clone(), expected)
+        );
+        assert_eq!(daemon.chunks.list(block_id).unwrap().items[0].id, chunk_id);
+    }
+
+    #[tokio::test]
+    async fn equal_text_update_retains_precise_chunk_ids() {
+        let daemon = daemon();
+        let (entry_id, block_id, chunk_id, search_id) = seed_precise_feedback(&daemon);
+
+        Update
+            .call(&daemon, json!({"id": block_id, "text": "old block text"}))
+            .await
+            .unwrap();
+
+        let expected = (Some(block_id.to_string()), Some(chunk_id.to_string()));
+        assert_eq!(
+            materialized_targets(&daemon, entry_id, search_id),
+            (expected.clone(), expected)
+        );
+        assert_eq!(daemon.chunks.list(block_id).unwrap().items[0].id, chunk_id);
     }
 }

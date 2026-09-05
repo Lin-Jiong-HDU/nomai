@@ -7,8 +7,8 @@ use serde_json::Value;
 use nomai_core::CoreError;
 use nomai_protocol::RpcError;
 use nomai_protocol::error::{
-    CONFIG_ERROR, ENTRY_NOT_FOUND, FS_ERROR, INTERNAL_ERROR, NOMAI_FORMAT_ERROR, PROVIDER_ERROR,
-    SYNC_ERROR, VALIDATION_ERROR,
+    CONFIG_ERROR, CONFLICT_ERROR, ENTRY_NOT_FOUND, FS_ERROR, INTERNAL_ERROR, NOMAI_FORMAT_ERROR,
+    PROVIDER_ERROR, SYNC_ERROR, VALIDATION_ERROR,
 };
 use serde_json::json;
 
@@ -77,8 +77,21 @@ pub fn core_error_to_rpc_ref(err: &CoreError) -> RpcError {
             message: "entry not found".into(),
             data: Some(json!({ "id": id.to_string() })),
         },
+        CoreError::ResourceNotFound { resource, id } => RpcError {
+            code: ENTRY_NOT_FOUND,
+            message: format!("{resource} not found"),
+            data: Some(json!({
+                "resource": resource,
+                "id": id.to_string(),
+            })),
+        },
         CoreError::Validation(msg) => RpcError {
             code: VALIDATION_ERROR,
+            message: msg.clone(),
+            data: None,
+        },
+        CoreError::Conflict(msg) => RpcError {
+            code: CONFLICT_ERROR,
             message: msg.clone(),
             data: None,
         },
@@ -144,7 +157,32 @@ mod tests {
         let id: ulid::Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
         let rpc = core_error_to_rpc(CoreError::NotFound(id));
         assert_eq!(rpc.code, 1001);
-        assert!(rpc.data.unwrap().get("id").is_some());
+        assert_eq!(rpc.message, "entry not found");
+        let data = rpc.data.unwrap();
+        assert_eq!(data["id"], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert!(data.get("resource").is_none());
+    }
+
+    #[test]
+    fn resource_not_found_maps_to_1001_with_resource_and_id() {
+        let id: ulid::Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let rpc = core_error_to_rpc(CoreError::ResourceNotFound {
+            resource: "search session",
+            id,
+        });
+        assert_eq!(rpc.code, ENTRY_NOT_FOUND);
+        assert_eq!(rpc.message, "search session not found");
+        let data = rpc.data.unwrap();
+        assert_eq!(data["resource"], "search session");
+        assert_eq!(data["id"], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    }
+
+    #[test]
+    fn conflict_maps_to_1008_with_message() {
+        let rpc = core_error_to_rpc(CoreError::Conflict("search session expired".into()));
+        assert_eq!(rpc.code, nomai_protocol::error::CONFLICT_ERROR);
+        assert_eq!(rpc.message, "search session expired");
+        assert!(rpc.data.is_none());
     }
 
     #[test]

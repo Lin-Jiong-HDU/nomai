@@ -19,6 +19,8 @@ pub struct Config {
     #[serde(default)]
     pub chunking: ChunkingConfig,
     #[serde(default)]
+    pub memory: MemoryConfig,
+    #[serde(default)]
     pub development: DevelopmentConfig,
     #[serde(default)]
     pub reranking: RerankingConfig,
@@ -132,6 +134,145 @@ fn default_chunk_target_size() -> usize {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    pub enabled: bool,
+    pub half_life_days: f64,
+    pub decay_floor: f64,
+    pub max_reinforcements: u8,
+    pub session_ttl_hours: i64,
+    pub affinity_similarity_threshold: f64,
+    pub affinity_weight: f64,
+    pub affinity_candidate_limit: usize,
+    pub entry_recency_weight: f64,
+    pub entry_reinforcement_factors: Vec<f64>,
+    pub affinity_reinforcement_factors: Vec<f64>,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        let policy = nomai_core::MemoryPolicy::default();
+        Self {
+            enabled: policy.enabled,
+            half_life_days: policy.half_life_days,
+            decay_floor: policy.decay_floor,
+            max_reinforcements: policy.max_reinforcements,
+            session_ttl_hours: policy.session_ttl_hours,
+            affinity_similarity_threshold: policy.affinity_similarity_threshold,
+            affinity_weight: policy.affinity_weight,
+            affinity_candidate_limit: policy.affinity_candidate_limit,
+            entry_recency_weight: policy.entry_recency_weight,
+            entry_reinforcement_factors: policy.entry_reinforcement_factors,
+            affinity_reinforcement_factors: policy.affinity_reinforcement_factors,
+        }
+    }
+}
+
+impl MemoryConfig {
+    pub fn to_policy(&self) -> nomai_core::MemoryPolicy {
+        nomai_core::MemoryPolicy {
+            enabled: self.enabled,
+            half_life_days: self.half_life_days,
+            decay_floor: self.decay_floor,
+            max_reinforcements: self.max_reinforcements,
+            session_ttl_hours: self.session_ttl_hours,
+            affinity_similarity_threshold: self.affinity_similarity_threshold,
+            affinity_weight: self.affinity_weight,
+            affinity_candidate_limit: self.affinity_candidate_limit,
+            entry_recency_weight: self.entry_recency_weight,
+            entry_reinforcement_factors: self.entry_reinforcement_factors.clone(),
+            affinity_reinforcement_factors: self.affinity_reinforcement_factors.clone(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !self.half_life_days.is_finite() || self.half_life_days <= 0.0 {
+            return Err(ConfigError::Invalid(
+                "memory.half_life_days must be > 0".into(),
+            ));
+        }
+        if !(self.decay_floor.is_finite() && 0.0 < self.decay_floor && self.decay_floor <= 1.0) {
+            return Err(ConfigError::Invalid(
+                "memory.decay_floor must be in (0, 1]".into(),
+            ));
+        }
+        if !(1..=3).contains(&self.max_reinforcements) {
+            return Err(ConfigError::Invalid(
+                "memory.max_reinforcements must be in 1..=3".into(),
+            ));
+        }
+        if self.session_ttl_hours <= 0 {
+            return Err(ConfigError::Invalid(
+                "memory.session_ttl_hours must be > 0".into(),
+            ));
+        }
+        if !self.affinity_similarity_threshold.is_finite()
+            || !(0.0..1.0).contains(&self.affinity_similarity_threshold)
+        {
+            return Err(ConfigError::Invalid(
+                "memory.affinity_similarity_threshold must be in [0, 1)".into(),
+            ));
+        }
+        if !self.affinity_weight.is_finite() || self.affinity_weight < 0.0 {
+            return Err(ConfigError::Invalid(
+                "memory.affinity_weight must be >= 0".into(),
+            ));
+        }
+        if self.affinity_candidate_limit == 0 {
+            return Err(ConfigError::Invalid(
+                "memory.affinity_candidate_limit must be > 0".into(),
+            ));
+        }
+        if !self.entry_recency_weight.is_finite()
+            || !(0.0..=1.0).contains(&self.entry_recency_weight)
+        {
+            return Err(ConfigError::Invalid(
+                "memory.entry_recency_weight must be in [0, 1]".into(),
+            ));
+        }
+
+        let expected = usize::from(self.max_reinforcements) + 1;
+        if self.entry_reinforcement_factors.len() != expected
+            || self.affinity_reinforcement_factors.len() != expected
+        {
+            return Err(ConfigError::Invalid(format!(
+                "memory factor arrays must contain {expected} values"
+            )));
+        }
+        if !self
+            .entry_reinforcement_factors
+            .iter()
+            .chain(&self.affinity_reinforcement_factors)
+            .all(|factor| factor.is_finite() && *factor >= 0.0)
+        {
+            return Err(ConfigError::Invalid(
+                "memory reinforcement factors must be finite and non-negative".into(),
+            ));
+        }
+        if !self
+            .entry_reinforcement_factors
+            .windows(2)
+            .all(|window| window[0] <= window[1])
+            || !self
+                .affinity_reinforcement_factors
+                .windows(2)
+                .all(|window| window[0] <= window[1])
+        {
+            return Err(ConfigError::Invalid(
+                "memory reinforcement factors must be non-decreasing".into(),
+            ));
+        }
+
+        // Keep Daemon config aligned with Core if Core adds another policy
+        // invariant. The checks above retain config-specific diagnostics for
+        // every currently documented range and array rule.
+        self.to_policy()
+            .validate()
+            .map_err(|error| ConfigError::Invalid(error.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ServeConfig {
     /// Seconds the resident daemon stays alive after the last client
     /// disconnects before exiting (debounce). Default 30.
@@ -234,6 +375,7 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        self.memory.validate()?;
         if std::env::var(&self.embedding.api_key_env).is_err() {
             return Err(ConfigError::MissingEnv(self.embedding.api_key_env.clone()));
         }
@@ -328,6 +470,38 @@ model = "gpt-4o-mini"
         config
     }
 
+    fn load_test_config_with_memory(memory: &str) -> Result<Config, ConfigError> {
+        let old = unset("TEST_MEMORY_CONFIG_KEY");
+        // SAFETY: tests are single-threaded within this module.
+        unsafe { std::env::set_var("TEST_MEMORY_CONFIG_KEY", "sk-test") };
+
+        let toml_text = format!(
+            r#"
+[data]
+db_path = "/tmp/test-memory.sqlite"
+
+[embedding]
+base_url = "https://example.com/v1"
+api_key_env = "TEST_MEMORY_CONFIG_KEY"
+model = "test-embedding"
+dim = 8
+
+[llm]
+base_url = "https://example.com/v1"
+api_key_env = "TEST_MEMORY_CONFIG_KEY"
+model = "test-llm"
+
+{memory}
+"#
+        );
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), toml_text).unwrap();
+        let result = Config::load_from(tmp.path());
+
+        restore("TEST_MEMORY_CONFIG_KEY", old);
+        result
+    }
+
     fn config_with_development(enabled: bool, cases_dir: PathBuf) -> Config {
         let mut config = parse_test_config_without_development();
         config.development = DevelopmentConfig {
@@ -348,6 +522,218 @@ model = "gpt-4o-mini"
         assert_eq!(config.data.db_path, PathBuf::from("/tmp/test.sqlite"));
         // [chunking] section absent → default 1024 (backward compat).
         assert_eq!(config.chunking.target_size, 1024);
+    }
+
+    #[test]
+    fn memory_defaults_when_section_is_missing() {
+        let _guard = lock();
+        let config = parse_test_config_without_development();
+
+        assert!(config.memory.enabled);
+        assert_eq!(config.memory.half_life_days, 30.0);
+        assert_eq!(config.memory.decay_floor, 0.10);
+        assert_eq!(config.memory.max_reinforcements, 3);
+        assert_eq!(config.memory.session_ttl_hours, 24);
+        assert_eq!(config.memory.affinity_similarity_threshold, 0.82);
+        assert_eq!(config.memory.affinity_weight, 1.0);
+        assert_eq!(config.memory.affinity_candidate_limit, 2);
+        assert_eq!(config.memory.entry_recency_weight, 0.30);
+        assert_eq!(
+            config.memory.entry_reinforcement_factors,
+            vec![1.00, 1.10, 1.17, 1.22]
+        );
+        assert_eq!(
+            config.memory.affinity_reinforcement_factors,
+            vec![0.00, 0.70, 0.90, 1.00]
+        );
+    }
+
+    #[test]
+    fn memory_complete_custom_section_parses_and_maps_to_policy() {
+        let _guard = lock();
+        let config = load_test_config_with_memory(
+            r#"
+[memory]
+enabled = false
+half_life_days = 45.5
+decay_floor = 0.2
+max_reinforcements = 2
+session_ttl_hours = 48
+affinity_similarity_threshold = 0.75
+affinity_weight = 1.5
+affinity_candidate_limit = 5
+entry_recency_weight = 0.4
+entry_reinforcement_factors = [1.0, 1.2, 1.3]
+affinity_reinforcement_factors = [0.0, 0.6, 0.8]
+"#,
+        )
+        .unwrap();
+
+        assert!(!config.memory.enabled);
+        assert_eq!(config.memory.half_life_days, 45.5);
+        assert_eq!(config.memory.decay_floor, 0.2);
+        assert_eq!(config.memory.max_reinforcements, 2);
+        assert_eq!(config.memory.session_ttl_hours, 48);
+        assert_eq!(config.memory.affinity_similarity_threshold, 0.75);
+        assert_eq!(config.memory.affinity_weight, 1.5);
+        assert_eq!(config.memory.affinity_candidate_limit, 5);
+        assert_eq!(config.memory.entry_recency_weight, 0.4);
+        assert_eq!(
+            config.memory.entry_reinforcement_factors,
+            vec![1.0, 1.2, 1.3]
+        );
+        assert_eq!(
+            config.memory.affinity_reinforcement_factors,
+            vec![0.0, 0.6, 0.8]
+        );
+
+        let policy = config.memory.to_policy();
+        assert!(!policy.enabled);
+        assert_eq!(policy.half_life_days, 45.5);
+        assert_eq!(policy.decay_floor, 0.2);
+        assert_eq!(policy.max_reinforcements, 2);
+        assert_eq!(policy.session_ttl_hours, 48);
+        assert_eq!(policy.affinity_similarity_threshold, 0.75);
+        assert_eq!(policy.affinity_weight, 1.5);
+        assert_eq!(policy.affinity_candidate_limit, 5);
+        assert_eq!(policy.entry_recency_weight, 0.4);
+        assert_eq!(policy.entry_reinforcement_factors, vec![1.0, 1.2, 1.3]);
+        assert_eq!(policy.affinity_reinforcement_factors, vec![0.0, 0.6, 0.8]);
+    }
+
+    #[test]
+    fn memory_rejects_invalid_ranges_and_factor_arrays() {
+        let _guard = lock();
+        let cases = [
+            ("half_life_days = 0.0", "memory.half_life_days must be > 0"),
+            ("half_life_days = -1.0", "memory.half_life_days must be > 0"),
+            ("half_life_days = nan", "memory.half_life_days must be > 0"),
+            ("half_life_days = inf", "memory.half_life_days must be > 0"),
+            ("half_life_days = -inf", "memory.half_life_days must be > 0"),
+            ("decay_floor = 0.0", "memory.decay_floor must be in (0, 1]"),
+            ("decay_floor = -0.1", "memory.decay_floor must be in (0, 1]"),
+            ("decay_floor = 1.1", "memory.decay_floor must be in (0, 1]"),
+            ("decay_floor = nan", "memory.decay_floor must be in (0, 1]"),
+            ("decay_floor = inf", "memory.decay_floor must be in (0, 1]"),
+            ("decay_floor = -inf", "memory.decay_floor must be in (0, 1]"),
+            (
+                "max_reinforcements = 0",
+                "memory.max_reinforcements must be in 1..=3",
+            ),
+            (
+                "max_reinforcements = 4",
+                "memory.max_reinforcements must be in 1..=3",
+            ),
+            (
+                "session_ttl_hours = 0",
+                "memory.session_ttl_hours must be > 0",
+            ),
+            (
+                "session_ttl_hours = -1",
+                "memory.session_ttl_hours must be > 0",
+            ),
+            (
+                "affinity_similarity_threshold = -0.1",
+                "memory.affinity_similarity_threshold must be in [0, 1)",
+            ),
+            (
+                "affinity_similarity_threshold = 1.0",
+                "memory.affinity_similarity_threshold must be in [0, 1)",
+            ),
+            (
+                "affinity_similarity_threshold = nan",
+                "memory.affinity_similarity_threshold must be in [0, 1)",
+            ),
+            (
+                "affinity_similarity_threshold = inf",
+                "memory.affinity_similarity_threshold must be in [0, 1)",
+            ),
+            (
+                "affinity_similarity_threshold = -inf",
+                "memory.affinity_similarity_threshold must be in [0, 1)",
+            ),
+            (
+                "affinity_weight = -0.1",
+                "memory.affinity_weight must be >= 0",
+            ),
+            (
+                "affinity_weight = nan",
+                "memory.affinity_weight must be >= 0",
+            ),
+            (
+                "affinity_weight = inf",
+                "memory.affinity_weight must be >= 0",
+            ),
+            (
+                "affinity_weight = -inf",
+                "memory.affinity_weight must be >= 0",
+            ),
+            (
+                "affinity_candidate_limit = 0",
+                "memory.affinity_candidate_limit must be > 0",
+            ),
+            (
+                "entry_recency_weight = -0.1",
+                "memory.entry_recency_weight must be in [0, 1]",
+            ),
+            (
+                "entry_recency_weight = 1.1",
+                "memory.entry_recency_weight must be in [0, 1]",
+            ),
+            (
+                "entry_recency_weight = nan",
+                "memory.entry_recency_weight must be in [0, 1]",
+            ),
+            (
+                "entry_recency_weight = inf",
+                "memory.entry_recency_weight must be in [0, 1]",
+            ),
+            (
+                "entry_recency_weight = -inf",
+                "memory.entry_recency_weight must be in [0, 1]",
+            ),
+            (
+                "entry_reinforcement_factors = [1.0, 1.1, 1.2]",
+                "memory factor arrays must contain 4 values",
+            ),
+            (
+                "affinity_reinforcement_factors = [0.0, 0.7, 0.9]",
+                "memory factor arrays must contain 4 values",
+            ),
+            (
+                "entry_reinforcement_factors = [1.0, 1.2, 1.1, 1.3]",
+                "memory reinforcement factors must be non-decreasing",
+            ),
+            (
+                "affinity_reinforcement_factors = [0.0, 0.9, 0.8, 1.0]",
+                "memory reinforcement factors must be non-decreasing",
+            ),
+            (
+                "entry_reinforcement_factors = [-0.1, 1.1, 1.17, 1.22]",
+                "memory reinforcement factors must be finite and non-negative",
+            ),
+            (
+                "entry_reinforcement_factors = [1.0, 1.1, 1.17, inf]",
+                "memory reinforcement factors must be finite and non-negative",
+            ),
+            (
+                "affinity_reinforcement_factors = [-inf, 0.7, 0.9, 1.0]",
+                "memory reinforcement factors must be finite and non-negative",
+            ),
+            (
+                "affinity_reinforcement_factors = [nan, 0.7, 0.9, 1.0]",
+                "memory reinforcement factors must be finite and non-negative",
+            ),
+        ];
+
+        for (override_line, expected) in cases {
+            let section = format!("[memory]\n{override_line}");
+            let error = load_test_config_with_memory(&section).unwrap_err();
+            assert!(
+                matches!(error, ConfigError::Invalid(ref message) if message == expected),
+                "override `{override_line}` returned `{error}`"
+            );
+        }
     }
 
     #[test]

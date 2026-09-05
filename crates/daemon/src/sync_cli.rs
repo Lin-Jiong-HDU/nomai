@@ -36,7 +36,7 @@ pub enum SyncCmd {
 /// Never panics: connect / IO / parse failures map to `CoreError`; the CLI
 /// exits non-zero via `main`'s error → `ExitCode::FAILURE` path.
 pub async fn run(config: Config, cmd: SyncCmd) -> Result<(), CoreError> {
-    let db_path = crate::daemon::expand_db_path(&config.data.db_path)?;
+    let db_path = crate::daemon::resolved_db_path(&config)?;
     let (socket_path, _pidfile) = socket::socket_paths(&db_path)
         .map_err(|e| CoreError::Config(format!("socket paths: {e}")))?;
     let mut stream = ensure_connected(&socket_path).await?;

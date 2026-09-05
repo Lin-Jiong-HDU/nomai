@@ -8,8 +8,14 @@ pub enum CoreError {
     #[error("entry not found: {0}")]
     NotFound(Ulid),
 
+    #[error("{resource} not found: {id}")]
+    ResourceNotFound { resource: &'static str, id: Ulid },
+
     #[error("validation error: {0}")]
     Validation(String),
+
+    #[error("conflict: {0}")]
+    Conflict(String),
 
     #[error("provider error: {0}")]
     Provider(#[from] nomai_protocol::ProviderError),
@@ -49,6 +55,25 @@ mod tests {
             err.to_string(),
             "entry not found: 01ARZ3NDEKTSV4RRFFQ69G5FAV"
         );
+    }
+
+    #[test]
+    fn resource_not_found_displays_resource_and_ulid() {
+        let id: Ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+        let err = CoreError::ResourceNotFound {
+            resource: "search session",
+            id,
+        };
+        assert_eq!(
+            err.to_string(),
+            "search session not found: 01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        );
+    }
+
+    #[test]
+    fn conflict_displays_message() {
+        let err = CoreError::Conflict("search session expired".into());
+        assert_eq!(err.to_string(), "conflict: search session expired");
     }
 
     #[test]

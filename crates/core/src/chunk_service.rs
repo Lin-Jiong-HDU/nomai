@@ -156,7 +156,7 @@ impl ChunkService {
 
         // Parse the dim baked into the existing CREATE VIRTUAL TABLE SQL.
         // Format: `... embedding FLOAT[N] distance_metric=cosine ...`
-        let actual_dim = parse_vec_dim(&sql).ok_or_else(|| {
+        let actual_dim = crate::storage::parse_vec_dim(&sql).ok_or_else(|| {
             CoreError::Storage(rusqlite::Error::InvalidParameterName(format!(
                 "cannot parse dim from vec_chunk_embeddings SQL: {sql}"
             )))
@@ -341,18 +341,6 @@ fn row_to_chunk(row: &rusqlite::Row<'_>, _offset: usize) -> rusqlite::Result<Chu
         updated_at: crate::storage::from_text(6, &updated_str, DateTime::parse_from_rfc3339)?
             .with_timezone(&Utc),
     })
-}
-
-/// Parse the embedding dim from a vec0 CREATE VIRTUAL TABLE SQL.
-/// Matches the first `FLOAT[N]` token in the SQL text (the embedding
-/// column declaration). Returns `None` if no token is found or the inner
-/// text isn't a valid `usize`.
-fn parse_vec_dim(sql: &str) -> Option<usize> {
-    let marker = "FLOAT[";
-    let start = sql.find(marker)? + marker.len();
-    let rest = &sql[start..];
-    let end = rest.find(']')?;
-    rest[..end].parse().ok()
 }
 
 #[cfg(test)]

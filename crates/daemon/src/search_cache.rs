@@ -1,6 +1,6 @@
-//! SearchCache: in-memory cache for search.semantic / search.fulltext
-//! results. Generation-based invalidation; bump on every mutation
-//! that affects search results.
+//! SearchCache: in-memory cache for search.semantic / search.fulltext results
+//! and time-insensitive search.hybrid base candidates. Generation-based
+//! invalidation; bump on every mutation that affects search results.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,6 +27,8 @@ pub(crate) struct Key {
     pub(crate) generation: u64,
     pub(crate) rpc: SearchRpc,
     pub(crate) query_hash: [u8; 32],
+    /// Caller limit for ordinary searches; base recall width for adaptive
+    /// hybrid searches.
     pub(crate) limit: u32,
     pub(crate) block_type_hash: Option<u64>,
     pub(crate) tag_hash: Option<u64>,
@@ -63,8 +65,9 @@ pub(crate) fn hash_weights(fw: f32, sw: f32) -> u64 {
     u64::from_le_bytes(bytes)
 }
 
-/// Cached value. `Arc` so a hit path is one atomic increment (no deep
-/// clone of the `Vec<Value>`).
+/// Cached value. Adaptive hybrid callers store only base candidates here and
+/// clone before applying live memory, affinity, or transient factors. `Arc`
+/// makes a hit path one atomic increment (no deep clone of the `Vec<Value>`).
 pub(crate) type CachedResults = Arc<Vec<Value>>;
 
 /// In-process search-results cache. Lives in the daemon; core is unaware.
@@ -162,9 +165,11 @@ impl SearchCache {
     }
 
     /// Look up a cached result by `(rpc, query, limit, block_type, tag,
-    /// weights_hash)`. On hit, returns the cached `Arc<Vec<Value>>` (one
-    /// atomic increment). On miss, invokes `compute()`, persists the result,
-    /// and returns it. Failures from `compute()` propagate and are NOT cached.
+    /// weights_hash)`. For adaptive Hybrid calls, `limit` is the wider base
+    /// recall width rather than the caller's final result limit. On hit,
+    /// returns the cached `Arc<Vec<Value>>` (one atomic increment). On miss,
+    /// invokes `compute()`, persists the result, and returns it. Failures from
+    /// `compute()` propagate and are NOT cached.
     ///
     /// `block_type`/`tag: Option<&str>` — `None` means no filter; `Some(s)`
     /// is hashed (via shared `hash_opt`) so the key is fixed-size. None vs
@@ -323,6 +328,50 @@ mod tests {
             1,
             "compute_fn called once total (second was a hit)"
         );
+    }
+
+    #[tokio::test]
+    async fn hybrid_cache_retains_wide_time_insensitive_base_after_clone_is_ranked() {
+        let cache = mk_cache();
+        let base = (0..20)
+            .map(|rank| json!({"fusion_score": 1.0 / (61.0 + rank as f64)}))
+            .collect::<Vec<_>>();
+        let cached = cache
+            .lookup_or_compute(
+                SearchRpc::Hybrid,
+                "adaptive",
+                20,
+                None,
+                None,
+                Some(hash_weights(1.0, 1.0)),
+                || async move { Ok(base) },
+            )
+            .await
+            .unwrap();
+
+        let mut live_ranked = cached.as_ref().clone();
+        live_ranked[0]["score"] = json!(0.001);
+        live_ranked[0]["memory_factor"] = json!(0.73);
+        live_ranked.truncate(1);
+
+        let hit = cache
+            .lookup_or_compute(
+                SearchRpc::Hybrid,
+                "adaptive",
+                20,
+                None,
+                None,
+                Some(hash_weights(1.0, 1.0)),
+                || async { panic!("hybrid base should have been cached") },
+            )
+            .await
+            .unwrap();
+        assert_eq!(hit.len(), 20);
+        assert!(hit[0].get("score").is_none());
+        assert!(hit[0].get("memory_factor").is_none());
+        let stats = cache.stats();
+        assert_eq!(stats.hybrid_misses, 1);
+        assert_eq!(stats.hybrid_hits, 1);
     }
 
     #[tokio::test]

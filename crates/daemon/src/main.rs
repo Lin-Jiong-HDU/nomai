@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use nomai_core::storage;
 
+mod adaptive_search;
 mod benchmark;
 mod config;
 mod daemon;

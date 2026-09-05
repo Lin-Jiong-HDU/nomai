@@ -46,6 +46,7 @@ impl RpcHandler for Stats {
                 "by_rpc": {
                     "semantic": { "hits": s.semantic_hits, "misses": s.semantic_misses },
                     "fulltext": { "hits": s.fulltext_hits, "misses": s.fulltext_misses },
+                    "hybrid": { "hits": s.hybrid_hits, "misses": s.hybrid_misses },
                 },
             }
         }))
@@ -183,5 +184,107 @@ mod descriptor_tests {
     fn clear_schema_rejects_unknown_namespace() {
         let schema = Clear.input_schema().unwrap();
         assert!(validate(&schema, &json!({"namespace": "bogus"})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use nomai_core::EntryService;
+    use nomai_protocol::{ProviderError, ProviderErrorKind};
+    use nomai_providers::{CompletionRequest, CompletionResponse, EmbeddingProvider, LlmProvider};
+
+    use super::*;
+    use crate::daemon::DaemonBuilder;
+    use crate::search_cache::SearchRpc;
+
+    struct FakeEmbed;
+
+    #[async_trait]
+    impl EmbeddingProvider for FakeEmbed {
+        async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, ProviderError> {
+            Ok(vec![vec![1.0, 0.0, 0.0, 0.0]; texts.len()])
+        }
+
+        fn dim(&self) -> usize {
+            4
+        }
+
+        fn name(&self) -> &str {
+            "fake-embed"
+        }
+    }
+
+    struct FakeLlm;
+
+    #[async_trait]
+    impl LlmProvider for FakeLlm {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            Err(ProviderError::new(
+                ProviderErrorKind::Unknown,
+                "fake llm",
+                None,
+            ))
+        }
+
+        fn name(&self) -> &str {
+            "fake-llm"
+        }
+    }
+
+    fn daemon() -> Daemon {
+        let entries = Arc::new(EntryService::for_test().unwrap());
+        DaemonBuilder::new()
+            .conn(entries.conn_for_test())
+            .content_store(entries.content_store().clone())
+            .embedder(Arc::new(FakeEmbed))
+            .llm(Arc::new(FakeLlm))
+            .embedding_dim(4)
+            .chunk_target_size(1024)
+            .cache_model("active-model")
+            .warn_rows(100_000)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cache_stats_reports_hybrid_hits_and_misses_by_rpc() {
+        let daemon = daemon();
+        daemon
+            .search_cache
+            .lookup_or_compute(
+                SearchRpc::Hybrid,
+                "hybrid",
+                20,
+                None,
+                None,
+                Some(7),
+                || async { Ok(vec![json!({"entry": {"id": "cached"}})]) },
+            )
+            .await
+            .unwrap();
+        daemon
+            .search_cache
+            .lookup_or_compute(
+                SearchRpc::Hybrid,
+                "hybrid",
+                20,
+                None,
+                None,
+                Some(7),
+                || async { panic!("second lookup must hit the hybrid cache") },
+            )
+            .await
+            .unwrap();
+
+        let stats = Stats.call(&daemon, json!({})).await.unwrap();
+
+        assert_eq!(stats["searches"]["by_rpc"]["hybrid"]["hits"], 1);
+        assert_eq!(stats["searches"]["by_rpc"]["hybrid"]["misses"], 1);
     }
 }

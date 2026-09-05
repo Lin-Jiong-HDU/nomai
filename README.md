@@ -41,7 +41,7 @@ On Windows, download the `x86_64-pc-windows-msvc.zip` archive, extract `nomai-da
 | **Chunks**       | Block-derived pieces for embedding              | Long-document RAG, fine-grained retrieval   |
 | **Conversation** | Turn-by-turn agent dialogue storage             | Agent session history, chat logs, memory    |
 
-**Retrieval:** `search.hybrid` fuses FTS5 BM25 and vector cosine similarity via Reciprocal Rank Fusion. `search.fulltext` and `search.semantic` are also available individually. An optional `rewrite: "expand"` parameter resolves pronouns before search. `rerank.rerank` provides LLM-based post-retrieval relevance scoring.
+**Retrieval:** `search.hybrid` fuses FTS5 BM25 and vector cosine similarity via Reciprocal Rank Fusion. With `[memory].enabled`, hybrid retrieval also learns from explicit positive `search.feedback` calls: it softly decays and boosts Entry strength, and can associate similar future queries with returned Entries. These signals are local SQLite state, not another storage primitive or Git-synced knowledge; the daemon enforces that `db_path` is outside `knowledge_root`. `search.fulltext` and `search.semantic` remain available individually and unchanged. An optional `rewrite: "expand"` parameter resolves pronouns before search. `rerank.rerank` provides LLM-based post-retrieval relevance scoring.
 
 ## Quick start
 

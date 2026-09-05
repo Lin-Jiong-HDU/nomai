@@ -9,6 +9,7 @@
 //!   1005             filesystem error
 //!   1006             .nomai parse error
 //!   1007             sync error (conflict)
+//!   1008             resource conflict
 
 // JSON-RPC 2.0 reserved range.
 pub const PARSE_ERROR: i32 = -32700;
@@ -25,6 +26,7 @@ pub const CONFIG_ERROR: i32 = 1004;
 pub const FS_ERROR: i32 = 1005;
 pub const NOMAI_FORMAT_ERROR: i32 = 1006;
 pub const SYNC_ERROR: i32 = 1007;
+pub const CONFLICT_ERROR: i32 = 1008;
 
 /// Canonical messages for the JSON-RPC reserved range. Business errors
 /// carry their own messages and do not have constants here.
@@ -56,6 +58,7 @@ mod tests {
         assert_eq!(CONFIG_ERROR, 1004);
         assert_eq!(FS_ERROR, 1005);
         assert_eq!(NOMAI_FORMAT_ERROR, 1006);
+        assert_eq!(CONFLICT_ERROR, 1008);
     }
 
     #[test]

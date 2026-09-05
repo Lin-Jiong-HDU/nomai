@@ -21,6 +21,7 @@ pub mod search {
     pub const FULLTEXT: &str = "search.fulltext";
     pub const SEMANTIC: &str = "search.semantic";
     pub const HYBRID: &str = "search.hybrid";
+    pub const FEEDBACK: &str = "search.feedback";
 }
 
 pub mod provider {
@@ -178,6 +179,7 @@ mod tests {
         assert_eq!(search::FULLTEXT, "search.fulltext");
         assert_eq!(search::SEMANTIC, "search.semantic");
         assert_eq!(search::HYBRID, "search.hybrid");
+        assert_eq!(search::FEEDBACK, "search.feedback");
     }
 
     #[test]

@@ -21,7 +21,7 @@ use rusqlite::Connection;
 use nomai_core::EntryService;
 use nomai_core::storage;
 use nomai_daemon::config::Config;
-use nomai_daemon::config::default_knowledge_root;
+use nomai_daemon::daemon::resolve_configured_data_paths;
 use nomai_providers::{
     ChatMessage, CompletionRequest, EmbeddingProvider, LlmProvider, MessageRole,
     OpenAiCompatibleEmbed, OpenAiCompatibleLlm,
@@ -37,19 +37,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Load config + open the same SQLite store the daemon uses.
     let config = Config::load()?;
-    if let Some(parent) = config.data.db_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
+    let (db_path, knowledge_root) = resolve_configured_data_paths(&config)?;
     storage::init_sqlite_extensions();
-    let conn = Arc::new(Mutex::new(Connection::open(&config.data.db_path)?));
-    let knowledge_root = config
-        .data
-        .knowledge_root
-        .clone()
-        .unwrap_or_else(default_knowledge_root);
-    std::fs::create_dir_all(&knowledge_root)?;
+    let conn = Arc::new(Mutex::new(Connection::open(db_path)?));
     let content_store = Arc::new(nomai_core::ContentStore::new(knowledge_root));
     // EntryService is constructed to run migrations + share the connection;
     // not called directly in this example (chunks drive search).

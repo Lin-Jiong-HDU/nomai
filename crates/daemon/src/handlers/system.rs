@@ -188,6 +188,7 @@ mod restart_tests {
             cache: CacheConfig::default(),
             serve: ServeConfig::default(),
             chunking: ChunkingConfig::default(),
+            memory: crate::config::MemoryConfig::default(),
             development: DevelopmentConfig::default(),
             reranking: crate::config::RerankingConfig::default(),
         }

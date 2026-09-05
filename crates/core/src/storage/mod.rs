@@ -9,6 +9,18 @@ use rusqlite::Connection;
 
 use crate::error::CoreError;
 
+/// Parse the embedding dim from a vec0 CREATE VIRTUAL TABLE SQL.
+/// Matches the first `FLOAT[N]` token in the SQL text (the embedding
+/// column declaration). Returns `None` if no token is found or the inner
+/// text isn't a valid `usize`.
+pub(crate) fn parse_vec_dim(sql: &str) -> Option<usize> {
+    let marker = "FLOAT[";
+    let start = sql.find(marker)? + marker.len();
+    let rest = &sql[start..];
+    let end = rest.find(']')?;
+    rest[..end].parse().ok()
+}
+
 /// Run all pending migrations on the given connection. Idempotent.
 ///
 /// Calls `init_sqlite_extensions()` first so V9's `CREATE VIRTUAL TABLE …
@@ -595,5 +607,78 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn v12_migration_creates_adaptive_memory_signal_schema() {
+        init_sqlite_extensions();
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        for table in [
+            "search_sessions",
+            "search_session_results",
+            "search_feedback",
+            "entry_memory_stats",
+            "query_affinities",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "V12 should create {table}");
+        }
+
+        let expression_index_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'query_affinities_exact_target'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            expression_index_exists, 1,
+            "V12 should create the exact-target index"
+        );
+
+        for (index, expected_columns) in [
+            (
+                "idx_search_sessions_expiry",
+                vec!["expires_at", "created_at", "id"],
+            ),
+            ("idx_search_session_results_entry", vec!["entry_id"]),
+            ("idx_search_session_results_block", vec!["matched_block_id"]),
+            ("idx_search_session_results_chunk", vec!["matched_chunk_id"]),
+            ("idx_search_feedback_entry", vec!["entry_id"]),
+            ("idx_query_affinities_entry", vec!["entry_id"]),
+            ("idx_query_affinities_block", vec!["block_id"]),
+            ("idx_query_affinities_chunk", vec!["chunk_id"]),
+        ] {
+            let columns = conn
+                .prepare(&format!("PRAGMA index_info('{index}')"))
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(2))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(columns, expected_columns, "V12 index {index}");
+        }
+
+        let affinity_vec_table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'vec_query_affinities'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            affinity_vec_table_exists, 0,
+            "V12 must not create the runtime-managed affinity vec table"
+        );
     }
 }

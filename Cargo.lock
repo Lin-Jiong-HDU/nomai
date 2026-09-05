@@ -1083,6 +1083,7 @@ dependencies = [
 name = "nomai-core"
 version = "0.4.5"
 dependencies = [
+ "blake3",
  "chrono",
  "nomai-protocol",
  "refinery",

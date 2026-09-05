@@ -19,6 +19,7 @@ For project overview and install, see the [README](../README.md) first.
   - [Links](#links)
   - [Events](#events)
   - [Chunks](#chunks)
+- [Adaptive hybrid memory](#adaptive-hybrid-memory)
 - [Storage layer separation (lib-mode users)](#storage-layer-separation-lib-mode-users)
 - [Sync (multi-device)](#sync-multi-device)
 - [Machine-specific content](#machine-specific-content)
@@ -229,6 +230,57 @@ A block can be split into N chunks, each embedded independently. This unlocks fi
 
 ---
 
+## Adaptive hybrid memory
+
+Adaptive memory is a local ranking layer for `search.hybrid`, enabled by the
+`[memory].enabled` configuration setting. It is not a seventh primitive and
+does not alter `search.fulltext` or `search.semantic`. A hybrid result can
+receive two independent learned signals:
+
+- **Entry strength** is a soft, general preference for an Entry that has
+  received explicit positive feedback. Its reinforcement count is capped, but
+  each new accepted receipt refreshes its timestamp. It is never deletion or
+  a permanent suppression: strength follows an exponential 30-day half-life
+  by default and is floored at 0.10, so old Entries remain eligible.
+- **Query affinity** associates the effective query embedding with a returned
+  Entry (and, when still valid, its matched Block/Chunk). On a sufficiently
+  similar later query, it can improve that Entry and add a bounded number of
+  learned-only supplements to hybrid results.
+
+Learning is explicit and positive-only. A search does not infer feedback from
+clicks, reads, or omission; the caller must submit the Entries its model judged
+correct. The normal client flow is:
+
+```text
+hybrid search -> search_id -> model identifies correct returned Entries
+              -> search.feedback -> future similar hybrid search improves
+```
+
+The `search_id` records the query and returned targets for 24 hours. Feedback
+can only name an Entry returned by that search; any supplied Block or Chunk
+must be the recorded match and still belong to that Entry. In a hybrid result,
+the fulltext Block and semantic Chunk may come from different Blocks: a
+Chunk-only target follows the Chunk's actual parent, while supplying both IDs
+requires them to agree. Retries are safe even after reindexing or later Block
+mutation: feedback is idempotent for each `(search_id, entry_id)` receipt and
+does not revalidate stale precision or refresh a timestamp once accepted.
+
+The learned rows live only in the device's SQLite database. They are not
+written into `.nomai` files and do not cross `--sync` or Git boundaries. A
+daemon will reject any `db_path` equal to or nested below `knowledge_root`
+(including symlink-equivalent paths), and `db_path` does not accept SQLite
+`file:` URI filenames, enforcing that privacy boundary. A
+clean `index.sync` or `index.rebuild` preserves the Entry association and its
+strength, but regenerated Block and Chunk IDs can no longer be trusted, so
+their learned precision degrades to Entry-only. A partial rebuild intentionally
+keeps its existing signals and skips both reconciliation and query-affinity
+re-embedding until content recovery is complete.
+
+For exact request/response shapes, scoring fields, and configuration, see the
+[adaptive search reference](reference.md#adaptive-hybrid-search).
+
+---
+
 ## Storage layer separation (lib-mode users)
 
 `BlockService` (and `EntryService`) mutate the SQLite index and chunks/embeddings, but **do NOT touch the `.nomai` file**. The daemon's RPC handlers wrap each mutation with `rerender_entry_nomai` so the FS file stays consistent.
@@ -286,7 +338,9 @@ What syncs and what doesn't:
 - **`db.sqlite` is never committed** — it is a derived index. Each device
   rebuilds its own local index from the reconciled filesystem at the end of
   every `--sync` (via `index.sync`), so the SQLite files on different
-  machines are independent and disposable.
+  machines are independent. The daemon refuses to start or derive a resident
+  socket when `db_path` is inside `knowledge_root`, so local queries, feedback,
+  and adaptive signals cannot accidentally enter the Git work tree.
 - **Startup re-embeds automatically.** On boot the daemon reconciles FS →
   index and re-embeds any changed chunks (`startup_sync`), so after a
   `git clone` + restart `search.semantic` returns hits immediately — no

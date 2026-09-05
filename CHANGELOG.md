@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The minimum supported Rust version is now 1.88.
+
 ### Added
+
+- Adaptive `search.hybrid` memory: explicit positive `search.feedback`,
+  capped-and-refreshed Entry/query reinforcement, and soft floored exponential
+  decay. Adaptive signals live only in local SQLite; they are not `.nomai`
+  content and do not sync through Git. `search.fulltext` and
+  `search.semantic` remain unchanged.
 
 - **Automated release binaries.** GitHub Actions now builds and attaches
   precompiled `nomai-daemon` archives for Linux x86_64/ARM64, macOS
@@ -15,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file, whenever a GitHub Release is published.
 
 ### Fixed
+
+- **Adaptive-memory final-review hardening.** Feedback is retry-safe across
+  reindexing, validates active embedding model/dimension atomically, derives
+  Chunk-only precision from the semantic Chunk, preserves stored count history,
+  clamps future-dated decay, and cleans signals after bulk deletion. Index
+  lifecycle errors no longer leave stale cache generations or empty rebuilt
+  Chunk vectors. Startup now rejects file databases inside `knowledge_root`,
+  including SQLite `file:` URI bypasses; cache stats include hybrid, and V12
+  adds cleanup/expiry indexes.
 
 - **Release asset upload now works without a checkout.** The final upload
   step passes the repository explicitly to `gh release upload`, so the

@@ -14,6 +14,7 @@ Complete reference for the JSON-RPC API, error codes, configuration, and cache i
   - [events.\*](#events-methods)
   - [chunk.\*](#chunk-methods)
   - [search.\*](#search-methods)
+  - [Adaptive hybrid search](#adaptive-hybrid-search)
   - [provider.\*](#provider-methods)
   - [batch.\*](#batch)
   - [cache.\*](#cache)
@@ -124,7 +125,8 @@ Note: `chunk.create` / `chunk.delete` constants exist in `protocol::method::chun
 | ----------------- | ------------------------------------------------------------------------------ | --------------------------- | ------------------------------------------------------------------------ |
 | `search.fulltext` | `query`, `limit?`(10), `block_type?`                                           | `{items: [{entry, score}]}` | Match against `fts_blocks`; optional `block_type` filter                 |
 | `search.semantic` | `query`, `limit?`(10), `granularity?`("entry"=default\|"chunk"), `block_type?` | `{items}`                   | Chunk-level KNN via `vec_chunk_embeddings`; optional `block_type` filter |
-| `search.hybrid`   | —                                                                              | —                           | **Reserved**: returns -32601                                             |
+| `search.hybrid`   | `query`, `limit?`(10), `block_type?`, `tag?`, `fulltext_weight?`(1.0), `semantic_weight?`(1.0), `rewrite?`, `rewrite_context?` | `{items}` or `{search_id, items}` | FTS5 + semantic RRF; adaptive response when `[memory].enabled` |
+| `search.feedback` | `search_id`, `targets: [{entry_id, block_id?, chunk_id?}]`                    | `{applied, already_applied}` | Explicit positive feedback for results of an adaptive hybrid search |
 
 **Block type filter**: `block_type` accepts one of `claim` / `evidence` / `question` / `source` / `note` / `connection` / `image`. Omit for all types. Example: `search.fulltext` with `block_type: "claim"` returns only matches in claim blocks.
 
@@ -132,6 +134,118 @@ Note: `chunk.create` / `chunk.delete` constants exist in `protocol::method::chun
 
 - `granularity="entry"` (default): `{items: [{entry: Entry, score: f32}]}` — backward compatible
 - `granularity="chunk"`: `{items: [{chunk: Chunk, score: f32}]}` — chunks contain `entry_id` for mapping back
+
+### Adaptive hybrid search
+
+`search.hybrid` always fuses fulltext and semantic candidates with Reciprocal
+Rank Fusion (`k = 60`). When `[memory].enabled = false`, it returns the legacy
+`{items}` shape and applies no adaptive ranking. When enabled, it returns a
+fresh search session and adaptive diagnostics:
+
+```json
+{
+  "search_id": "01...",
+  "items": [{
+    "entry": { "id": "01..." },
+    "fusion_score": 0.031,
+    "fulltext_rank": 1,
+    "fulltext_score": 4.2,
+    "semantic_rank": 2,
+    "semantic_score": 0.88,
+    "matched_block": { "id": "01...", "type": "note", "snippet": "..." },
+    "matched_chunk": { "id": "01...", "text": "..." },
+    "affinity_score": 0.004,
+    "memory_factor": 1.10,
+    "signals": {
+      "reinforcement_count": 2,
+      "last_reinforced_at": "2026-09-04T00:00:00Z",
+      "affinity_matched": true
+    },
+    "score": 0.0385
+  }]
+}
+```
+
+`fusion_score` and the per-retriever ranks/scores diagnose the ordinary RRF
+candidate. `affinity_score` is the best matching learned query association for
+that Entry; `memory_factor` is the time-decayed Entry-strength multiplier; and
+`score` is the final sort score:
+
+```text
+score = (fusion_score + affinity_score) * memory_factor * transient_factor
+```
+
+`transient_factor` remains the existing `0.5` penalty for transient Entries
+and `1.0` otherwise. The response may include up to
+`memory.affinity_candidate_limit` learned-only supplements; those have
+`fusion_score: 0.0`. One Entry contributes only its strongest affinity, so
+multiple learned examples do not stack. Tag, block-type, and benchmark
+visibility filters also apply to affinity candidates.
+
+Entry strength uses a floored exponential decay. With the defaults,
+`decay = clamp(2^(-age_days / 30), 0.10, 1.0)`; the upper bound keeps
+future-dated creation or reinforcement timestamps from boosting decay above
+one. The Entry factor blends that decay
+with `memory.entry_recency_weight` and the capped reinforcement factor. Query
+affinity separately requires cosine similarity at or above
+`memory.affinity_similarity_threshold` and decays from its own reinforcement
+timestamp.
+
+`search.fulltext` and `search.semantic` do not create `search_id` values,
+record feedback sessions, or expose adaptive fields; their request and
+response shapes are unchanged.
+
+#### `search.feedback`
+
+Submit only after the caller has selected one or more correct Entries from the
+adaptive hybrid response:
+
+```json
+{
+  "search_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "targets": [{
+    "entry_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+    "block_id": "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+    "chunk_id": "01ARZ3NDEKTSV4RRFFQ69G5FAY"
+  }]
+}
+```
+
+`targets` must be non-empty and have at most one target per Entry. Every
+`entry_id` must have been returned for that `search_id`. If present,
+`block_id` and `chunk_id` must match the corresponding recorded result and
+still be owned by that Entry. Hybrid fulltext and semantic matches may come
+from different Blocks: a Chunk-only target derives the Chunk's current parent,
+while a target supplying both IDs requires the Chunk to belong to that Block.
+An Entry-only target is valid when no precise target is supplied.
+
+The response distinguishes new receipts from a retry:
+
+```json
+{
+  "applied": [{
+    "entry_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+    "reinforcement_count": 2,
+    "affinity_count": 2,
+    "last_reinforced_at": "2026-09-04T00:00:00Z"
+  }],
+  "already_applied": ["01ARZ3NDEKTSV4RRFFQ69G5FAW"]
+}
+```
+
+Feedback is positive-only and idempotent per `(search_id, entry_id)`. A new
+receipt increments each count only up to `memory.max_reinforcements` and
+refreshes its timestamp even after the cap; an idempotent retry returns the
+Entry in `already_applied` without revalidating precision or making another
+update. Stored history is never reduced when a lower active cap is configured:
+the cap controls future increments and score-factor lookup only, and counts up
+to the schema maximum of three remain available if the cap is later raised.
+Feedback also requires the session's embedding model and dimension to match
+the active daemon; an old-provider session returns conflict `1008` before any
+receipt or signal write. Search sessions expire
+after `memory.session_ttl_hours` (24 hours by default). Feedback against an
+expired retained session returns error `1008`; routine cleanup can later
+remove it, after which its `search_id` is not found (`1001`).
 
 ### provider.{#provider-methods}
 
@@ -181,11 +295,11 @@ Each `BatchOp` has `{id?: string, method: string, params: object}`. The `id` fie
 
 ### cache.{#cache}
 
-Embedding cache and search results cache introspection/management. The embedding cache is a transparent wrapper around the configured embedding provider; it persists `(model, blake3(body)) → embedding` in the `emb_cache` SQLite table so identical bodies never trigger duplicate API calls. The search cache is an in-memory wrapper around `search.semantic` / `search.fulltext` that skips the FTS5/KNN work when the same query is repeated within the current generation.
+Embedding cache and search results cache introspection/management. The embedding cache is a transparent wrapper around the configured embedding provider; it persists `(model, blake3(body)) → embedding` in the `emb_cache` SQLite table so identical bodies never trigger duplicate API calls. The search cache wraps `search.semantic`, `search.fulltext`, and the time-insensitive base-recall phase of `search.hybrid`; live decay, affinity, session creation, and final hybrid ranking are recomputed on every call.
 
 | Method        | Params                                                                                                                                 | Returns                                                                                                                                      |
 | ------------- | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cache.stats` | —                                                                                                                                      | `{embeddings: {...}, searches: {generation, entries, hits, misses, hit_rate, by_rpc: {semantic: {hits, misses}, fulltext: {hits, misses}}}}` |
+| `cache.stats` | —                                                                                                                                      | `{embeddings: {...}, searches: {generation, entries, hits, misses, hit_rate, by_rpc: {semantic: {hits, misses}, fulltext: {hits, misses}, hybrid: {hits, misses}}}}` |
 | `cache.clear` | `{namespace?: "embeddings" \| "searches" \| "all", model?: string, before?: RFC3339, keep_recent?: N}` — all optional, freely combined | `{embeddings: {cleared, by_model} \| null, searches: {cleared} \| null}`                                                                     |
 
 **`cache.stats` — `embeddings` block fields**:
@@ -199,11 +313,11 @@ Embedding cache and search results cache introspection/management. The embedding
 
 - `generation` is the current invalidation generation (monotonically increasing; every `entry.*` / `block.*` / `index.*` mutation bumps it atomically)
 - `entries` is the number of cached search results currently held in memory
-- `hits` / `misses` are lifetime counters across both `search.semantic` and `search.fulltext`
+- `hits` / `misses` are lifetime counters across `search.semantic`, `search.fulltext`, and cached hybrid base recall
 - `hit_rate` is `hits / (hits + misses)` over the daemon's lifetime (0.0 when both are zero)
-- `by_rpc.semantic.{hits,misses}` and `by_rpc.fulltext.{hits,misses}` break the counters out per RPC kind
+- `by_rpc.semantic.{hits,misses}`, `by_rpc.fulltext.{hits,misses}`, and `by_rpc.hybrid.{hits,misses}` break the counters out per RPC kind
 
-Cached search results are keyed by `(generation, rpc, query_hash, limit, block_type_hash)`. Any `entry.*` / `block.*` / `index.*` mutation (`entry.create`/`update`/`delete`, `block.append`/`update`/`delete`, `index.sync`/`rebuild`) bumps `generation`, which invalidates every cached result atomically — the next search recomputes from current state. `chunk.*` and `link.*` do not bump. See [Search results cache](#search-results-cache) below.
+Cached search results are keyed by `(generation, rpc, query_hash, limit, block_type_hash, tag_hash, weights_hash)`. Hybrid uses its wider base-recall size as `limit` and includes fulltext/semantic weights; non-hybrid RPCs leave `weights_hash` empty. Any `entry.*` / `block.*` / `index.*` mutation (`entry.create`/`update`/`delete`, `block.append`/`update`/`delete`, `index.sync`/`rebuild`) bumps `generation`, which invalidates every cached result atomically — the next search recomputes from current state. `chunk.*` and `link.*` do not bump. See [Search results cache](#search-results-cache) below.
 
 **`cache.clear` — `namespace` parameter** (default `"embeddings"`, for backward compatibility):
 
@@ -346,7 +460,7 @@ Example MCP handshake:
 | -------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `-32700` | Parse error      | Invalid JSON in request                                                                                                                                                                                                                                                                                                                                        |
 | `-32600` | Invalid request  | Not a valid JSON-RPC request object                                                                                                                                                                                                                                                                                                                            |
-| `-32601` | Method not found | Unknown method, or reserved method (`search.hybrid`, `provider.set`, `link.traverse`)                                                                                                                                                                                                                                                                          |
+| `-32601` | Method not found | Unknown method, or reserved method (`provider.set`, `link.traverse`)                                                                                                                                                                                                                                                                                           |
 | `-32602` | Invalid params   | Malformed params                                                                                                                                                                                                                                                                                                                                               |
 | `-32603` | Internal error   | Unexpected server error                                                                                                                                                                                                                                                                                                                                        |
 | `1001`   | NotFound         | Entry / link / event / chunk id does not exist                                                                                                                                                                                                                                                                                                                 |
@@ -356,6 +470,7 @@ Example MCP handshake:
 | `1005`   | FS error         | Filesystem I/O failure (data has `kind` field from `io::ErrorKind`)                                                                                                                                                                                                                                                                                            |
 | `1006`   | .nomai format    | Parse error in a `.nomai` file (data has `parse_error` field)                                                                                                                                                                                                                                                                                                  |
 | `1007`   | Sync error       | Rebase conflict during `sync.run` (data has `conflicted_files` array); resolve in editor + `git add`, then re-run                                                                                                                                                                                                                                              |
+| `1008`   | Resource conflict | Adaptive feedback's retained search session has expired                                                                                                                                                                                                                                                                                                         |
 
 Error response shape:
 
@@ -380,6 +495,7 @@ Config lives at `~/.config/nomai/config.toml` (Linux), or override with `nomai-d
 ```toml
 [data]
 db_path = "~/.local/share/nomai/db.sqlite"   # ~ expansion supported
+knowledge_root = "~/.local/share/nomai/store" # optional; DB must be outside this tree
 attachment_max_bytes = 10485760              # 10 MiB default; decode-time cap on each attachment (1003 if exceeded)
 
 [embedding]
@@ -399,6 +515,19 @@ warn_rows   = 100000            # soft cap; cache.stats returns warning=true abo
 [chunking]
 target_size = 1024              # chunk char budget; paragraph → sentence → hard cut
 
+[memory]
+enabled = true                                  # adaptive ranking only for search.hybrid
+half_life_days = 30.0                           # exponential decay period
+decay_floor = 0.10                              # minimum decay multiplier
+max_reinforcements = 3                          # active increment/scoring cap (1..=3); never lowers stored history
+session_ttl_hours = 24                          # search_id feedback lifetime
+affinity_similarity_threshold = 0.82            # learned-query cosine cutoff [0, 1)
+affinity_weight = 1.0                           # learned-query score multiplier
+affinity_candidate_limit = 2                    # bounded learned-only supplements
+entry_recency_weight = 0.30                     # blend of floor/decay into Entry strength
+entry_reinforcement_factors = [1.00, 1.10, 1.17, 1.22]
+affinity_reinforcement_factors = [0.00, 0.70, 0.90, 1.00]
+
 [development]
 enabled = false                 # exposes benchmark.* only when true
 benchmark_cases_dir = "benchmark/cases"
@@ -413,9 +542,32 @@ set -Ux NOMAI_EMBEDDING_API_KEY "sk-..."
 set -Ux NOMAI_LLM_API_KEY "sk-..."
 ```
 
-**Changing `dim`**: requires deleting `db.sqlite` and re-creating all entries/embeddings. The dimension is fixed at table-creation time.
+**Data-path privacy boundary**: `db_path` must be outside `knowledge_root`.
+Startup resolves canonical paths (including symlinks) and rejects equality or
+nesting before opening/serving the database. Lib-mode daemon construction
+applies the same rule to file-backed SQLite connections reported by
+`PRAGMA database_list`; in-memory connections remain allowed. This keeps raw
+search text, feedback receipts, and adaptive signals out of `sync.run` commits.
+`db_path` accepts plain filesystem paths only; SQLite URI filenames beginning
+with `file:` are rejected before any file or parent directory is created.
+
+**Changing `dim` or the embedding model**: update the configuration, restart,
+then run `index.rebuild`. Startup recreates incompatible runtime vector tables
+but does not infer vectors from a later search and does not require deleting
+`db.sqlite`; `index.rebuild` re-derives Chunk vectors and re-embeds retained
+query affinities with the active provider. Feedback sessions created by the
+old model or dimension return conflict `1008`; run a new `search.hybrid` before
+submitting feedback.
 
 **Changing `chunking.target_size`**: takes effect on the next `entry.create` / `block.append` / `block.update`. Existing chunks keep the old size until you run `index.rebuild` (which re-derives chunks from `.nomai` files). Mixed sizes within a knowledge base are fine for retrieval but cause KNN distance variance — prefer one size per deployment.
+
+**Adaptive-memory storage and lifecycle**: `[memory]` defaults apply when the
+configuration section is absent. Its signals are stored only in local SQLite, never in
+`.nomai` files or Git sync. `index.sync` / a clean `index.rebuild` preserve
+Entry-level strength and affinity association, while invalid regenerated
+Block/Chunk references degrade to Entry-only. A partial rebuild preserves the
+existing signals and deliberately skips reconciliation and query-affinity
+re-embedding until the content rebuild completes.
 
 **Compatible endpoints**: any OpenAI-compatible `/v1/embeddings` and `/v1/chat/completions` endpoint works — OpenAI, DeepSeek, Moonshot, local Ollama, etc.
 
@@ -437,10 +589,14 @@ Three ways to find entries. Pick based on what you're matching.
 | **Fulltext**         | `search.fulltext`                   | Trigram substring (FTS5 bm25, ≥3 chars) or LIKE fallback (<3 chars) | Keyword search, exact terms, CJK phrases |
 | **Semantic (entry)** | `search.semantic` (default)         | Cosine similarity of entry embeddings                               | Concept search, "find similar"           |
 | **Semantic (chunk)** | `search.semantic granularity=chunk` | Cosine similarity of chunk embeddings                               | Long-doc RAG, sub-passage retrieval      |
+| **Hybrid**           | `search.hybrid`                     | RRF of fulltext + semantic; optional local adaptive ranking          | Broad retrieval with explicit feedback    |
 
 **Fulltext tokenizer**: `fts_blocks` uses SQLite FTS5's `trigram` tokenizer. CJK (Chinese/Japanese/Korean) text is matched by 3-character substring, so Chinese phrases now return matches. Queries of ≥3 characters go through FTS5 bm25 ranking. Queries of 1–2 characters (e.g. `"Go"`, `"管理"`) fall back to a `LIKE '%q%'` scan automatically — still case-insensitive and deduped to entries, but ordered by recency rather than relevance. For semantic matching on short terms, use `search.semantic`.
 
-**Combining modes**: nomai does not implement hybrid search (`search.hybrid` is reserved). For RRF fusion or re-ranking, fetch from multiple modes in your client and merge.
+**Hybrid and adaptive memory**: `search.hybrid` performs the RRF fusion. When
+`[memory].enabled` is true, it is the only retrieval mode that applies local
+adaptive ranking and returns a `search_id` for `search.feedback`. This does
+not change the behavior or shapes of `search.fulltext` or `search.semantic`.
 
 ---
 
@@ -504,14 +660,20 @@ Each row is ~8KB at 2048 dims (`dim × 4 bytes + 32B hash + metadata`), so 100K 
 
 ## Search results cache{#search-results-cache}
 
-Every `search.semantic` and `search.fulltext` call is wrapped in a transparent in-memory cache. Same query (same RPC, same query text, same limit, same block-type filter) within the current generation returns the previous result without re-running FTS5 or KNN. The cache is invalidated wholesale on any mutation.
+Every `search.semantic` and `search.fulltext` call is wrapped in a transparent
+in-memory cache. `search.hybrid` caches only its wider, time-insensitive base
+candidate recall; affinity lookup, decay, final ranking, and fresh
+`search_id` creation remain live on every call. Matching keys within the
+current generation avoid repeated FTS5/KNN work. The cache is invalidated
+wholesale on any mutation.
 
 **Why cache**: search results are deterministic functions of `(query, current index state)` for any given generation. Within a readheavy workload (the common case for a knowledge base — many queries between writes), the same query is often repeated by different agents/sessions, and re-running it just re-runs the same SQLite work. The cache turns the second call into a hash-map lookup.
 
-**Where it applies** — both read RPCs:
+**Where it applies** — three read RPCs:
 
 - `search.semantic` (entry and chunk granularity)
 - `search.fulltext`
+- `search.hybrid` (base candidates only; `base_recall_size = max(20, limit * 2)` when adaptive memory is enabled)
 
 **Transparency**: the cache wraps the search handlers inside `Daemon::dispatch`. Clients see no API change — same params in, same result out, just faster on a hit.
 
@@ -531,13 +693,14 @@ Cached entries are keyed by the current `generation`, so a bump effectively drop
 | ------------------------------- | --------------------------------------------------- |
 | `generation`                    | Current generation (bumps on every mutation)        |
 | `entries`                       | Cached results currently held in memory             |
-| `hits` / `misses`               | Lifetime counters across both RPCs                  |
+| `hits` / `misses`               | Lifetime counters across all three cached RPCs      |
 | `hit_rate`                      | `hits / (hits + misses)`, or 0.0 when both are zero |
 | `by_rpc.semantic.{hits,misses}` | Counters for `search.semantic`                      |
 | `by_rpc.fulltext.{hits,misses}` | Counters for `search.fulltext`                      |
+| `by_rpc.hybrid.{hits,misses}`   | Counters for hybrid base-recall lookups             |
 
 **Capacity**: in-memory, unbounded, never auto-evicted (only invalidated by generation bumps). A single cached entry is small (a key + a JSON result array), and a busy read workload produces a bounded working set of distinct queries — typical deployments won't see meaningful growth. If you want to drop everything, run `cache.clear({namespace: "searches"})`.
 
-**Cache key**: `(generation, rpc, query_hash, limit, block_type_hash)`. Two calls hit the cache only if all five match — different limit, different granularity, or a different generation all miss.
+**Cache key**: `(generation, rpc, query_hash, limit, block_type_hash, tag_hash, weights_hash)`. Hybrid stores its base-recall width in `limit` and hashes both retriever weights; semantic/fulltext leave `weights_hash` empty. Two calls hit only when every component matches.
 
 **Counter reset**: `hits` / `misses` are **not** reset by `cache.clear({namespace: "searches"})` — they reflect lifetime activity. Restart the daemon to reset them.

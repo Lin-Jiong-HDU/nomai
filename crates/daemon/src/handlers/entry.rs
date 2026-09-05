@@ -243,8 +243,15 @@ impl RpcHandler for Delete {
         let entries = daemon.entries.clone();
         blocking(move || entries.delete(p.id)).await??;
 
-        // Invalidate search cache.
+        // Content deletion has committed at this point. Invalidate even if
+        // the following local-signal cleanup reports a retryable error.
         daemon.search_cache.bump_generation();
+
+        // Adaptive-memory rows are local state rather than derived content,
+        // so EntryService's CASCADEs intentionally do not touch them. Only
+        // clean them after the full SQLite + filesystem deletion succeeded.
+        let memory = daemon.memory.clone();
+        blocking(move || memory.delete_entry_signals(id_for_ack)).await??;
 
         // Mirror block.delete ack shape — include the id.
         Ok(json!({ "deleted": true, "id": id_for_ack.to_string() }))
@@ -358,6 +365,17 @@ impl RpcHandler for PurgeTransient {
         // appear in cached hits). Bump generation so the next search recomputes.
         if !result.dry_run && !result.deleted_ids.is_empty() {
             daemon.search_cache.bump_generation();
+
+            let deleted_ids = result.deleted_ids.clone();
+            let memory = daemon.memory.clone();
+            if let Err(error) = blocking(move || memory.delete_entries_signals(&deleted_ids))
+                .await
+                .and_then(|result| result)
+            {
+                return Err(CoreError::Config(format!(
+                    "transient entries were deleted, but adaptive-memory cleanup failed: {error}; run index.sync or index.rebuild to retry reconciliation"
+                )));
+            }
         }
 
         if result.dry_run {
@@ -487,5 +505,294 @@ mod descriptor_tests {
         assert!(validate(&schema, &json!({})).is_ok());
         assert!(validate(&schema, &json!({"older_than_secs": 3600})).is_ok());
         assert!(validate(&schema, &json!({"dry_run": false})).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use nomai_core::{
+        BlockInput, CreateEntry, CreateSearchSession, EntryService, FeedbackTarget, MemoryPolicy,
+        SearchResultTarget,
+    };
+    use nomai_protocol::{ProviderError, ProviderErrorKind};
+    use nomai_providers::{CompletionRequest, CompletionResponse, EmbeddingProvider, LlmProvider};
+
+    use super::*;
+    use crate::daemon::DaemonBuilder;
+
+    struct FakeEmbed;
+
+    #[async_trait]
+    impl EmbeddingProvider for FakeEmbed {
+        async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, ProviderError> {
+            Ok(vec![vec![1.0, 0.0, 0.0, 0.0]; texts.len()])
+        }
+
+        fn dim(&self) -> usize {
+            4
+        }
+
+        fn name(&self) -> &str {
+            "fake-embed"
+        }
+    }
+
+    struct FakeLlm;
+
+    #[async_trait]
+    impl LlmProvider for FakeLlm {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            Err(ProviderError::new(
+                ProviderErrorKind::Unknown,
+                "fake llm",
+                None,
+            ))
+        }
+
+        fn name(&self) -> &str {
+            "fake-llm"
+        }
+    }
+
+    fn daemon() -> Daemon {
+        let entries = Arc::new(EntryService::for_test().unwrap());
+        DaemonBuilder::new()
+            .conn(entries.conn_for_test())
+            .content_store(entries.content_store().clone())
+            .embedder(Arc::new(FakeEmbed))
+            .llm(Arc::new(FakeLlm))
+            .embedding_dim(4)
+            .chunk_target_size(1024)
+            .cache_model("active-model")
+            .warn_rows(100_000)
+            .memory_policy(MemoryPolicy::default())
+            .build()
+            .unwrap()
+    }
+
+    fn seed_precise_feedback(daemon: &Daemon) -> (ulid::Ulid, ulid::Ulid) {
+        let entry = daemon
+            .entries
+            .create(CreateEntry {
+                title: "lifecycle target".into(),
+                blocks: vec![BlockInput {
+                    r#type: "note".into(),
+                    text: "entry lifecycle body".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+                attachments: None,
+            })
+            .unwrap();
+        let block_id = entry.blocks[0].id;
+        let chunk_id = daemon.chunks.list(block_id).unwrap().items[0].id;
+        let search_id = daemon
+            .memory
+            .create_search_session(CreateSearchSession {
+                raw_query_text: "raw lifecycle query".into(),
+                effective_query_text: "effective lifecycle query".into(),
+                query_embedding: vec![1.0, 0.0, 0.0, 0.0],
+                embedding_model: "active-model".into(),
+                results: vec![SearchResultTarget {
+                    entry_id: entry.id,
+                    matched_block_id: Some(block_id),
+                    matched_chunk_id: Some(chunk_id),
+                    result_rank: 1,
+                }],
+            })
+            .unwrap();
+        daemon
+            .memory
+            .apply_feedback(
+                search_id,
+                &[FeedbackTarget {
+                    entry_id: entry.id,
+                    block_id: Some(block_id),
+                    chunk_id: Some(chunk_id),
+                }],
+            )
+            .unwrap();
+        (entry.id, search_id)
+    }
+
+    #[tokio::test]
+    async fn delete_removes_every_local_signal_after_content_deletion() {
+        let daemon = daemon();
+        let (entry_id, search_id) = seed_precise_feedback(&daemon);
+
+        Delete.call(&daemon, json!({"id": entry_id})).await.unwrap();
+
+        let conn = daemon.entries.conn_for_test();
+        let conn = conn.lock().unwrap();
+        let counts = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM entry_memory_stats WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM query_affinities WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM vec_query_affinities),
+                    (SELECT COUNT(*) FROM search_feedback WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM search_session_results
+                     WHERE search_id = ?2 AND entry_id = ?1)",
+                rusqlite::params![entry_id.to_string(), search_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0, 0, 0));
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM search_sessions WHERE id = ?1",
+                [search_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "deleting one Entry removes its result, not the owning search session"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_cleanup_failure_still_invalidates_content_cache_and_returns_error() {
+        let daemon = daemon();
+        let (entry_id, _search_id) = seed_precise_feedback(&daemon);
+        let conn = daemon.entries.conn_for_test();
+        conn.lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_entry_signal_cleanup
+                 BEFORE DELETE ON query_affinities
+                 BEGIN SELECT RAISE(FAIL, 'forced signal cleanup failure'); END;",
+            )
+            .unwrap();
+        let generation = daemon.search_cache.generation();
+
+        let error = Delete
+            .call(&daemon, json!({"id": entry_id}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, CoreError::Storage(_)));
+        assert!(daemon.entries.get(entry_id).is_err());
+        assert!(!daemon.entries.content_store().entry_file(entry_id).exists());
+        assert_eq!(daemon.search_cache.generation(), generation + 1);
+        assert_eq!(
+            conn.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM query_affinities WHERE entry_id = ?1",
+                    [entry_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "failed cleanup remains retryable by later reconciliation"
+        );
+    }
+
+    #[tokio::test]
+    async fn purge_transient_removes_every_local_signal_after_content_deletion() {
+        let daemon = daemon();
+        let (entry_id, search_id) = seed_precise_feedback(&daemon);
+        daemon
+            .entries
+            .conn_for_test()
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE entries SET attrs = '{\"transient\":true}' WHERE id = ?1",
+                [entry_id.to_string()],
+            )
+            .unwrap();
+
+        let result = PurgeTransient
+            .call(&daemon, json!({"dry_run": false}))
+            .await
+            .unwrap();
+
+        assert_eq!(result["deleted"], 1);
+        assert_eq!(result["ids"], json!([entry_id.to_string()]));
+        let conn = daemon.entries.conn_for_test();
+        let counts = conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM entry_memory_stats WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM query_affinities WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM vec_query_affinities),
+                    (SELECT COUNT(*) FROM search_feedback WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM search_session_results
+                     WHERE search_id = ?2 AND entry_id = ?1)",
+                rusqlite::params![entry_id.to_string(), search_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn purge_transient_cleanup_failure_is_clear_after_cache_and_content_commit() {
+        let daemon = daemon();
+        let (entry_id, _search_id) = seed_precise_feedback(&daemon);
+        let conn = daemon.entries.conn_for_test();
+        conn.lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "UPDATE entries SET attrs = '{{\"transient\":true}}' WHERE id = '{entry_id}';
+                 CREATE TRIGGER fail_purge_signal_cleanup
+                 BEFORE DELETE ON query_affinities
+                 BEGIN SELECT RAISE(FAIL, 'forced purge signal cleanup failure'); END;"
+            ))
+            .unwrap();
+        let generation = daemon.search_cache.generation();
+
+        let error = PurgeTransient
+            .call(&daemon, json!({"dry_run": false}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CoreError::Config(message)
+                if message.contains("transient entries were deleted")
+                    && message.contains("adaptive-memory cleanup failed")
+        ));
+        assert!(daemon.entries.get(entry_id).is_err());
+        assert_eq!(daemon.search_cache.generation(), generation + 1);
+        assert_eq!(
+            conn.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM query_affinities WHERE entry_id = ?1",
+                    [entry_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "failed cleanup remains available to index reconciliation"
+        );
     }
 }

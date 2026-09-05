@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nomai_core::{BlockInput, CoreError, CreateEntry, EntryService};
+use nomai_core::{BlockInput, CoreError, CreateEntry, EntryService, MemorySignalsService};
 use nomai_providers::{ChatMessage, CompletionRequest, LlmProvider, MessageRole};
 use serde::Serialize;
 use serde_json::Value;
@@ -61,6 +61,7 @@ pub(crate) struct BenchmarkRuntime {
     catalog: BenchmarkCatalog,
     baselines: Vec<baseline::BaselineFile>,
     entries: Arc<EntryService>,
+    memory: Arc<MemorySignalsService>,
     state: Mutex<Option<ActiveRun>>,
     provider: Mutex<ProviderMetadata>,
 }
@@ -77,6 +78,7 @@ impl BenchmarkRuntime {
     pub(crate) fn new(
         config: crate::config::DevelopmentConfig,
         entries: Arc<EntryService>,
+        memory: Arc<MemorySignalsService>,
     ) -> Result<Self, CoreError> {
         let catalog = BenchmarkCatalog::load(&config)?;
         let baselines = baseline::load_baselines(&config, &catalog)?;
@@ -84,6 +86,7 @@ impl BenchmarkRuntime {
             catalog,
             baselines,
             entries,
+            memory,
             state: Mutex::new(None),
             provider: Mutex::new(ProviderMetadata::default()),
         })
@@ -104,7 +107,16 @@ impl BenchmarkRuntime {
     }
 
     pub(crate) fn recover_stale_entries(&self) -> Result<Vec<Ulid>, CoreError> {
-        self.entries.purge_benchmark_entries()
+        self.purge_fixture_entries_and_signals()
+    }
+
+    fn purge_fixture_entries_and_signals(&self) -> Result<Vec<Ulid>, CoreError> {
+        let deleted_ids = self.entries.purge_benchmark_entries()?;
+        // purge_benchmark_entries completes every Entry deletion before this
+        // reconciliation, so transient fixture IDs cannot survive in local
+        // adaptive-memory rows and temporary reindex states are never seen.
+        self.memory.reconcile_content_references()?;
+        Ok(deleted_ids)
     }
 
     pub(crate) fn is_active(&self) -> bool {
@@ -298,7 +310,7 @@ impl BenchmarkRuntime {
                 metrics: metrics::score_case(case, &trace, resolved),
             });
         }
-        if let Err(error) = self.entries.purge_benchmark_entries() {
+        if let Err(error) = self.purge_fixture_entries_and_signals() {
             *state = Some(active);
             return Err(error);
         }
@@ -336,7 +348,7 @@ impl BenchmarkRuntime {
             *state = Some(active);
             return Err(CoreError::Validation("invalid benchmark run id".into()));
         }
-        let deleted_ids = match self.entries.purge_benchmark_entries() {
+        let deleted_ids = match self.purge_fixture_entries_and_signals() {
             Ok(ids) => ids,
             Err(error) => {
                 *state = Some(active);
@@ -543,6 +555,10 @@ fn sorted_files(dir: &Path, extension: &str) -> Result<Vec<PathBuf>, CoreError> 
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use nomai_core::{
+        CreateSearchSession, FeedbackTarget, MemoryPolicy, MemorySignalsService,
+        SearchResultTarget, SystemClock,
+    };
     use nomai_providers::{
         CompletionRequest, CompletionResponse, ProviderError, ProviderErrorKind,
     };
@@ -617,7 +633,16 @@ judge = false
             benchmark_baselines_dir: baselines,
         };
         let entries = Arc::new(EntryService::for_test().unwrap());
-        let runtime = BenchmarkRuntime::new(config.clone(), entries.clone()).unwrap();
+        let memory = Arc::new(
+            MemorySignalsService::new(
+                entries.conn_for_test(),
+                MemoryPolicy::default(),
+                Arc::new(SystemClock),
+            )
+            .unwrap(),
+        );
+        memory.ensure_vec_query_affinities(4).unwrap();
+        let runtime = BenchmarkRuntime::new(config.clone(), entries.clone(), memory).unwrap();
         (root, entries, runtime, config)
     }
 
@@ -661,12 +686,86 @@ judge = false
     }
 
     #[test]
+    fn benchmark_abort_reconciles_signals_for_deleted_fixtures() {
+        let (_root, entries, runtime, _config) = test_runtime();
+        let memory = runtime.memory.clone();
+        let start = runtime.start("suite-1").unwrap();
+        let entry_id = runtime.active_fixture_entry_ids(&start.run_id).unwrap()[0];
+        let entry = entries.get_with_benchmark(entry_id).unwrap();
+        let block_id = entry.blocks[0].id;
+        let chunk_id = entries
+            .conn_for_test()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM chunks WHERE block_id = ?1",
+                [block_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+            .parse()
+            .unwrap();
+        let search_id = memory
+            .create_search_session(CreateSearchSession {
+                raw_query_text: "benchmark raw".into(),
+                effective_query_text: "benchmark effective".into(),
+                query_embedding: vec![1.0, 0.0, 0.0, 0.0],
+                embedding_model: "active-model".into(),
+                results: vec![SearchResultTarget {
+                    entry_id,
+                    matched_block_id: Some(block_id),
+                    matched_chunk_id: Some(chunk_id),
+                    result_rank: 1,
+                }],
+            })
+            .unwrap();
+        memory
+            .apply_feedback(
+                search_id,
+                &[FeedbackTarget {
+                    entry_id,
+                    block_id: Some(block_id),
+                    chunk_id: Some(chunk_id),
+                }],
+            )
+            .unwrap();
+
+        runtime.abort(&start.run_id).unwrap();
+
+        let conn = entries.conn_for_test();
+        let counts = conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM entry_memory_stats WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM query_affinities WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM search_feedback WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM search_session_results WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM vec_query_affinities)",
+                [entry_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0, 0, 0));
+    }
+
+    #[test]
     fn fresh_runtime_recovers_stale_benchmark_entries() {
         let (_root, entries, runtime, config) = test_runtime();
         let start = runtime.start("suite-1").unwrap();
         assert_eq!(entries.list(Default::default()).unwrap().total, 0);
 
-        let recovered = BenchmarkRuntime::new(config, entries.clone()).unwrap();
+        let recovered =
+            BenchmarkRuntime::new(config, entries.clone(), runtime.memory.clone()).unwrap();
         let deleted = recovered.recover_stale_entries().unwrap();
         assert_eq!(deleted.len(), 1);
         assert_eq!(entries.list(Default::default()).unwrap().total, 0);

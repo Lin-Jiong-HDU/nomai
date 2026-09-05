@@ -14,6 +14,8 @@ pub mod event_service;
 pub mod fts_query;
 pub mod link_model;
 pub mod link_service;
+pub mod memory_model;
+pub mod memory_service;
 pub mod model;
 pub mod nomai_format;
 pub mod nomai_format_util;
@@ -39,6 +41,12 @@ pub use link_model::{
     CreateLink, Direction, Link, ListLinkQuery, ListLinkResult, NeighborsQuery, NeighborsResult,
 };
 pub use link_service::LinkService;
+pub use memory_model::{
+    AffinityEmbeddingInput, AffinityEmbeddingPlan, AffinityHit, AppliedFeedback, Clock,
+    CreateSearchSession, EntryMemorySignal, FeedbackResult, FeedbackTarget, MemoryPolicy,
+    SearchResultTarget, SystemClock,
+};
+pub use memory_service::MemorySignalsService;
 pub use model::Entry;
 pub use nomai_format::{
     Block as NomaiBlock, BlockType, NomaiDoc, ParseError, parse as parse_nomai,

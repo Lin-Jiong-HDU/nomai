@@ -1,13 +1,14 @@
 //! Daemon: owns EntryService + providers; orchestrates RPC handlers.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params};
 
 use nomai_core::{
-    ChunkService, ContentStore, ConversationService, CoreError, EntryService, EventService,
-    LinkService, chunk_model::DimReconciliation,
+    ChunkService, Clock, ContentStore, ConversationService, CoreError, EntryService, EventService,
+    LinkService, MemoryPolicy, MemorySignalsService, SystemClock, chunk_model::DimReconciliation,
 };
 use nomai_providers::{
     CachedEmbedder, EmbeddingProvider, LLMReranker, LlmProvider, NoopReranker,
@@ -73,6 +74,9 @@ pub struct Daemon {
     pub(crate) events: Arc<EventService>,
     pub(crate) chunks: Arc<ChunkService>,
     pub(crate) conversations: Arc<ConversationService>,
+    // Readers land in feedback/search/lifecycle handlers in later tasks.
+    #[allow(dead_code)]
+    pub(crate) memory: Arc<MemorySignalsService>,
     /// Cached embedding provider. Transparent wrapper around the configured
     /// `OpenAiCompatibleEmbed` (or any `EmbeddingProvider` in lib mode) that
     /// persists embeddings in the `emb_cache` table. Accessed as both the
@@ -138,8 +142,10 @@ impl Daemon {
     /// Build a Daemon from a shared config. Used by `Daemon::new` and by
     /// `system.restart` (which rebuilds from the live daemon's config).
     pub async fn from_arc(config: Arc<Config>) -> Result<Self, CoreError> {
-        // Open SQLite (creating parent dir if needed).
-        let db_path = expand_db_path(&config.data.db_path)?;
+        // Resolve and compare both storage roots before SQLite opens the file.
+        // Adaptive-memory state and raw queries are local-only; allowing the DB
+        // beneath knowledge_root would make sync.run eligible to commit them.
+        let (db_path, knowledge_root) = resolve_configured_data_paths(&config)?;
         let conn = Connection::open(&db_path)?;
         // Defensive: single-daemon model won't hit SQLITE_BUSY in-process, but
         // if an external `sqlite3` CLI ever opens the db concurrently, wait up
@@ -147,17 +153,8 @@ impl Daemon {
         conn.pragma_update(None, "busy_timeout", 5000_u32)?;
         let conn = Arc::new(Mutex::new(conn));
 
-        // Construct FS-backed ContentStore from config.data.knowledge_root
-        // (or the default <data_dir>/store/). Created here so it can be
-        // shared across EntryService and index.sync.
-        let default_root = crate::config::default_knowledge_root();
-        let knowledge_root = expand_knowledge_root(
-            config
-                .data
-                .knowledge_root
-                .as_deref()
-                .unwrap_or(&default_root),
-        )?;
+        // Construct the FS-backed ContentStore from the already-validated
+        // knowledge_root so EntryService and index.sync share that path.
         let content_store = Arc::new(ContentStore::new(knowledge_root));
 
         // Run migrations + ensure vec_chunk_embeddings exist — entry-level
@@ -175,6 +172,11 @@ impl Daemon {
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
         let conversations = Arc::new(ConversationService::new(conn.clone())?);
+        let memory = Arc::new(MemorySignalsService::new(
+            conn.clone(),
+            config.memory.to_policy(),
+            Arc::new(SystemClock),
+        )?);
         let dim_result = chunks.ensure_vec_chunk_embeddings(config.embedding.dim)?;
         match dim_result {
             DimReconciliation::Created { dim } => {
@@ -186,10 +188,12 @@ impl Daemon {
             DimReconciliation::Recreated { from, to } => {
                 eprintln!(
                     "warn: recreated vec_chunk_embeddings (dim {from} → {to}); \
-                     embeddings will re-populate from emb_cache on next search"
+                     run index.rebuild to repopulate Chunk and adaptive-memory vectors"
                 );
             }
         }
+        memory.ensure_vec_query_affinities(config.embedding.dim)?;
+        memory.remove_stale_affinity_vectors(&config.embedding.model)?;
 
         // Read API keys (config.validate already checked env var presence).
         let embedding_key = std::env::var(&config.embedding.api_key_env).map_err(|_| {
@@ -243,6 +247,7 @@ impl Daemon {
             Some(Arc::new(crate::benchmark::BenchmarkRuntime::new(
                 config.development.clone(),
                 entries.clone(),
+                memory.clone(),
             )?))
         } else {
             None
@@ -262,6 +267,7 @@ impl Daemon {
             events,
             chunks,
             conversations,
+            memory,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
             benchmark,
@@ -318,6 +324,18 @@ impl Daemon {
         let chunks = Arc::new(ChunkService::new(conn3).unwrap());
         let conn4 = entries.conn_for_test();
         let conversations = Arc::new(ConversationService::new(conn4).unwrap());
+        let memory = Arc::new(
+            MemorySignalsService::new(
+                entries.conn_for_test(),
+                MemoryPolicy::default(),
+                Arc::new(SystemClock),
+            )
+            .unwrap(),
+        );
+        memory.ensure_vec_query_affinities(embedding_dim).unwrap();
+        memory
+            .remove_stale_affinity_vectors(&embedding_model)
+            .unwrap();
         // Wrap embedder in CachedEmbedder using the shared connection so
         // tests exercise the same code path as production.
         let cache = Arc::new(CachedEmbedder::new(
@@ -332,7 +350,7 @@ impl Daemon {
         // test entries are typically created via the service (which embeds),
         // so the sync-only pass here is sufficient for the unit tests that
         // rely on `for_test`.
-        sync_index_from_fs_at_startup(&entries);
+        sync_index_from_fs_at_startup(&entries, &memory);
         // Share the EntryService's content_store so tests that assert on
         // daemon.content_store.root() see the same path EntryService uses.
         let content_store = entries.content_store().clone();
@@ -343,6 +361,7 @@ impl Daemon {
             events,
             chunks,
             conversations,
+            memory,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
             benchmark: None,
@@ -457,6 +476,37 @@ impl Daemon {
         warn_rows: u64,
         attachment_max_bytes: usize,
     ) -> Result<Self, CoreError> {
+        let cache_model = cache_model.into();
+        Self::from_services_inner(
+            conn,
+            content_store,
+            embedder,
+            llm,
+            embedding_dim,
+            chunk_target_size,
+            cache_model,
+            warn_rows,
+            attachment_max_bytes,
+            MemoryPolicy::default(),
+            Arc::new(SystemClock),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_services_inner(
+        conn: Arc<std::sync::Mutex<Connection>>,
+        content_store: Arc<ContentStore>,
+        embedder: Arc<dyn EmbeddingProvider>,
+        llm: Arc<dyn LlmProvider>,
+        embedding_dim: usize,
+        chunk_target_size: usize,
+        cache_model: String,
+        warn_rows: u64,
+        attachment_max_bytes: usize,
+        memory_policy: MemoryPolicy,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, CoreError> {
+        validate_connection_database_outside_knowledge_root(&conn, content_store.root())?;
         let entries = Arc::new(EntryService::new(
             conn.clone(),
             content_store.clone(),
@@ -467,7 +517,19 @@ impl Daemon {
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
         let conversations = Arc::new(ConversationService::new(conn.clone())?);
         chunks.ensure_vec_chunk_embeddings(embedding_dim)?;
-        let cache = Arc::new(CachedEmbedder::new(embedder, conn, cache_model, warn_rows));
+        let memory = Arc::new(MemorySignalsService::new(
+            conn.clone(),
+            memory_policy,
+            clock,
+        )?);
+        memory.ensure_vec_query_affinities(embedding_dim)?;
+        memory.remove_stale_affinity_vectors(&cache_model)?;
+        let cache = Arc::new(CachedEmbedder::new(
+            embedder,
+            conn,
+            cache_model.clone(),
+            warn_rows,
+        ));
         let handlers = crate::handlers::registry();
         Ok(Self {
             config: None,
@@ -476,12 +538,13 @@ impl Daemon {
             events,
             chunks,
             conversations,
+            memory,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
             benchmark: None,
             llm,
             reranker: Arc::new(NoopReranker),
-            embedding_model: String::new(),
+            embedding_model: cache_model,
             llm_model: String::new(),
             embedding_dim,
             chunk_target_size,
@@ -525,6 +588,7 @@ impl Daemon {
             let runtime = Arc::new(crate::benchmark::BenchmarkRuntime::new(
                 development,
                 daemon.entries.clone(),
+                daemon.memory.clone(),
             )?);
             runtime.set_provider_metadata(
                 "test",
@@ -558,7 +622,7 @@ impl Daemon {
     /// `index.sync` / `index.rebuild` RPCs propagate embed errors via `?`,
     /// but those are explicit; startup is not.)
     pub(crate) async fn startup_sync(&self) {
-        let sync_result = sync_index_from_fs_at_startup(self.entries());
+        let sync_result = sync_index_from_fs_at_startup(self.entries(), &self.memory);
         for id in &sync_result.reindexed_ids {
             if let Err(e) = crate::handlers::embed::embed_entry_chunks(self, *id, false).await {
                 eprintln!("warn: startup re-embed entry {id} failed: {e}");
@@ -782,6 +846,8 @@ pub struct DaemonBuilder {
     warn_rows: Option<u64>,
     attachment_max_bytes: Option<usize>,
     reranker: Option<Arc<dyn Reranker>>,
+    memory_policy: Option<MemoryPolicy>,
+    clock: Option<Arc<dyn Clock>>,
 }
 
 #[allow(dead_code)] // lib-mode extension point; binary daemon doesn't use this
@@ -798,6 +864,8 @@ impl DaemonBuilder {
             warn_rows: None,
             attachment_max_bytes: None,
             reranker: None,
+            memory_policy: None,
+            clock: None,
         }
     }
 
@@ -845,9 +913,19 @@ impl DaemonBuilder {
         self.reranker = Some(v);
         self
     }
+    /// Optional adaptive-memory policy. Defaults to the approved policy.
+    pub fn memory_policy(mut self, v: MemoryPolicy) -> Self {
+        self.memory_policy = Some(v);
+        self
+    }
+    /// Optional clock for deterministic memory behavior. Defaults to wall time.
+    pub fn clock(mut self, v: Arc<dyn Clock>) -> Self {
+        self.clock = Some(v);
+        self
+    }
 
     pub fn build(self) -> Result<Daemon, CoreError> {
-        let mut daemon = Daemon::from_services(
+        let mut daemon = Daemon::from_services_inner(
             self.conn
                 .ok_or_else(|| CoreError::Config("DaemonBuilder: conn required".into()))?,
             self.content_store
@@ -868,6 +946,8 @@ impl DaemonBuilder {
             // Default to the production cap when the builder omitted it; this
             // mirrors Daemon::new (config.data.attachment_max_bytes default).
             self.attachment_max_bytes.unwrap_or(10 * 1024 * 1024),
+            self.memory_policy.unwrap_or_default(),
+            self.clock.unwrap_or_else(|| Arc::new(SystemClock)),
         )?;
         if let Some(reranker) = self.reranker {
             daemon.reranker = reranker;
@@ -882,8 +962,125 @@ impl Default for DaemonBuilder {
     }
 }
 
+fn canonicalize_resolved_path(path: &Path, label: &str) -> Result<PathBuf, CoreError> {
+    let mut candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| CoreError::Config(format!("resolve {label}: {error}")))?
+            .join(path)
+    };
+    let mut missing_suffix = Vec::new();
+
+    loop {
+        match std::fs::canonicalize(&candidate) {
+            Ok(mut canonical) => {
+                for component in missing_suffix.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if std::fs::symlink_metadata(&candidate)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    return Err(CoreError::Config(format!(
+                        "resolve {label}: dangling symlink {}",
+                        candidate.display()
+                    )));
+                }
+                let component = candidate.file_name().ok_or_else(|| {
+                    CoreError::Config(format!(
+                        "resolve {label}: no existing ancestor for {}",
+                        path.display()
+                    ))
+                })?;
+                missing_suffix.push(component.to_os_string());
+                candidate = candidate
+                    .parent()
+                    .ok_or_else(|| {
+                        CoreError::Config(format!(
+                            "resolve {label}: no parent for {}",
+                            path.display()
+                        ))
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => {
+                return Err(CoreError::Config(format!(
+                    "resolve {label} {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+}
+
+fn validate_db_path_outside_knowledge_root(
+    db_path: &Path,
+    knowledge_root: &Path,
+) -> Result<(), CoreError> {
+    let canonical_db = canonicalize_resolved_path(db_path, "data.db_path")?;
+    let canonical_root = canonicalize_resolved_path(knowledge_root, "data.knowledge_root")?;
+    if canonical_db == canonical_root || canonical_db.starts_with(&canonical_root) {
+        return Err(CoreError::Config(format!(
+            "data.db_path must be outside data.knowledge_root so local adaptive-memory state is never content-synced: db_path={}, knowledge_root={}",
+            canonical_db.display(),
+            canonical_root.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve and validate the configured SQLite and knowledge-store paths.
+///
+/// Rejects SQLite URI filenames and databases located at or below the
+/// knowledge root before a caller opens the database.
+pub fn resolve_configured_data_paths(config: &Config) -> Result<(PathBuf, PathBuf), CoreError> {
+    let db_path = expand_db_path(&config.data.db_path)?;
+    let default_root = crate::config::default_knowledge_root();
+    let knowledge_root = expand_knowledge_root(
+        config
+            .data
+            .knowledge_root
+            .as_deref()
+            .unwrap_or(&default_root),
+    )?;
+    validate_db_path_outside_knowledge_root(&db_path, &knowledge_root)?;
+    Ok((db_path, knowledge_root))
+}
+
+fn validate_connection_database_outside_knowledge_root(
+    conn: &Arc<Mutex<Connection>>,
+    knowledge_root: &Path,
+) -> Result<(), CoreError> {
+    let main_db_path = {
+        let conn = conn.lock().unwrap();
+        let mut stmt = conn.prepare("PRAGMA database_list")?;
+        let databases = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        databases
+            .into_iter()
+            .find_map(|(name, file)| (name == "main").then_some(file))
+            .ok_or_else(|| CoreError::Config("SQLite main database is not attached".into()))?
+    };
+    if main_db_path.is_empty() {
+        return Ok(());
+    }
+    validate_db_path_outside_knowledge_root(Path::new(&main_db_path), knowledge_root)
+}
+
 pub fn expand_db_path(path: &std::path::Path) -> Result<std::path::PathBuf, CoreError> {
     let s = path.to_string_lossy();
+    if s.starts_with("file:") {
+        return Err(CoreError::Config(
+            "data.db_path must be a plain filesystem path; SQLite URI filenames (file:) are not supported"
+                .into(),
+        ));
+    }
     let expanded = if s.starts_with('~') {
         let home = std::env::var("HOME")
             .map(std::path::PathBuf::from)
@@ -892,11 +1089,11 @@ pub fn expand_db_path(path: &std::path::Path) -> Result<std::path::PathBuf, Core
     } else {
         path.to_path_buf()
     };
-    if let Some(parent) = expanded.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| CoreError::Config(format!("create db dir: {e}")))?;
-        }
+    if let Some(parent) = expanded.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CoreError::Config(format!("create db dir: {e}")))?;
     }
     Ok(expanded)
 }
@@ -934,11 +1131,25 @@ fn expand_knowledge_root(path: &std::path::Path) -> Result<std::path::PathBuf, C
 /// scan actually changed something (`added + updated + removed > 0`). A
 /// quiet boot — empty FS, or an FS already matching the index — produces
 /// no event so the audit log does not grow on every restart.
-fn sync_index_from_fs_at_startup(entries: &EntryService) -> nomai_core::SyncResult {
-    let sync_result = entries.sync_from_fs().unwrap_or_else(|e| {
-        eprintln!("warn: startup index.sync failed: {e}");
-        nomai_core::SyncResult::default()
-    });
+fn sync_index_from_fs_at_startup(
+    entries: &EntryService,
+    memory: &MemorySignalsService,
+) -> nomai_core::SyncResult {
+    let sync_result = match entries.sync_from_fs() {
+        Ok(sync_result) => {
+            // Only reconcile long-lived signal references after the complete
+            // sync pass. A failed mid-pass sync must not observe a temporary
+            // delete from reindex_one as a permanent content deletion.
+            if let Err(error) = memory.reconcile_content_references() {
+                eprintln!("warn: startup memory reconciliation failed: {error}");
+            }
+            sync_result
+        }
+        Err(error) => {
+            eprintln!("warn: startup index.sync failed: {error}");
+            return nomai_core::SyncResult::default();
+        }
+    };
     if sync_result.added > 0 || sync_result.updated > 0 || sync_result.removed > 0 {
         eprintln!(
             "info: index.synced: +{} ~{} -{} ({} unchanged)",
@@ -1075,7 +1286,7 @@ async fn sigterm_signal() {
 pub(crate) fn resolved_db_path(
     config: &crate::config::Config,
 ) -> Result<std::path::PathBuf, CoreError> {
-    expand_db_path(&config.data.db_path)
+    resolve_configured_data_paths(config).map(|(db_path, _knowledge_root)| db_path)
 }
 
 #[cfg(test)]
@@ -1083,9 +1294,94 @@ pub(crate) fn resolved_db_path(
 mod tests {
     use super::*;
 
-    use nomai_core::EntryService;
+    use nomai_core::{Clock, EntryService, MemoryPolicy};
     use nomai_providers::{EmbeddingProvider, LlmProvider};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    struct MemoryTestEmbed;
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for MemoryTestEmbed {
+        async fn embed(
+            &self,
+            _texts: &[&str],
+        ) -> Result<Vec<Vec<f32>>, nomai_protocol::ProviderError> {
+            Ok(vec![])
+        }
+
+        fn dim(&self) -> usize {
+            8
+        }
+
+        fn name(&self) -> &str {
+            "memory-test"
+        }
+    }
+
+    struct MemoryTestLlm;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for MemoryTestLlm {
+        async fn complete(
+            &self,
+            _req: nomai_providers::CompletionRequest,
+        ) -> Result<nomai_providers::CompletionResponse, nomai_protocol::ProviderError> {
+            Err(nomai_protocol::ProviderError::new(
+                nomai_protocol::ProviderErrorKind::Unknown,
+                "memory-test",
+                None,
+            ))
+        }
+
+        fn name(&self) -> &str {
+            "memory-test"
+        }
+    }
+
+    #[derive(Clone)]
+    struct MemoryTestClock(Arc<Mutex<chrono::DateTime<chrono::Utc>>>);
+
+    impl Clock for MemoryTestClock {
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    impl MemoryTestClock {
+        fn advance_days(&self, days: i64) {
+            *self.0.lock().unwrap() += chrono::Duration::days(days);
+        }
+    }
+
+    fn path_guard_config(
+        db_path: std::path::PathBuf,
+        knowledge_root: std::path::PathBuf,
+    ) -> Config {
+        Config {
+            data: crate::config::DataConfig {
+                db_path,
+                knowledge_root: Some(knowledge_root),
+                attachment_max_bytes: 10 * 1024 * 1024,
+            },
+            embedding: crate::config::EmbeddingConfig {
+                base_url: "https://example.invalid/v1".into(),
+                api_key_env: "NOMAI_PATH_GUARD_UNUSED_KEY".into(),
+                model: "path-guard-embed".into(),
+                dim: 8,
+            },
+            llm: crate::config::LlmConfig {
+                base_url: "https://example.invalid/v1".into(),
+                api_key_env: "NOMAI_PATH_GUARD_UNUSED_KEY".into(),
+                model: "path-guard-llm".into(),
+            },
+            cache: crate::config::CacheConfig::default(),
+            serve: crate::config::ServeConfig::default(),
+            chunking: crate::config::ChunkingConfig::default(),
+            memory: crate::config::MemoryConfig::default(),
+            development: crate::config::DevelopmentConfig::default(),
+            reranking: crate::config::RerankingConfig::default(),
+        }
+    }
 
     async fn null_daemon() -> super::Daemon {
         let entries = Arc::new(EntryService::for_test().unwrap());
@@ -1318,12 +1614,140 @@ mod tests {
     }
 
     #[test]
+    fn expand_db_path_rejects_sqlite_uri_filename() {
+        let error = expand_db_path(std::path::Path::new("file:state.sqlite?mode=rwc"))
+            .expect_err("SQLite URI filenames must be rejected before path expansion");
+        assert!(matches!(
+            error,
+            CoreError::Config(message)
+                if message.contains("SQLite URI") && message.contains("data.db_path")
+        ));
+    }
+
+    #[test]
     fn expand_knowledge_root_creates_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let nested = tmp.path().join("x/y/z/store");
         let expanded = expand_knowledge_root(&nested).unwrap();
         assert!(expanded.exists());
         assert!(expanded.is_dir());
+    }
+
+    #[tokio::test]
+    async fn from_arc_rejects_a_database_nested_under_knowledge_root_before_opening_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let knowledge_root = tmp.path().join("store");
+        let db_path = knowledge_root.join("private/state.sqlite");
+        let config = path_guard_config(db_path.clone(), knowledge_root);
+
+        let error = match Daemon::from_arc(Arc::new(config)).await {
+            Ok(_) => panic!("database under knowledge_root must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            CoreError::Config(message)
+                if message.contains("db_path") && message.contains("knowledge_root")
+        ));
+        assert!(
+            !db_path.exists(),
+            "path validation must precede SQLite open"
+        );
+    }
+
+    #[tokio::test]
+    async fn from_arc_rejects_sqlite_uri_before_creating_knowledge_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let knowledge_root = tmp.path().join("store");
+        let db_path = knowledge_root.join("private.sqlite");
+        let uri = std::path::PathBuf::from(format!("file:{}?mode=rwc", db_path.display()));
+        let config = path_guard_config(uri, knowledge_root.clone());
+
+        let error = match Daemon::from_arc(Arc::new(config)).await {
+            Ok(_) => panic!("SQLite URI filename must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            CoreError::Config(message)
+                if message.contains("SQLite URI") && message.contains("data.db_path")
+        ));
+        assert!(
+            !knowledge_root.exists(),
+            "URI validation must precede knowledge_root creation"
+        );
+        assert!(!db_path.exists(), "URI validation must precede SQLite open");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn from_arc_rejects_a_database_nested_via_a_symlinked_root_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let knowledge_root = tmp.path().join("actual-store");
+        std::fs::create_dir_all(&knowledge_root).unwrap();
+        let root_alias = tmp.path().join("store-alias");
+        std::os::unix::fs::symlink(&knowledge_root, &root_alias).unwrap();
+        let db_path = root_alias.join("private.sqlite");
+        let config = path_guard_config(db_path.clone(), knowledge_root);
+
+        let error = match Daemon::from_arc(Arc::new(config)).await {
+            Ok(_) => panic!("symlink-equivalent database path must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            CoreError::Config(message)
+                if message.contains("db_path") && message.contains("knowledge_root")
+        ));
+        assert!(
+            !db_path.exists(),
+            "path validation must precede SQLite open"
+        );
+    }
+
+    #[test]
+    fn lib_mode_rejects_file_database_reported_inside_knowledge_root() {
+        nomai_core::storage::init_sqlite_extensions();
+        let tmp = tempfile::tempdir().unwrap();
+        let knowledge_root = tmp.path().join("store");
+        std::fs::create_dir_all(&knowledge_root).unwrap();
+        let db_path = knowledge_root.join("lib-state.sqlite");
+        let conn = Arc::new(Mutex::new(Connection::open(&db_path).unwrap()));
+        let store = Arc::new(nomai_core::ContentStore::new(knowledge_root));
+
+        let error = match DaemonBuilder::new()
+            .conn(conn.clone())
+            .content_store(store)
+            .embedder(Arc::new(MemoryTestEmbed))
+            .llm(Arc::new(MemoryTestLlm))
+            .embedding_dim(8)
+            .chunk_target_size(1024)
+            .cache_model("path-guard-model")
+            .warn_rows(100_000)
+            .build()
+        {
+            Ok(_) => panic!("lib-mode database under knowledge_root must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            CoreError::Config(message)
+                if message.contains("db_path") && message.contains("knowledge_root")
+        ));
+        let table_count: i64 = conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0, "guard must run before service migrations");
     }
 
     #[tokio::test]
@@ -1385,6 +1809,73 @@ mod tests {
 
         // Sanity: handlers registry is populated (same as from_services path).
         assert!(daemon.handlers.contains_key("entry.create"));
+    }
+
+    #[test]
+    fn memory_from_services_initializes_defaults_and_preserves_cache_model() {
+        let entries = Arc::new(EntryService::for_test().unwrap());
+        let conn = entries.conn_for_test();
+        let content_store = entries.content_store().clone();
+
+        let daemon = Daemon::from_services(
+            conn,
+            content_store,
+            Arc::new(MemoryTestEmbed),
+            Arc::new(MemoryTestLlm),
+            8,
+            1024,
+            "cache-model-once",
+            100_000,
+            10 * 1024 * 1024,
+        )
+        .unwrap();
+
+        assert_eq!(daemon.memory.policy().half_life_days, 30.0);
+        assert_eq!(daemon.embedding_model, "cache-model-once");
+    }
+
+    #[test]
+    fn memory_daemon_builder_injects_policy_and_clock() {
+        let entries = Arc::new(EntryService::for_test().unwrap());
+        let conn = entries.conn_for_test();
+        let content_store = entries.content_store().clone();
+        let now: chrono::DateTime<chrono::Utc> = "2026-01-01T00:00:00Z".parse().unwrap();
+        let entry_id = ulid::Ulid::new();
+        conn.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO entries (
+                    id, title, tags, attrs, source, created_at, updated_at
+                 ) VALUES (?1, 'entry', '[]', '{}', NULL, ?2, ?2)",
+                rusqlite::params![entry_id.to_string(), now.to_rfc3339()],
+            )
+            .unwrap();
+
+        let clock = MemoryTestClock(Arc::new(Mutex::new(now)));
+        let policy = MemoryPolicy {
+            entry_recency_weight: 1.0,
+            ..MemoryPolicy::default()
+        };
+        let daemon = DaemonBuilder::new()
+            .conn(conn)
+            .content_store(content_store)
+            .embedder(Arc::new(MemoryTestEmbed))
+            .llm(Arc::new(MemoryTestLlm))
+            .embedding_dim(8)
+            .chunk_target_size(1024)
+            .cache_model("builder-model")
+            .warn_rows(100_000)
+            .memory_policy(policy)
+            .clock(Arc::new(clock.clone()))
+            .build()
+            .unwrap();
+
+        let initial = daemon.memory.entry_memory_signals(&[entry_id]).unwrap();
+        assert!((initial[&entry_id].memory_factor - 1.0).abs() < 1e-9);
+        clock.advance_days(30);
+        let decayed = daemon.memory.entry_memory_signals(&[entry_id]).unwrap();
+        assert!((decayed[&entry_id].memory_factor - 0.5).abs() < 1e-9);
+        assert_eq!(daemon.memory.policy().entry_recency_weight, 1.0);
     }
 
     #[test]
@@ -1528,6 +2019,9 @@ dim = 8
 base_url = "https://example.com/v1"
 api_key_env = "NOMAI_TEST_FROM_ARC_LLM"
 model = "test-llm"
+
+[memory]
+half_life_days = 12.0
 "#
         );
         let cfg_tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1548,6 +2042,7 @@ model = "test-llm"
         // The retained config round-trips the values we loaded.
         assert_eq!(retained.embedding.model, "test-embed");
         assert_eq!(retained.llm.model, "test-llm");
+        assert_eq!(daemon.memory.policy().half_life_days, 12.0);
 
         // lib-mode path: builder-assembled daemons have no Config → None.
         let lib_daemon = null_daemon().await;
@@ -1568,6 +2063,238 @@ model = "test-llm"
                 None => std::env::remove_var("NOMAI_TEST_FROM_ARC_LLM"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn memory_from_arc_reconciles_vectors_and_removes_stale_models() {
+        use nomai_core::{MemorySignalsService, SystemClock};
+
+        static FROM_ARC_MEMORY_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = FROM_ARC_MEMORY_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let old_key = std::env::var("NOMAI_TEST_FROM_ARC_MEMORY").ok();
+        // SAFETY: this test owns its unique environment variable and is
+        // serialized by FROM_ARC_MEMORY_LOCK.
+        unsafe { std::env::set_var("NOMAI_TEST_FROM_ARC_MEMORY", "sk-test") };
+
+        nomai_core::storage::init_sqlite_extensions();
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.sqlite");
+        let store_root = tmp.path().join("store");
+        let setup_conn = Arc::new(Mutex::new(Connection::open(&db_path).unwrap()));
+        let setup_entries = EntryService::new(
+            setup_conn.clone(),
+            Arc::new(nomai_core::ContentStore::new(store_root.clone())),
+            1024,
+        )
+        .unwrap();
+        let entry_id = setup_entries
+            .create(nomai_core::CreateEntry {
+                title: "memory model target".into(),
+                blocks: vec![nomai_core::BlockInput {
+                    r#type: "note".into(),
+                    text: "memory model target body".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+                attachments: None,
+            })
+            .unwrap()
+            .id
+            .to_string();
+        let setup_memory = MemorySignalsService::new(
+            setup_conn.clone(),
+            MemoryPolicy::default(),
+            Arc::new(SystemClock),
+        )
+        .unwrap();
+        setup_memory.ensure_vec_query_affinities(8).unwrap();
+
+        let active_id = ulid::Ulid::new().to_string();
+        let stale_id = ulid::Ulid::new().to_string();
+        let now = "2026-01-01T00:00:00Z";
+        {
+            let conn = setup_conn.lock().unwrap();
+            for (id, hash, model) in [
+                (&active_id, "active-hash", "active-model"),
+                (&stale_id, "stale-hash", "old-model"),
+            ] {
+                conn.execute(
+                    "INSERT INTO query_affinities (
+                        id, normalized_query_hash, raw_query_text,
+                        effective_query_text, embedding_model, embedding_dim,
+                        entry_id, block_id, chunk_id, reinforcement_count,
+                        last_reinforced_at, created_at, updated_at
+                     ) VALUES (?1, ?2, 'raw', 'effective', ?3, 8,
+                               ?4, NULL, NULL, 1, ?5, ?5, ?5)",
+                    rusqlite::params![id, hash, model, &entry_id, now],
+                )
+                .unwrap();
+                let embedding = [1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect::<Vec<_>>();
+                conn.execute(
+                    "INSERT INTO vec_query_affinities (affinity_id, embedding)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![id, embedding],
+                )
+                .unwrap();
+            }
+        }
+        drop(setup_memory);
+        drop(setup_entries);
+        drop(setup_conn);
+
+        let toml_text = format!(
+            r#"
+[data]
+db_path = {db_path:?}
+knowledge_root = {store_root:?}
+
+[embedding]
+base_url = "https://example.com/v1"
+api_key_env = "NOMAI_TEST_FROM_ARC_MEMORY"
+model = "active-model"
+dim = 8
+
+[llm]
+base_url = "https://example.com/v1"
+api_key_env = "NOMAI_TEST_FROM_ARC_MEMORY"
+model = "test-llm"
+"#
+        );
+        let config_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(config_file.path(), toml_text).unwrap();
+        let config = crate::config::Config::load_from(config_file.path()).unwrap();
+        let daemon = Daemon::from_arc(Arc::new(config)).await.unwrap();
+
+        let conn = daemon.entries.conn_for_test();
+        let conn = conn.lock().unwrap();
+        let ordinary_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM query_affinities", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let vector_ids = conn
+            .prepare("SELECT affinity_id FROM vec_query_affinities ORDER BY affinity_id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(ordinary_count, 2);
+        assert_eq!(vector_ids, vec![active_id]);
+
+        // SAFETY: this test owns its unique environment variable.
+        unsafe {
+            match old_key {
+                Some(value) => std::env::set_var("NOMAI_TEST_FROM_ARC_MEMORY", value),
+                None => std::env::remove_var("NOMAI_TEST_FROM_ARC_MEMORY"),
+            }
+        }
+    }
+
+    #[test]
+    fn startup_sync_reconciles_signals_after_removing_missing_entries() {
+        use nomai_core::{
+            BlockInput, CreateEntry, CreateSearchSession, FeedbackTarget, MemorySignalsService,
+            SearchResultTarget, SystemClock,
+        };
+
+        let entries = Arc::new(EntryService::for_test().unwrap());
+        let memory = Arc::new(
+            MemorySignalsService::new(
+                entries.conn_for_test(),
+                MemoryPolicy::default(),
+                Arc::new(SystemClock),
+            )
+            .unwrap(),
+        );
+        memory.ensure_vec_query_affinities(4).unwrap();
+        let entry = entries
+            .create(CreateEntry {
+                title: "startup orphan".into(),
+                blocks: vec![BlockInput {
+                    r#type: "note".into(),
+                    text: "startup orphan body".into(),
+                    attrs: None,
+                }],
+                tags: None,
+                attrs: None,
+                source: None,
+                attachments: None,
+            })
+            .unwrap();
+        let block_id = entry.blocks[0].id;
+        let chunk_id = entries
+            .conn_for_test()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM chunks WHERE block_id = ?1",
+                [block_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+            .parse()
+            .unwrap();
+        let search_id = memory
+            .create_search_session(CreateSearchSession {
+                raw_query_text: "startup raw".into(),
+                effective_query_text: "startup effective".into(),
+                query_embedding: vec![1.0, 0.0, 0.0, 0.0],
+                embedding_model: "active-model".into(),
+                results: vec![SearchResultTarget {
+                    entry_id: entry.id,
+                    matched_block_id: Some(block_id),
+                    matched_chunk_id: Some(chunk_id),
+                    result_rank: 1,
+                }],
+            })
+            .unwrap();
+        memory
+            .apply_feedback(
+                search_id,
+                &[FeedbackTarget {
+                    entry_id: entry.id,
+                    block_id: Some(block_id),
+                    chunk_id: Some(chunk_id),
+                }],
+            )
+            .unwrap();
+        entries.content_store().delete_entry(entry.id).unwrap();
+
+        let sync = sync_index_from_fs_at_startup(&entries, &memory);
+
+        assert_eq!(sync.removed, 1);
+        let conn = entries.conn_for_test();
+        let counts = conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM entry_memory_stats WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM query_affinities WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM search_feedback WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM search_session_results WHERE entry_id = ?1),
+                    (SELECT COUNT(*) FROM vec_query_affinities)",
+                [entry.id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0, 0, 0));
     }
 
     /// Regression (issue #1 sibling — startup path): a `git clone` + restart
