@@ -166,6 +166,8 @@ pub mod channel {
     pub const RECV: &str = "channel.recv";
     pub const LIST: &str = "channel.list";
     pub const PURGE: &str = "channel.purge";
+    /// Delete one subscriber's read cursor, ending that subscription.
+    pub const UNSUBSCRIBE: &str = "channel.unsubscribe";
 }
 
 #[cfg(test)]

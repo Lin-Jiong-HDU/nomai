@@ -1,6 +1,6 @@
 //! channel.* handlers — append-only message log + server-side cursors.
 //!
-//! All four follow the zero-sized-struct + `RpcHandler` pattern. SQLite
+//! All five follow the zero-sized-struct + `RpcHandler` pattern. SQLite
 //! calls go through `tokio::task::spawn_blocking` via the `blocking` helper.
 //!
 //! None of them is `is_mutating()`: messages live only in SQLite and never
@@ -155,7 +155,7 @@ impl RpcHandler for Purge {
         "channel.purge"
     }
     fn description(&self) -> &'static str {
-        "Permanently delete messages with seq below before_seq from one channel. Returns {deleted: N}. Subscriber cursors are left alone. before_seq is required and must be positive — there is no delete-everything shortcut."
+        "Permanently delete messages with seq below before_seq from one channel. Returns {deleted: N}. Subscriber cursors are left alone — use channel.unsubscribe to clear one. before_seq is required and must be positive — there is no delete-everything shortcut."
     }
     fn input_schema(&self) -> Option<Value> {
         Some(json!({
@@ -186,6 +186,47 @@ impl RpcHandler for Purge {
     }
 }
 
+// ── Unsubscribe ─────────────────────────────────────────────────────
+
+pub struct Unsubscribe;
+#[async_trait]
+impl RpcHandler for Unsubscribe {
+    fn method(&self) -> &'static str {
+        "channel.unsubscribe"
+    }
+    fn description(&self) -> &'static str {
+        "Delete one subscriber's read cursor for a channel, ending that subscription: the next recv using the same subscriber name replays the channel from the beginning. Returns {deleted: 0|1}; an unknown subscription is a no-op rather than an error. This is the only way to clear a cursor — there is no wildcard that clears every subscriber, and no TTL."
+    }
+    fn input_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "channel": {"type": "string", "minLength": 1, "maxLength": 128},
+                "subscriber": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "The subscriber whose position to forget. Required — there is no delete-all-subscribers shortcut."
+                }
+            },
+            "required": ["channel", "subscriber"],
+            "additionalProperties": false
+        }))
+    }
+    async fn call(&self, daemon: &Daemon, params: Value) -> Result<Value, CoreError> {
+        #[derive(Deserialize)]
+        struct Params {
+            channel: String,
+            subscriber: String,
+        }
+        let p: Params = serde_json::from_value(params)
+            .map_err(|e| CoreError::Validation(format!("invalid params: {e}")))?;
+        let svc = daemon.channels.clone();
+        let deleted = blocking(move || svc.unsubscribe(&p.channel, &p.subscriber)).await??;
+        Ok(json!({ "deleted": deleted }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +239,7 @@ mod tests {
         assert!(!Recv.is_mutating());
         assert!(!List.is_mutating());
         assert!(!Purge.is_mutating());
+        assert!(!Unsubscribe.is_mutating());
     }
 
     #[test]
@@ -206,7 +248,8 @@ mod tests {
         assert_eq!(Recv.method(), "channel.recv");
         assert_eq!(List.method(), "channel.list");
         assert_eq!(Purge.method(), "channel.purge");
-        for h in [&Send as &dyn RpcHandler, &Recv, &List, &Purge] {
+        assert_eq!(Unsubscribe.method(), "channel.unsubscribe");
+        for h in [&Send as &dyn RpcHandler, &Recv, &List, &Purge, &Unsubscribe] {
             assert!(!h.description().is_empty(), "{}", h.method());
             assert!(h.input_schema().is_some(), "{}", h.method());
         }

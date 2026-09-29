@@ -297,7 +297,7 @@
       "name": "channel.list"
     },
     {
-      "description": "Permanently delete messages with seq below before_seq from one channel. Returns {deleted: N}. Subscriber cursors are left alone. before_seq is required and must be positive — there is no delete-everything shortcut.",
+      "description": "Permanently delete messages with seq below before_seq from one channel. Returns {deleted: N}. Subscriber cursors are left alone — use channel.unsubscribe to clear one. before_seq is required and must be positive — there is no delete-everything shortcut.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -389,6 +389,31 @@
         "type": "object"
       },
       "name": "channel.send"
+    },
+    {
+      "description": "Delete one subscriber's read cursor for a channel, ending that subscription: the next recv using the same subscriber name replays the channel from the beginning. Returns {deleted: 0|1}; an unknown subscription is a no-op rather than an error. This is the only way to clear a cursor — there is no wildcard that clears every subscriber, and no TTL.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "subscriber": {
+            "description": "The subscriber whose position to forget. Required — there is no delete-all-subscribers shortcut.",
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "subscriber"
+        ],
+        "type": "object"
+      },
+      "name": "channel.unsubscribe"
     },
     {
       "description": "Fetch a single chunk by ULID. Returns error 1001 if not found.",

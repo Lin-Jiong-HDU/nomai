@@ -132,6 +132,7 @@ embedded or indexed.
 | `channel.recv`  | `channel`, `subscriber?`, `since?`, `limit?` | `{items, latest, cursor}`                                                                          |
 | `channel.list`  | —                                          | `{items: [{channel, message_count, last_seq, last_message_at}]}`                                    |
 | `channel.purge` | `channel`, `before_seq`                     | `{deleted: N}`                                                                                      |
+| `channel.unsubscribe` | `channel`, `subscriber`              | `{deleted: 0\|1}`                                                                                   |
 
 **Reading.** `recv` has three mutually exclusive modes. With `subscriber` it
 reads from that name's server-side cursor and advances it — the cursor
@@ -162,6 +163,16 @@ not normalized: `"handoff"` and `"Handoff"` are different channels.
 that pass the same `subscriber` name share one cursor and steal each other's
 messages — whichever reads first advances it for both. Each session must use
 a distinct name (e.g. `agent-a`, `agent-b`).
+
+**A cursor outlives its message log.** `channel.purge` deletes messages
+only; cursor rows persist, and because `channel.list` groups over messages, a
+channel that has cursors but no messages does not appear there at all. A
+subscriber name is therefore effectively permanent, and **reusing an old name
+silently skips everything it already read** — which looks like an empty
+channel when it is not. `channel.unsubscribe` is the only way to clear one:
+it deletes that `(channel, subscriber)` row, so the next `recv` under that
+name replays from the beginning. There is deliberately no wildcard and no
+TTL, for the same reason `purge` refuses an unbounded delete.
 
 **No identity.** `sender` is a self-declared label, not a route. The daemon
 cannot distinguish agent sessions, so the channel name is the only address.
