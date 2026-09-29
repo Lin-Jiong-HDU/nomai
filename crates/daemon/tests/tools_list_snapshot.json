@@ -288,6 +288,109 @@
       "name": "cache.stats"
     },
     {
+      "description": "List every channel that has at least one message, with its message count, highest seq, and last message time. Newest activity first. Use this to discover which channel names are actually in use.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "channel.list"
+    },
+    {
+      "description": "Permanently delete messages with seq below before_seq from one channel. Returns {deleted: N}. Subscriber cursors are left alone. before_seq is required and must be positive — there is no delete-everything shortcut.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "before_seq": {
+            "description": "Delete messages with seq strictly less than this.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "channel": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "before_seq"
+        ],
+        "type": "object"
+      },
+      "name": "channel.purge"
+    },
+    {
+      "description": "Read messages from a channel. Pass subscriber to read from (and advance) a server-side cursor — use this so a new session does not re-read everything. Pass since for a one-off history read that writes no cursor. Pass neither to get the most recent messages. Returns items ascending, plus latest (channel max seq) and cursor (position after this read).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "since": {
+            "description": "Exclusive lower bound on seq. Pure read: writes no cursor. Mutually exclusive with subscriber.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subscriber": {
+            "description": "Stable name for this reader. The daemon remembers its position across sessions. Mutually exclusive with since.",
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel"
+        ],
+        "type": "object"
+      },
+      "name": "channel.recv"
+    },
+    {
+      "description": "Append a message to a named channel. Channels are append-only logs shared by every agent on this machine; there is no sender identity or routing, so the channel name is the only address. Returns the created message with its server-assigned seq.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "attrs": {
+            "description": "Free-form JSON. Convention: {\"kind\": \"handoff\", \"refs\": [\"<entry ulid>\"]}.",
+            "type": "object"
+          },
+          "channel": {
+            "description": "Channel name. Free-form; use a convention like \"handoff\" or \"notice\".",
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "sender": {
+            "description": "Optional self-declared sender label. Purely descriptive; it does not route anything.",
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "text": {
+            "description": "Message body (markdown). Keep it short — put substance in an entry and reference it via attrs.refs.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "text"
+        ],
+        "type": "object"
+      },
+      "name": "channel.send"
+    },
+    {
       "description": "Fetch a single chunk by ULID. Returns error 1001 if not found.",
       "inputSchema": {
         "additionalProperties": false,
