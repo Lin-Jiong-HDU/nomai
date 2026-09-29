@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Agent channels (`channel.*`).** A named, append-only message log with
+  server-side per-subscriber read cursors, so two agent sessions running on
+  one machine can hand work off to each other without a human relaying the
+  content. Exposes `channel.send`, `channel.recv`, `channel.list`,
+  `channel.purge`, and `channel.unsubscribe` over MCP. Existing RPCs are
+  unchanged and nothing was added to the `.nomai` format.
+
+  Messages live only in local SQLite: they are not `.nomai` content, do not
+  sync through Git, and are never embedded or indexed. The channel name is
+  the only address — `sender` is a descriptive label, not a route — and
+  channel names are not normalized. A `subscriber` name is a *shared read
+  position* rather than an identity, so two sessions using the same name
+  steal each other's messages; it also persists until `channel.unsubscribe`
+  clears it, which is the only way to clear one (`channel.purge` deletes
+  messages, never cursors). Reading advances the cursor, so delivery is
+  at-most-once; history stays re-readable via `since`.
+
+  Note that a channel cannot wake an idle session: Claude Code gives an idle
+  session no turn when a message arrives, so the receiving side still needs a
+  person to start it. Channels remove the content relay, not the need for a
+  turn.
+
 ## [0.4.6] - 2026-09-05
 
 ### Changed
