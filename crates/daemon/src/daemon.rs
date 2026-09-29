@@ -1635,6 +1635,24 @@ mod tests {
         assert_eq!(msg.channel, "smoke");
     }
 
+    /// Moved here from the plan's Task 4: it asserts handler registration,
+    /// which is Task 5's change, so it cannot pass a task earlier.
+    #[tokio::test]
+    async fn channel_methods_are_registered() {
+        let daemon = null_daemon().await;
+        for method in [
+            "channel.send",
+            "channel.recv",
+            "channel.list",
+            "channel.purge",
+        ] {
+            assert!(
+                daemon.handlers.contains_key(method),
+                "{method} must be registered"
+            );
+        }
+    }
+
     #[test]
     fn expand_db_path_creates_parent_dir() {
         let tmp = tempfile::tempdir().unwrap();
