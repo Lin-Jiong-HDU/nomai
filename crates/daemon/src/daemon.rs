@@ -8,8 +8,8 @@ use rusqlite::{Connection, params};
 
 use nomai_core::{
     ChannelService, ChunkService, Clock, ContentStore, ConversationService, CoreError,
-    EntryService, EventService,
-    LinkService, MemoryPolicy, MemorySignalsService, SystemClock, chunk_model::DimReconciliation,
+    EntryService, EventService, LinkService, MemoryPolicy, MemorySignalsService, SystemClock,
+    chunk_model::DimReconciliation,
 };
 use nomai_providers::{
     CachedEmbedder, EmbeddingProvider, LLMReranker, LlmProvider, NoopReranker,

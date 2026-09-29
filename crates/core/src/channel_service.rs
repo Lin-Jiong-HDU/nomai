@@ -355,7 +355,9 @@ mod tests {
     #[test]
     fn seq_is_strictly_increasing_across_rapid_sends() {
         let s = svc();
-        let seqs: Vec<i64> = (0..100).map(|i| send(&s, "c", &format!("m{i}")).seq).collect();
+        let seqs: Vec<i64> = (0..100)
+            .map(|i| send(&s, "c", &format!("m{i}")).seq)
+            .collect();
         assert_eq!(seqs[0], 1);
         for w in seqs.windows(2) {
             assert!(w[1] > w[0], "seq must strictly increase: {seqs:?}");
@@ -730,5 +732,33 @@ mod tests {
         // before_seq must be a positive integer — no accidental full wipe.
         assert!(matches!(s.purge("c", 0), Err(CoreError::Validation(_))));
         assert!(matches!(s.purge("c", -1), Err(CoreError::Validation(_))));
+    }
+
+    /// Concurrent writers must not collide on seq. The core services share a
+    /// single Arc<Mutex<Connection>>, so writes serialize; this pins that
+    /// no future refactor introduces a read-then-write race.
+    #[test]
+    fn concurrent_sends_get_unique_seqs() {
+        use std::sync::Arc;
+        let s = Arc::new(svc());
+        let mut handles = Vec::new();
+        for t in 0..8 {
+            let s = Arc::clone(&s);
+            handles.push(std::thread::spawn(move || {
+                let mut seqs = Vec::new();
+                for i in 0..25 {
+                    seqs.push(send(&s, "race", &format!("t{t}-m{i}")).seq);
+                }
+                seqs
+            }));
+        }
+        let mut all: Vec<i64> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
+        assert_eq!(all.len(), 200);
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), 200, "seq must be unique across writers");
     }
 }

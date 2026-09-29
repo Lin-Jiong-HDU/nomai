@@ -13,6 +13,7 @@ Complete reference for the JSON-RPC API, error codes, configuration, and cache i
   - [link.\*](#link-methods)
   - [events.\*](#events-methods)
   - [chunk.\*](#chunk-methods)
+  - [channel.\*](#channel-methods)
   - [search.\*](#search-methods)
   - [Adaptive hybrid search](#adaptive-hybrid-search)
   - [provider.\*](#provider-methods)
@@ -118,6 +119,37 @@ Daemon runs `index.sync` automatically at boot. If FS differs from the index (e.
 | `chunk.list`   | `entry_id`, `limit?`(100), `offset?`(0) | `{items, total}`    | Sorted by `ordinal` ascending                 |
 
 Note: `chunk.create` / `chunk.delete` constants exist in `protocol::method::chunk` but return `METHOD_NOT_FOUND` (-32601) — chunks are auto-derived from blocks.
+
+### channel.{#channel-methods}
+
+Append-only message log for agent-to-agent exchange on one machine. Messages
+live only in `db.sqlite`; they do not sync across devices and are never
+embedded or indexed.
+
+| Method          | Params                                     | Returns                                                                                            |
+| --------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `channel.send`  | `channel`, `text`, `sender?`, `attrs?`      | the created message (`seq`, `id`, `channel`, `sender`, `text`, `attrs`, `created_at`)               |
+| `channel.recv`  | `channel`, `subscriber?`, `since?`, `limit?` | `{items, latest, cursor}`                                                                          |
+| `channel.list`  | —                                          | `{items: [{channel, message_count, last_seq, last_message_at}]}`                                    |
+| `channel.purge` | `channel`, `before_seq`                     | `{deleted: N}`                                                                                      |
+
+**Reading.** `recv` has three mutually exclusive modes. With `subscriber` it
+reads from that name's server-side cursor and advances it — the cursor
+survives session boundaries, so a fresh agent session does not re-read
+history. With `since` it is a pure history read that writes nothing. With
+neither it returns the most recent `limit` messages. `limit` is 1..=200
+(default 50); items come back ascending. Passing `subscriber` and `since`
+together is a `Validation` error rather than a silent precedence rule.
+
+Reading advances the cursor, so delivery is at-most-once. History is always
+re-readable (use `since`, or omit both), so nothing is lost — it just is not
+replayed automatically.
+
+**Names.** `channel`, `sender` and `subscriber` are 1..=128 bytes and are
+not normalized: `"handoff"` and `"Handoff"` are different channels.
+
+**No identity.** `sender` is a self-declared label, not a route. The daemon
+cannot distinguish agent sessions, so the channel name is the only address.
 
 ### search.{#search-methods}
 
