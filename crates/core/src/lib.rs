@@ -2,6 +2,8 @@
 
 pub mod block_model;
 pub mod block_service;
+pub mod channel_model;
+pub mod channel_service;
 pub mod chunk_model;
 pub mod chunk_service;
 pub mod chunking;
@@ -25,6 +27,11 @@ pub mod storage;
 
 pub use block_model::{Block, BlockInput, BlockListResult, CreateBlock};
 pub use block_service::BlockService;
+pub use channel_model::{
+    CHANNEL_LIMIT_MAX, CHANNEL_NAME_MAX, ChannelMessage, ChannelSummary, RecvMessages, RecvResult,
+    SendMessage,
+};
+pub use channel_service::ChannelService;
 pub use chunk_model::{Chunk, ChunkListResult, ChunkSearchResult, DimReconciliation};
 pub use chunk_service::ChunkService;
 pub use content_store::{AttachmentMeta, ContentStore};
