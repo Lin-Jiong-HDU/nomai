@@ -13,8 +13,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use ulid::Ulid;
 
 use crate::channel_model::{
-    CHANNEL_LIMIT_MAX, ChannelMessage, RecvMessages, RecvResult, SendMessage, validate_attrs,
-    validate_name,
+    CHANNEL_LIMIT_MAX, ChannelMessage, ChannelSummary, RecvMessages, RecvResult, SendMessage,
+    validate_attrs, validate_name,
 };
 use crate::error::CoreError;
 use crate::storage;
@@ -161,6 +161,66 @@ impl ChannelService {
             latest,
             cursor,
         })
+    }
+
+    // ── List ────────────────────────────────────────────────────────
+
+    /// All channels with a message, newest-activity first.
+    pub fn list(&self) -> Result<Vec<ChannelSummary>, CoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT channel, COUNT(*), MAX(seq), MAX(created_at)
+             FROM channel_messages
+             GROUP BY channel
+             ORDER BY MAX(seq) DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let channel: String = row.get(0)?;
+            let message_count: i64 = row.get(1)?;
+            let last_seq: i64 = row.get(2)?;
+            let last_at: Option<String> = row.get(3)?;
+            let last_message_at = match last_at {
+                Some(ref s) => Some(storage::from_text(3, s, |v| {
+                    chrono::DateTime::parse_from_rfc3339(v).map(|d| d.with_timezone(&Utc))
+                })?),
+                None => None,
+            };
+            Ok(ChannelSummary {
+                channel,
+                message_count: message_count as u64,
+                last_seq,
+                last_message_at,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    // ── Purge ───────────────────────────────────────────────────────
+
+    /// Delete messages with `seq < before_seq`. Returns the deleted count.
+    ///
+    /// `before_seq` is required and must be positive: a total wipe is
+    /// unrecoverable and has no legitimate use (SQLite size is not a
+    /// concern here), so an explicit bound guards against a slip.
+    /// `channel_cursors` is deliberately left alone — a cursor behind the
+    /// purge bound is harmless and never rewinds.
+    pub fn purge(&self, channel: &str, before_seq: i64) -> Result<u64, CoreError> {
+        let channel = validate_name("channel", channel)?;
+        if before_seq <= 0 {
+            return Err(CoreError::Validation(
+                "before_seq must be a positive integer".into(),
+            ));
+        }
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute(
+            "DELETE FROM channel_messages WHERE channel = ?1 AND seq < ?2",
+            params![channel, before_seq],
+        )?;
+        Ok(deleted as u64)
     }
 }
 
@@ -583,5 +643,92 @@ mod tests {
         }
         let r = recv(&s, "c", None, Some(0), CHANNEL_LIMIT_MAX);
         assert_eq!(r.items.len(), CHANNEL_LIMIT_MAX as usize);
+    }
+
+    #[test]
+    fn list_groups_by_channel_newest_first() {
+        let s = svc();
+        send(&s, "alpha", "a1");
+        send(&s, "beta", "b1");
+        send(&s, "alpha", "a2");
+
+        let out = s.list().unwrap();
+        assert_eq!(out.len(), 2);
+        // Ordered by MAX(seq) DESC → "alpha" (seq 3) before "beta" (seq 2).
+        assert_eq!(out[0].channel, "alpha");
+        assert_eq!(out[0].message_count, 2);
+        assert_eq!(out[0].last_seq, 3);
+        assert!(out[0].last_message_at.is_some());
+        assert_eq!(out[1].channel, "beta");
+        assert_eq!(out[1].message_count, 1);
+        assert_eq!(out[1].last_seq, 2);
+    }
+
+    #[test]
+    fn list_on_empty_store_is_empty() {
+        assert!(svc().list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn purge_deletes_only_messages_before_the_bound() {
+        let s = svc();
+        for i in 1..=5 {
+            send(&s, "c", &format!("m{i}"));
+        }
+        assert_eq!(s.purge("c", 4).unwrap(), 3); // seq 1,2,3
+
+        let r = recv(&s, "c", None, Some(0), 50);
+        assert_eq!(r.items.len(), 2);
+        assert_eq!(r.items[0].text, "m4");
+        assert_eq!(r.latest, 5);
+    }
+
+    /// The reason `seq` is AUTOINCREMENT rather than a bare rowid or
+    /// MAX(seq)+1: after deleting the highest rows, the next insert must
+    /// still get a fresh, larger seq. A reused seq would silently rewind a
+    /// subscriber's cursor and re-deliver old messages.
+    #[test]
+    fn autoincrement_does_not_reuse_seq_after_purge() {
+        let s = svc();
+        for i in 1..=3 {
+            send(&s, "c", &format!("m{i}"));
+        }
+        // Delete everything, including the maximum.
+        assert_eq!(s.purge("c", 100).unwrap(), 3);
+        assert!(recv(&s, "c", None, Some(0), 50).items.is_empty());
+
+        let fresh = send(&s, "c", "after-purge");
+        assert!(
+            fresh.seq > 3,
+            "seq must never be reused after purge; got {}",
+            fresh.seq
+        );
+    }
+
+    #[test]
+    fn purge_keeps_cursors_and_never_rewinds_them() {
+        let s = svc();
+        for i in 1..=3 {
+            send(&s, "c", &format!("m{i}"));
+        }
+        recv(&s, "c", Some("b"), None, 50); // cursor at 3
+        s.purge("c", 100).unwrap(); // delete everything
+
+        send(&s, "c", "new");
+        let r = recv(&s, "c", Some("b"), None, 50);
+        assert_eq!(r.items.len(), 1);
+        assert_eq!(r.items[0].text, "new");
+    }
+
+    #[test]
+    fn purge_is_idempotent_and_validates_before_seq() {
+        let s = svc();
+        send(&s, "c", "one");
+        assert_eq!(s.purge("c", 1).unwrap(), 0);
+        // Unknown channel is a no-op, not an error.
+        assert_eq!(s.purge("nope", 5).unwrap(), 0);
+        // before_seq must be a positive integer — no accidental full wipe.
+        assert!(matches!(s.purge("c", 0), Err(CoreError::Validation(_))));
+        assert!(matches!(s.purge("c", -1), Err(CoreError::Validation(_))));
     }
 }
