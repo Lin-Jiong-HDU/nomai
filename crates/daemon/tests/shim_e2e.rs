@@ -491,3 +491,145 @@ idle_timeout_secs = 10
     drop(stdin);
     let _ = child.wait();
 }
+
+/// A JSON-RPC line reader over a shim's stdout.
+struct Shim {
+    stdin: std::process::ChildStdin,
+    reader: BufReader<std::process::ChildStdout>,
+    child: std::process::Child,
+    /// Held for this Shim's lifetime so the daemon always sees an active
+    /// connection and cannot idle out (idle_timeout_secs = 2) between the
+    /// two shims' calls.
+    _probe: std::os::unix::net::UnixStream,
+}
+
+impl Shim {
+    /// Spawn a shim against `cfg` and wait until the resident daemon socket
+    /// is accepting, so both shims provably share one daemon.
+    fn spawn(cfg: &std::path::Path, dir: &std::path::Path) -> Self {
+        let mut child = Command::new(binary())
+            .arg("--config")
+            .arg(cfg)
+            .env("NOMAI_E2E_KEY", "k")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn shim");
+        let stdin = child.stdin.take().unwrap();
+        let reader = BufReader::new(child.stdout.take().unwrap());
+
+        let sock = dir.join("run").join("nomai.sock");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let probe = loop {
+            match std::os::unix::net::UnixStream::connect(&sock) {
+                Ok(s) => break s,
+                Err(_) => {
+                    if std::time::Instant::now() > deadline {
+                        panic!("resident daemon socket never came up at {sock:?}");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        };
+        Self {
+            stdin,
+            reader,
+            child,
+            _probe: probe,
+        }
+    }
+
+    fn call(&mut self, id: u64, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let req = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+        writeln!(self.stdin, "{req}").unwrap();
+        self.stdin.flush().unwrap();
+        let mut line = String::new();
+        self.reader.read_line(&mut line).expect("read response");
+        serde_json::from_str(line.trim()).expect("response is JSON")
+    }
+}
+
+impl Drop for Shim {
+    fn drop(&mut self) {
+        // Closing stdin makes the shim exit and the daemon idle out.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn channel_handoff_between_two_shims_sharing_one_daemon() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = write_config(dir.path());
+
+    let mut a = Shim::spawn(&cfg, dir.path());
+    let mut b = Shim::spawn(&cfg, dir.path());
+
+    // A hands off to B.
+    let sent = a.call(
+        1,
+        "channel.send",
+        json!({
+            "channel": "handoff",
+            "text": "已修完截断 bug，细节在 entry 里",
+            "sender": "agent-a",
+            "attrs": {"kind": "handoff", "refs": ["01M3NF0HSGWBF1P7RTZCTENSPG"]}
+        }),
+    );
+    let msg = sent.get("result").expect("channel.send must succeed");
+    assert_eq!(msg["seq"], 1);
+    assert_eq!(msg["channel"], "handoff");
+    assert_eq!(msg["sender"], "agent-a");
+
+    // B reads it via a named subscriber cursor.
+    let got = b.call(
+        2,
+        "channel.recv",
+        json!({"channel": "handoff", "subscriber": "agent-b"}),
+    );
+    let r = got.get("result").expect("channel.recv must succeed");
+    assert_eq!(r["items"].as_array().unwrap().len(), 1);
+    assert_eq!(r["items"][0]["text"], "已修完截断 bug，细节在 entry 里");
+    assert_eq!(r["items"][0]["attrs"]["kind"], "handoff");
+    assert_eq!(r["latest"], 1);
+    assert_eq!(r["cursor"], 1);
+
+    // Second read is empty — the cursor advanced.
+    let again = b.call(
+        3,
+        "channel.recv",
+        json!({"channel": "handoff", "subscriber": "agent-b"}),
+    );
+    assert_eq!(again["result"]["items"].as_array().unwrap().len(), 0);
+
+    // Third shim reusing the same subscriber name must also see nothing:
+    // this is the server-side cursor surviving a session boundary, which is
+    // the whole reason the cursor is not client-held.
+    let mut c = Shim::spawn(&cfg, dir.path());
+    let fresh = c.call(
+        4,
+        "channel.recv",
+        json!({"channel": "handoff", "subscriber": "agent-b"}),
+    );
+    assert_eq!(
+        fresh["result"]["items"].as_array().unwrap().len(),
+        0,
+        "a new session with the same subscriber must not re-read"
+    );
+
+    // A second, independent subscriber still sees the full history.
+    let other = c.call(
+        5,
+        "channel.recv",
+        json!({"channel": "handoff", "subscriber": "agent-c"}),
+    );
+    assert_eq!(other["result"]["items"].as_array().unwrap().len(), 1);
+
+    // channel.list reports the channel once.
+    let listed = a.call(6, "channel.list", json!({}));
+    let items = listed["result"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["channel"], "handoff");
+    assert_eq!(items[0]["message_count"], 1);
+}

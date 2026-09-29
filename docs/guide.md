@@ -23,6 +23,7 @@ For project overview and install, see the [README](../README.md) first.
 - [Storage layer separation (lib-mode users)](#storage-layer-separation-lib-mode-users)
 - [Sync (multi-device)](#sync-multi-device)
 - [Machine-specific content](#machine-specific-content)
+- [Talking to another agent session](#talking-to-another-agent-session)
 - [Migration from 0.1.0 to 0.2.0](#migration-from-010-to-020)
 - [What's next](#whats-next)
 
@@ -385,6 +386,43 @@ The convention has two halves:
 - Verify any path from an entry before acting on it (`test -e <path>`), regardless of `attrs.device`.
 
 `device` is a convention, not enforced by core — `attrs` is schema-free (see [Entry](#entry)). Nothing stops a writer from omitting it; the read-side verification rule is the backstop that catches that case.
+
+---
+
+## Talking to another agent session
+
+Two Claude Code sessions on the same machine share one resident daemon (the
+shim's socket is derived from `db_path`), so they can exchange messages
+through a `channel` with no extra transport:
+
+```
+# In session A — hand off
+channel.send { "channel": "handoff", "text": "截断 bug 已修完，细节见 entry",
+               "sender": "agent-a",
+               "attrs": { "kind": "handoff", "refs": ["01M3NF0..."] } }
+
+# In session B — pick up exactly what you have not read
+channel.recv { "channel": "handoff", "subscriber": "agent-b" }
+```
+
+Because the read cursor is kept server-side, B picks up precisely the unread
+messages even in a brand-new session — you never have to restate what A
+wrote. A channel is an append-only log, not a queue: nothing is consumed, so
+several subscribers each get their own view of the same history. Give each
+session its own `subscriber` name — the name is a shared read position, so
+two sessions using the same one steal each other's messages. See
+[channel.\*](reference.md#channel-methods) for the full parameter list.
+
+**Keep the substance in an entry.** Channels are not indexed and never
+embedded, so put the material worth keeping in an entry and let the message
+carry a pointer (`attrs.refs`) plus a one-line summary.
+
+**What this does not do.** Channels remove the content relay, not the need
+for a turn: an idle session still has to be given one, and typing
+"接收交接" is enough. Fully automatic wake-up is a separate idea — Claude
+Code's `claude/channel` MCP capability can push an event into a running
+session, but nomai does not implement it yet, so today the receiving session
+is started by a person (or, if you want, by an external watcher).
 
 ---
 

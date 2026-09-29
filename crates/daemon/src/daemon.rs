@@ -7,8 +7,9 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params};
 
 use nomai_core::{
-    ChunkService, Clock, ContentStore, ConversationService, CoreError, EntryService, EventService,
-    LinkService, MemoryPolicy, MemorySignalsService, SystemClock, chunk_model::DimReconciliation,
+    ChannelService, ChunkService, Clock, ContentStore, ConversationService, CoreError,
+    EntryService, EventService, LinkService, MemoryPolicy, MemorySignalsService, SystemClock,
+    chunk_model::DimReconciliation,
 };
 use nomai_providers::{
     CachedEmbedder, EmbeddingProvider, LLMReranker, LlmProvider, NoopReranker,
@@ -74,6 +75,7 @@ pub struct Daemon {
     pub(crate) events: Arc<EventService>,
     pub(crate) chunks: Arc<ChunkService>,
     pub(crate) conversations: Arc<ConversationService>,
+    pub(crate) channels: Arc<ChannelService>,
     // Readers land in feedback/search/lifecycle handlers in later tasks.
     #[allow(dead_code)]
     pub(crate) memory: Arc<MemorySignalsService>,
@@ -172,6 +174,7 @@ impl Daemon {
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
         let conversations = Arc::new(ConversationService::new(conn.clone())?);
+        let channels = Arc::new(ChannelService::new(conn.clone())?);
         let memory = Arc::new(MemorySignalsService::new(
             conn.clone(),
             config.memory.to_policy(),
@@ -267,6 +270,7 @@ impl Daemon {
             events,
             chunks,
             conversations,
+            channels,
             memory,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
@@ -324,6 +328,7 @@ impl Daemon {
         let chunks = Arc::new(ChunkService::new(conn3).unwrap());
         let conn4 = entries.conn_for_test();
         let conversations = Arc::new(ConversationService::new(conn4).unwrap());
+        let channels = Arc::new(ChannelService::new(entries.conn_for_test()).unwrap());
         let memory = Arc::new(
             MemorySignalsService::new(
                 entries.conn_for_test(),
@@ -361,6 +366,7 @@ impl Daemon {
             events,
             chunks,
             conversations,
+            channels,
             memory,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
@@ -414,6 +420,11 @@ impl Daemon {
     #[allow(dead_code)]
     pub fn conversations(&self) -> &Arc<ConversationService> {
         &self.conversations
+    }
+
+    #[allow(dead_code)]
+    pub fn channels(&self) -> &Arc<ChannelService> {
+        &self.channels
     }
     /// Access the cached embedding provider. Trait methods (`embed`, `dim`,
     /// `name`) delegate transparently to the inner provider; the concrete
@@ -516,6 +527,7 @@ impl Daemon {
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
         let conversations = Arc::new(ConversationService::new(conn.clone())?);
+        let channels = Arc::new(ChannelService::new(conn.clone())?);
         chunks.ensure_vec_chunk_embeddings(embedding_dim)?;
         let memory = Arc::new(MemorySignalsService::new(
             conn.clone(),
@@ -538,6 +550,7 @@ impl Daemon {
             events,
             chunks,
             conversations,
+            channels,
             memory,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
@@ -1603,6 +1616,101 @@ mod tests {
         assert!(elapsed >= std::time::Duration::from_millis(80));
         assert!(elapsed < std::time::Duration::from_secs(2));
         let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn daemon_exposes_a_channel_service() {
+        let daemon = null_daemon().await;
+        // The service must be usable straight off the daemon.
+        let msg = daemon
+            .channels()
+            .send(nomai_core::SendMessage {
+                channel: "smoke".into(),
+                text: "hello".into(),
+                sender: None,
+                attrs: None,
+            })
+            .unwrap();
+        assert_eq!(msg.seq, 1);
+        assert_eq!(msg.channel, "smoke");
+    }
+
+    /// Moved here from the plan's Task 4: it asserts handler registration,
+    /// which is Task 5's change, so it cannot pass a task earlier.
+    #[tokio::test]
+    async fn channel_methods_are_registered() {
+        let daemon = null_daemon().await;
+        for method in [
+            "channel.send",
+            "channel.recv",
+            "channel.list",
+            "channel.purge",
+        ] {
+            assert!(
+                daemon.handlers.contains_key(method),
+                "{method} must be registered"
+            );
+        }
+    }
+
+    /// is_mutating() only has one observable consequence: whether dispatch
+    /// takes sync_lock. Hold the lock and prove channel.send still runs —
+    /// this pins the deliberate `false` in handlers/channel.rs.
+    #[tokio::test]
+    async fn channel_send_does_not_take_sync_lock() {
+        let daemon = Arc::new(null_daemon().await);
+
+        let guard = daemon.sync_lock.clone().lock_owned().await;
+        let d = daemon.clone();
+        let send = tokio::spawn(async move {
+            d.dispatch(nomai_protocol::Request {
+                jsonrpc: nomai_protocol::JSONRPC_VERSION.into(),
+                id: Some(nomai_protocol::Id::Number(1)),
+                method: "channel.send".into(),
+                params: Some(serde_json::json!({
+                    "channel": "lock-test",
+                    "text": "must not block"
+                })),
+            })
+            .await
+        });
+
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(3), send)
+            .await
+            .expect("channel.send blocked on sync_lock — is_mutating() regressed to true")
+            .expect("join");
+        assert!(resp.result.is_some(), "channel.send failed: {resp:?}");
+        drop(guard);
+    }
+
+    /// The counterpart: a genuinely mutating handler MUST block while
+    /// sync_lock is held. Guards against the test above passing simply
+    /// because the lock was never wired up.
+    #[tokio::test]
+    async fn entry_create_does_take_sync_lock() {
+        let daemon = Arc::new(null_daemon().await);
+        let guard = daemon.sync_lock.clone().lock_owned().await;
+
+        let d = daemon.clone();
+        let call = tokio::spawn(async move {
+            d.dispatch(nomai_protocol::Request {
+                jsonrpc: nomai_protocol::JSONRPC_VERSION.into(),
+                id: Some(nomai_protocol::Id::Number(1)),
+                method: "entry.create".into(),
+                params: Some(serde_json::json!({
+                    "title": "lock probe",
+                    "blocks": [{"type": "note", "text": "x"}]
+                })),
+            })
+            .await
+        });
+
+        let early = tokio::time::timeout(std::time::Duration::from_millis(300), call).await;
+        assert!(
+            early.is_err(),
+            "entry.create returned while sync_lock was held — the lock is not wired up"
+        );
+        drop(guard);
     }
 
     #[test]

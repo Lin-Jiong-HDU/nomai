@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::handlers::{
-    attachment, batch, benchmark, block, cache, chunk, conversation, entry, events, feedback,
-    index, link, mcp, provider, rerank, search, sync, system,
+    attachment, batch, benchmark, block, cache, channel, chunk, conversation, entry, events,
+    feedback, index, link, mcp, provider, rerank, search, sync, system,
 };
 use crate::rpc::RpcHandler;
 
@@ -153,6 +153,16 @@ pub fn registry_with_benchmark(enabled: bool) -> HashMap<&'static str, Arc<dyn R
     let h = conversation::Delete;
     m.insert(h.method(), Arc::new(h));
     let h = conversation::Search;
+    m.insert(h.method(), Arc::new(h));
+
+    // channel.* (append-only message log + server-side subscriber cursors)
+    let h = channel::Send;
+    m.insert(h.method(), Arc::new(h));
+    let h = channel::Recv;
+    m.insert(h.method(), Arc::new(h));
+    let h = channel::List;
+    m.insert(h.method(), Arc::new(h));
+    let h = channel::Purge;
     m.insert(h.method(), Arc::new(h));
 
     if enabled {
