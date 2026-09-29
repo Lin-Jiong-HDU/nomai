@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params};
 
 use nomai_core::{
-    ChunkService, Clock, ContentStore, ConversationService, CoreError, EntryService, EventService,
+    ChannelService, ChunkService, Clock, ContentStore, ConversationService, CoreError,
+    EntryService, EventService,
     LinkService, MemoryPolicy, MemorySignalsService, SystemClock, chunk_model::DimReconciliation,
 };
 use nomai_providers::{
@@ -74,6 +75,7 @@ pub struct Daemon {
     pub(crate) events: Arc<EventService>,
     pub(crate) chunks: Arc<ChunkService>,
     pub(crate) conversations: Arc<ConversationService>,
+    pub(crate) channels: Arc<ChannelService>,
     // Readers land in feedback/search/lifecycle handlers in later tasks.
     #[allow(dead_code)]
     pub(crate) memory: Arc<MemorySignalsService>,
@@ -172,6 +174,7 @@ impl Daemon {
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
         let conversations = Arc::new(ConversationService::new(conn.clone())?);
+        let channels = Arc::new(ChannelService::new(conn.clone())?);
         let memory = Arc::new(MemorySignalsService::new(
             conn.clone(),
             config.memory.to_policy(),
@@ -267,6 +270,7 @@ impl Daemon {
             events,
             chunks,
             conversations,
+            channels,
             memory,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
@@ -324,6 +328,7 @@ impl Daemon {
         let chunks = Arc::new(ChunkService::new(conn3).unwrap());
         let conn4 = entries.conn_for_test();
         let conversations = Arc::new(ConversationService::new(conn4).unwrap());
+        let channels = Arc::new(ChannelService::new(entries.conn_for_test()).unwrap());
         let memory = Arc::new(
             MemorySignalsService::new(
                 entries.conn_for_test(),
@@ -361,6 +366,7 @@ impl Daemon {
             events,
             chunks,
             conversations,
+            channels,
             memory,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
@@ -414,6 +420,11 @@ impl Daemon {
     #[allow(dead_code)]
     pub fn conversations(&self) -> &Arc<ConversationService> {
         &self.conversations
+    }
+
+    #[allow(dead_code)]
+    pub fn channels(&self) -> &Arc<ChannelService> {
+        &self.channels
     }
     /// Access the cached embedding provider. Trait methods (`embed`, `dim`,
     /// `name`) delegate transparently to the inner provider; the concrete
@@ -516,6 +527,7 @@ impl Daemon {
         let events = Arc::new(EventService::new(conn.clone())?);
         let chunks = Arc::new(ChunkService::new(conn.clone())?);
         let conversations = Arc::new(ConversationService::new(conn.clone())?);
+        let channels = Arc::new(ChannelService::new(conn.clone())?);
         chunks.ensure_vec_chunk_embeddings(embedding_dim)?;
         let memory = Arc::new(MemorySignalsService::new(
             conn.clone(),
@@ -538,6 +550,7 @@ impl Daemon {
             events,
             chunks,
             conversations,
+            channels,
             memory,
             cache,
             search_cache: Arc::new(crate::search_cache::SearchCache::new()),
@@ -1603,6 +1616,23 @@ mod tests {
         assert!(elapsed >= std::time::Duration::from_millis(80));
         assert!(elapsed < std::time::Duration::from_secs(2));
         let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn daemon_exposes_a_channel_service() {
+        let daemon = null_daemon().await;
+        // The service must be usable straight off the daemon.
+        let msg = daemon
+            .channels()
+            .send(nomai_core::SendMessage {
+                channel: "smoke".into(),
+                text: "hello".into(),
+                sender: None,
+                attrs: None,
+            })
+            .unwrap();
+        assert_eq!(msg.seq, 1);
+        assert_eq!(msg.channel, "smoke");
     }
 
     #[test]

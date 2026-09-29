@@ -161,6 +161,13 @@ pub mod conversation {
     pub const SEARCH: &str = "conversation.search";
 }
 
+pub mod channel {
+    pub const SEND: &str = "channel.send";
+    pub const RECV: &str = "channel.recv";
+    pub const LIST: &str = "channel.list";
+    pub const PURGE: &str = "channel.purge";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
