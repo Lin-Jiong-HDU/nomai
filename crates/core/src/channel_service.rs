@@ -289,7 +289,12 @@ fn read_cursor(conn: &Connection, channel: &str, subscriber: &str) -> Result<i64
     Ok(v.unwrap_or(0))
 }
 
-/// Advance the subscriber's position. Only ever moves forward.
+/// Advance the subscriber's position.
+///
+/// Monotonicity is enforced in SQL rather than merely asserted here: a
+/// caller passing a lower value cannot rewind the cursor. A rewound cursor
+/// re-delivers at best, and skips messages at worst when interleaved with a
+/// purge — so the guarantee belongs in the function, not in its callers.
 fn write_cursor(
     conn: &Connection,
     channel: &str,
@@ -300,7 +305,7 @@ fn write_cursor(
         "INSERT INTO channel_cursors (channel, subscriber, last_seq, updated_at)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(channel, subscriber) DO UPDATE SET
-             last_seq = excluded.last_seq,
+             last_seq = MAX(last_seq, excluded.last_seq),
              updated_at = excluded.updated_at",
         params![channel, subscriber, last_seq, Utc::now().to_rfc3339()],
     )?;
@@ -760,5 +765,64 @@ mod tests {
         all.sort_unstable();
         all.dedup();
         assert_eq!(all.len(), 200, "seq must be unique across writers");
+    }
+
+    /// `write_cursor` must never move a cursor backwards. Its current sole
+    /// caller happens to pass an increasing value, but the guarantee has to
+    /// live in the function: a rewound cursor re-delivers at best, and skips
+    /// messages at worst when interleaved with a purge.
+    #[test]
+    fn write_cursor_never_rewinds() {
+        let s = svc();
+        for i in 1..=5 {
+            send(&s, "c", &format!("m{i}"));
+        }
+        recv(&s, "c", Some("b"), None, 50); // cursor at 5
+
+        {
+            let conn = s.conn.lock().unwrap();
+            write_cursor(&conn, "c", "b", 2).unwrap();
+        }
+
+        let r = recv(&s, "c", Some("b"), None, 50);
+        assert!(
+            r.items.is_empty(),
+            "cursor rewound and re-delivered: {:?}",
+            r.items
+        );
+        assert_eq!(r.cursor, 5);
+    }
+
+    /// Paging contract: a subscriber whose `limit` truncates the batch drains
+    /// the channel across repeated calls. `cursor < latest` is the signal that
+    /// more remain — a caller that stops after one truncated batch strands
+    /// the rest, so this pins the drain-in-order behavior the docs promise.
+    #[test]
+    fn subscriber_paging_drains_the_channel() {
+        let s = svc();
+        for i in 1..=5 {
+            send(&s, "c", &format!("m{i}"));
+        }
+
+        let first = recv(&s, "c", Some("b"), None, 2);
+        assert_eq!(first.items.len(), 2);
+        assert_eq!(first.items[0].text, "m1");
+        assert_eq!(first.cursor, 2);
+        assert!(first.cursor < first.latest, "more remain");
+
+        let second = recv(&s, "c", Some("b"), None, 2);
+        assert_eq!(second.items.len(), 2);
+        assert_eq!(second.items[0].text, "m3");
+        assert_eq!(second.cursor, 4);
+        assert!(second.cursor < second.latest);
+
+        let third = recv(&s, "c", Some("b"), None, 2);
+        assert_eq!(third.items.len(), 1);
+        assert_eq!(third.items[0].text, "m5");
+        assert_eq!(third.cursor, 5);
+        assert_eq!(third.cursor, third.latest, "drained");
+
+        let fourth = recv(&s, "c", Some("b"), None, 2);
+        assert!(fourth.items.is_empty());
     }
 }

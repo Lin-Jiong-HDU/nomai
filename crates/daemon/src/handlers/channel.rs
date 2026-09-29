@@ -85,7 +85,7 @@ impl RpcHandler for Recv {
         "channel.recv"
     }
     fn description(&self) -> &'static str {
-        "Read messages from a channel. Pass subscriber to read from (and advance) a server-side cursor — use this so a new session does not re-read everything. Pass since for a one-off history read that writes no cursor. Pass neither to get the most recent messages. Returns items ascending, plus latest (channel max seq) and cursor (position after this read)."
+        "Read messages from a channel. Pass subscriber to read from (and advance) a server-side cursor — use this so a new session does not re-read everything. Pass since for a one-off history read that writes no cursor. Pass neither to get the most recent messages. Returns items ascending, plus latest (channel max seq) and cursor (position after this read). If the batch filled limit, more messages may remain: call again until items is empty or cursor equals latest, otherwise the unread remainder is stranded."
     }
     fn input_schema(&self) -> Option<Value> {
         Some(json!({

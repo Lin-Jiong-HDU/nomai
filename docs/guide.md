@@ -408,8 +408,10 @@ channel.recv { "channel": "handoff", "subscriber": "agent-b" }
 Because the read cursor is kept server-side, B picks up precisely the unread
 messages even in a brand-new session — you never have to restate what A
 wrote. A channel is an append-only log, not a queue: nothing is consumed, so
-several subscribers each get their own view of the same history. See
-[channel.\*](#channel-methods) for the full parameter list.
+several subscribers each get their own view of the same history. Give each
+session its own `subscriber` name — the name is a shared read position, so
+two sessions using the same one steal each other's messages. See
+[channel.\*](reference.md#channel-methods) for the full parameter list.
 
 **Keep the substance in an entry.** Channels are not indexed and never
 embedded, so put the material worth keeping in an entry and let the message

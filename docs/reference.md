@@ -141,12 +141,27 @@ neither it returns the most recent `limit` messages. `limit` is 1..=200
 (default 50); items come back ascending. Passing `subscriber` and `since`
 together is a `Validation` error rather than a silent precedence rule.
 
+**Page until drained.** If a batch fills `limit`, more messages remain —
+`cursor < latest` is the signal. Call again until `items` is empty or
+`cursor == latest`. Stopping after one truncated batch strands the unread
+remainder, because the cursor has already advanced past what was returned.
+
+**`cursor` is only meaningful in `subscriber` mode.** It is the position
+after that read. In `since` and tail modes it is informational; a caller
+using `since` should keep its own bound rather than echoing `cursor` back,
+which on an empty result is `0`.
+
 Reading advances the cursor, so delivery is at-most-once. History is always
 re-readable (use `since`, or omit both), so nothing is lost — it just is not
 replayed automatically.
 
 **Names.** `channel`, `sender` and `subscriber` are 1..=128 bytes and are
 not normalized: `"handoff"` and `"Handoff"` are different channels.
+
+**`subscriber` is a shared read position, not an identity.** Two sessions
+that pass the same `subscriber` name share one cursor and steal each other's
+messages — whichever reads first advances it for both. Each session must use
+a distinct name (e.g. `agent-a`, `agent-b`).
 
 **No identity.** `sender` is a self-declared label, not a route. The daemon
 cannot distinguish agent sessions, so the channel name is the only address.
