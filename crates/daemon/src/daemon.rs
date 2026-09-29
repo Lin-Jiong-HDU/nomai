@@ -1653,6 +1653,66 @@ mod tests {
         }
     }
 
+    /// is_mutating() only has one observable consequence: whether dispatch
+    /// takes sync_lock. Hold the lock and prove channel.send still runs —
+    /// this pins the deliberate `false` in handlers/channel.rs.
+    #[tokio::test]
+    async fn channel_send_does_not_take_sync_lock() {
+        let daemon = Arc::new(null_daemon().await);
+
+        let guard = daemon.sync_lock.clone().lock_owned().await;
+        let d = daemon.clone();
+        let send = tokio::spawn(async move {
+            d.dispatch(nomai_protocol::Request {
+                jsonrpc: nomai_protocol::JSONRPC_VERSION.into(),
+                id: Some(nomai_protocol::Id::Number(1)),
+                method: "channel.send".into(),
+                params: Some(serde_json::json!({
+                    "channel": "lock-test",
+                    "text": "must not block"
+                })),
+            })
+            .await
+        });
+
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(3), send)
+            .await
+            .expect("channel.send blocked on sync_lock — is_mutating() regressed to true")
+            .expect("join");
+        assert!(resp.result.is_some(), "channel.send failed: {resp:?}");
+        drop(guard);
+    }
+
+    /// The counterpart: a genuinely mutating handler MUST block while
+    /// sync_lock is held. Guards against the test above passing simply
+    /// because the lock was never wired up.
+    #[tokio::test]
+    async fn entry_create_does_take_sync_lock() {
+        let daemon = Arc::new(null_daemon().await);
+        let guard = daemon.sync_lock.clone().lock_owned().await;
+
+        let d = daemon.clone();
+        let call = tokio::spawn(async move {
+            d.dispatch(nomai_protocol::Request {
+                jsonrpc: nomai_protocol::JSONRPC_VERSION.into(),
+                id: Some(nomai_protocol::Id::Number(1)),
+                method: "entry.create".into(),
+                params: Some(serde_json::json!({
+                    "title": "lock probe",
+                    "blocks": [{"type": "note", "text": "x"}]
+                })),
+            })
+            .await
+        });
+
+        let early = tokio::time::timeout(std::time::Duration::from_millis(300), call).await;
+        assert!(
+            early.is_err(),
+            "entry.create returned while sync_lock was held — the lock is not wired up"
+        );
+        drop(guard);
+    }
+
     #[test]
     fn expand_db_path_creates_parent_dir() {
         let tmp = tempfile::tempdir().unwrap();
