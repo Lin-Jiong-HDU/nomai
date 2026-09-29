@@ -1645,6 +1645,7 @@ mod tests {
             "channel.recv",
             "channel.list",
             "channel.purge",
+            "channel.unsubscribe",
         ] {
             assert!(
                 daemon.handlers.contains_key(method),

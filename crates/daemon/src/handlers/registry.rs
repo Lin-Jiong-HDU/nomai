@@ -164,6 +164,8 @@ pub fn registry_with_benchmark(enabled: bool) -> HashMap<&'static str, Arc<dyn R
     m.insert(h.method(), Arc::new(h));
     let h = channel::Purge;
     m.insert(h.method(), Arc::new(h));
+    let h = channel::Unsubscribe;
+    m.insert(h.method(), Arc::new(h));
 
     if enabled {
         let h = benchmark::Start;

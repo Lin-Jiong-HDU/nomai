@@ -222,6 +222,25 @@ impl ChannelService {
         )?;
         Ok(deleted as u64)
     }
+
+    // ── Unsubscribe ─────────────────────────────────────────────────
+
+    /// Delete a subscriber's cursor row, ending the subscription.
+    ///
+    /// This is an *explicit* reset, not the implicit rewind that
+    /// `write_cursor` forbids: the caller is deliberately discarding its
+    /// position, so the next read replaying from the start is the expected
+    /// semantics rather than an invariant violation.
+    pub fn unsubscribe(&self, channel: &str, subscriber: &str) -> Result<u64, CoreError> {
+        let channel = validate_name("channel", channel)?;
+        let subscriber = validate_name("subscriber", subscriber)?;
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute(
+            "DELETE FROM channel_cursors WHERE channel = ?1 AND subscriber = ?2",
+            params![channel, subscriber],
+        )?;
+        Ok(deleted as u64)
+    }
 }
 
 /// `seq` values greater than `from`, ascending, capped at `limit`.
@@ -295,6 +314,11 @@ fn read_cursor(conn: &Connection, channel: &str, subscriber: &str) -> Result<i64
 /// caller passing a lower value cannot rewind the cursor. A rewound cursor
 /// re-delivers at best, and skips messages at worst when interleaved with a
 /// purge — so the guarantee belongs in the function, not in its callers.
+///
+/// Scope: the cursor is monotonic **within one subscription's lifetime**.
+/// `unsubscribe` ends that lifetime explicitly; the read that follows starts
+/// a fresh one from 0. An explicit reset is not the implicit rewind this
+/// function forbids.
 fn write_cursor(
     conn: &Connection,
     channel: &str,
@@ -338,6 +362,7 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel_model::CHANNEL_NAME_MAX;
     use serde_json::json;
 
     fn svc() -> ChannelService {
@@ -824,5 +849,113 @@ mod tests {
 
         let fourth = recv(&s, "c", Some("b"), None, 2);
         assert!(fourth.items.is_empty());
+    }
+
+    /// The core semantic: after unsubscribing, the same name replays from the
+    /// beginning. This is the escape hatch the design originally lacked.
+    #[test]
+    fn unsubscribe_resets_the_cursor_so_the_next_read_replays() {
+        let s = svc();
+        for i in 1..=3 {
+            send(&s, "c", &format!("m{i}"));
+        }
+        assert_eq!(recv(&s, "c", Some("b"), None, 50).items.len(), 3);
+        assert!(
+            recv(&s, "c", Some("b"), None, 50).items.is_empty(),
+            "caught up"
+        );
+
+        assert_eq!(s.unsubscribe("c", "b").unwrap(), 1);
+
+        let replayed = recv(&s, "c", Some("b"), None, 50);
+        assert_eq!(replayed.items.len(), 3, "must replay from the start");
+        assert_eq!(replayed.items[0].text, "m1");
+        assert_eq!(replayed.cursor, 3);
+    }
+
+    #[test]
+    fn unsubscribe_only_affects_its_own_subscriber() {
+        let s = svc();
+        for i in 1..=3 {
+            send(&s, "c", &format!("m{i}"));
+        }
+        recv(&s, "c", Some("a"), None, 50);
+        recv(&s, "c", Some("b"), None, 50);
+
+        s.unsubscribe("c", "a").unwrap();
+
+        assert!(
+            recv(&s, "c", Some("b"), None, 50).items.is_empty(),
+            "b must be unaffected"
+        );
+        assert_eq!(
+            recv(&s, "c", Some("a"), None, 50).items.len(),
+            3,
+            "a must replay"
+        );
+    }
+
+    #[test]
+    fn unsubscribe_is_idempotent_for_unknown_subscriptions() {
+        let s = svc();
+        assert_eq!(s.unsubscribe("c", "never-read").unwrap(), 0);
+        send(&s, "c", "one");
+        recv(&s, "c", Some("b"), None, 50);
+        assert_eq!(s.unsubscribe("c", "b").unwrap(), 1);
+        assert_eq!(s.unsubscribe("c", "b").unwrap(), 0, "already gone");
+        // Unknown channel is a no-op too, not an error.
+        assert_eq!(s.unsubscribe("nope", "b").unwrap(), 0);
+    }
+
+    #[test]
+    fn unsubscribe_validates_names() {
+        let s = svc();
+        assert!(matches!(
+            s.unsubscribe("", "b"),
+            Err(CoreError::Validation(_))
+        ));
+        assert!(matches!(
+            s.unsubscribe("c", ""),
+            Err(CoreError::Validation(_))
+        ));
+        let long = "a".repeat(CHANNEL_NAME_MAX + 1);
+        assert!(matches!(
+            s.unsubscribe(&long, "b"),
+            Err(CoreError::Validation(_))
+        ));
+    }
+
+    /// Distinguishes the two things this feature originally conflated: an
+    /// IMPLICIT rewind must stay impossible, while an EXPLICIT reset is
+    /// allowed and is exactly what the caller asked for.
+    #[test]
+    fn explicit_reset_is_allowed_but_implicit_rewind_is_not() {
+        let s = svc();
+        for i in 1..=5 {
+            send(&s, "c", &format!("m{i}"));
+        }
+        recv(&s, "c", Some("b"), None, 50); // cursor at 5
+
+        // Implicit rewind stays impossible — write_cursor refuses to go back.
+        {
+            let conn = s.conn.lock().unwrap();
+            write_cursor(&conn, "c", "b", 2).unwrap();
+        }
+        assert_eq!(recv(&s, "c", Some("b"), None, 50).cursor, 5);
+
+        // Explicit reset is allowed, and is observable as "never read".
+        assert_eq!(s.unsubscribe("c", "b").unwrap(), 1);
+        {
+            let conn = s.conn.lock().unwrap();
+            assert_eq!(
+                read_cursor(&conn, "c", "b").unwrap(),
+                0,
+                "row gone → behaves as never read"
+            );
+        }
+        // The next read replays everything and lands back at 5.
+        let r = recv(&s, "c", Some("b"), None, 50);
+        assert_eq!(r.items.len(), 5);
+        assert_eq!(r.cursor, 5);
     }
 }

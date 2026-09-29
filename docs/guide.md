@@ -410,8 +410,12 @@ messages even in a brand-new session — you never have to restate what A
 wrote. A channel is an append-only log, not a queue: nothing is consumed, so
 several subscribers each get their own view of the same history. Give each
 session its own `subscriber` name — the name is a shared read position, so
-two sessions using the same one steal each other's messages. See
-[channel.\*](reference.md#channel-methods) for the full parameter list.
+two sessions using the same one steal each other's messages. Pick that name
+deliberately: a cursor lives until you clear it, and **reusing an old name
+silently skips whatever it already read**. `channel.unsubscribe` forgets one
+subscription and is the only way to do it — there is no way to forget them
+all at once. See [channel.\*](reference.md#channel-methods) for the full
+parameter list.
 
 **Keep the substance in an entry.** Channels are not indexed and never
 embedded, so put the material worth keeping in an entry and let the message
